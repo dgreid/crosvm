@@ -6,6 +6,8 @@
 
 mod cmos;
 mod serial;
+mod bus;
 
 pub use self::cmos::Cmos;
 pub use self::serial::Serial;
+pub use self::bus::{Bus, BusDevice};
