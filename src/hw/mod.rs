@@ -7,7 +7,9 @@
 mod cmos;
 mod serial;
 mod bus;
+mod proxy;
 
 pub use self::cmos::Cmos;
 pub use self::serial::Serial;
 pub use self::bus::{Bus, BusDevice};
+pub use self::proxy::ProxyDevice;
