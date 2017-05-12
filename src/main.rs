@@ -6,21 +6,26 @@
 
 extern crate clap;
 extern crate libc;
+extern crate io_jail;
 extern crate kvm;
 extern crate x86_64;
 extern crate kernel_loader;
 extern crate byteorder;
+extern crate syscall_defines;
 extern crate sys_util;
 
 use std::io::{stdin, stdout};
 use std::thread::spawn;
 use std::ffi::{CString, CStr};
 use std::fs::File;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::Path;
 use std::string::String;
 use std::sync::{Arc, Mutex};
 
 use clap::{Arg, App};
 
+use io_jail::Minijail;
 use kvm::*;
 use sys_util::{GuestAddress, GuestMemory, EventFd, Terminal, poll, Pollable};
 
@@ -28,10 +33,13 @@ pub mod hw;
 pub mod kernel_cmdline;
 
 enum Error {
-    Disk(std::io::Error),
+    BlockDeviceJail(io_jail::Error),
+    BlockDevicePivotRoot(io_jail::Error),
     Cmdline(kernel_cmdline::Error),
+    Disk(std::io::Error),
+    ProxyDeviceCreation(std::io::Error),
+    Sys(sys_util::Error),
     VcpuExit(String),
-    Sys(sys_util::Error)
 }
 
 impl std::convert::From<sys_util::Error> for Error {
@@ -61,6 +69,26 @@ const KERNEL_START_OFFSET: usize = 0x200000;
 const CMDLINE_OFFSET: usize = 0x20000;
 const CMDLINE_MAX_SIZE: usize = KERNEL_START_OFFSET - CMDLINE_OFFSET;
 
+fn create_block_device_jail() -> Result<Minijail> {
+    // All child jails run in a new user namespace without any users mapped,
+    // they run as nobody unless otherwise configured.
+    let mut j = Minijail::new().map_err(|e| Error::BlockDeviceJail(e))?;
+    // Don't need any capabilities.
+    j.use_caps(0);
+    // Create a new mount namespace with an empty root FS.
+    j.namespace_vfs();
+    j.enter_pivot_root(Path::new("/run/asdf"))
+        .map_err(|e| Error::BlockDevicePivotRoot(e))?;
+    // Run in an empty network namespace.
+    j.namespace_net();
+    // Apply the block device seccomp policy.
+    j.no_new_privs();
+    j.parse_seccomp_filters(Path::new("block_device.policy"))
+        .map_err(|e| Error::BlockDeviceJail(e))?;
+    j.use_seccomp_filter();
+    Ok(j)
+}
+
 fn run_config(cfg: Config) -> Result<()> {
     let mem_size = cfg.memory.unwrap_or(256) << 20;
     let guest_mem = GuestMemory::new(&x86_64::arch_memory_regions(mem_size)).expect("new mmap failed");
@@ -77,21 +105,37 @@ fn run_config(cfg: Config) -> Result<()> {
     let mut irq: u32 = 5;
 
     if let Some(ref disk_path) = cfg.disk_path {
+        // List of FDs to keep open in the child after it forks.
+        let mut keep_fds: Vec<RawFd> = Vec::new();
+
         let disk_image = File::open(disk_path).map_err(|e| Error::Disk(e))?;
+        keep_fds.push(disk_image.as_raw_fd());
 
         let block_box = Box::new(hw::virtio::Block::new(disk_image).map_err(|e| Error::Disk(e))?);
         let block_mmio = hw::virtio::MmioDevice::new(guest_mem.clone(), block_box)?;
         for (i, queue_evt) in block_mmio.queue_evts().iter().enumerate() {
             let io_addr = IoeventAddress::Mmio(mmio_base + hw::virtio::NOITFY_REG_OFFSET as u64);
             vm_requests.push(VmRequest::RegisterIoevent(queue_evt.try_clone()?, io_addr, i as u32));
+            keep_fds.push(queue_evt.as_raw_fd());
         }
 
         if let Some(interrupt_evt) = block_mmio.interrupt_evt() {
             vm_requests.push(VmRequest::RegisterIrqfd(interrupt_evt.try_clone()?, irq));
+            keep_fds.push(interrupt_evt.as_raw_fd());
         }
 
         if cfg.multiprocess {
-            bus.insert(Arc::new(Mutex::new(hw::ProxyDevice::new(block_mmio).unwrap())), mmio_base, mmio_len);
+            let jail = create_block_device_jail()?;
+            let proxy_dev = hw::ProxyDevice::new(block_mmio, move |keep_pipe| {
+                keep_fds.push(keep_pipe.as_raw_fd());
+                // Need to panic here as there isn't a way to recover from a
+                // partly-jailed process.
+                unsafe {
+                    // This is OK as we have whitelisted all the FDs we need open.
+                    jail.enter(Some(&keep_fds)).unwrap();
+                }
+            }).map_err(|e| Error::ProxyDeviceCreation(e))?;
+            bus.insert(Arc::new(Mutex::new(proxy_dev)), mmio_base, mmio_len);
         } else {
             bus.insert(Arc::new(Mutex::new(block_mmio)), mmio_base, mmio_len);
         }
@@ -316,10 +360,15 @@ fn main() {
         Ok(_) => {},
         Err(e) => {
             match e {
-                Error::Disk(e) => println!("failed to load disk image: {}", e),
+                Error::BlockDeviceJail(e) => println!("failed to jail block device: {:?}", e),
+                Error::BlockDevicePivotRoot(e) => {
+                    println!("failed to pivot root block device: {:?}", e)
+                }
                 Error::Cmdline(e) => println!("the given kernel command line was invalid: {}", e),
-                Error::VcpuExit(s) => println!("unexpected vcpu exit reason: {}", s),
+                Error::Disk(e) => println!("failed to load disk image: {}", e),
+                Error::ProxyDeviceCreation(e) => println!("failed to create proxy device: {}", e),
                 Error::Sys(e) => println!("error with system call: {:?}", e),
+                Error::VcpuExit(s) => println!("unexpected vcpu exit reason: {}", s),
             };
         }
     }
