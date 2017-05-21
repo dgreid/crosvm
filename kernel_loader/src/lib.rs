@@ -25,6 +25,7 @@ pub enum Error {
     InvalidElfMagicNumber,
     InvalidProgramHeaderSize,
     InvalidProgramHeaderOffset,
+    InvalidProgramHeaderAddress,
     ReadElfHeader,
     ReadKernelImage,
     ReadProgramHeader,
@@ -87,7 +88,8 @@ pub fn load_kernel<F>(guest_mem: &GuestMemory, kernel_start: GuestAddress, kerne
         kernel_image.seek(SeekFrom::Start(phdr.p_offset))
             .map_err(|_| Error::SeekKernelStart)?;
 
-        let mem_offset = kernel_start + phdr.p_paddr as usize;
+        let mem_offset = kernel_start.checked_add(phdr.p_paddr as usize)
+            .ok_or(Error::InvalidProgramHeaderAddress)?;
         guest_mem.read_to_memory(mem_offset, kernel_image, phdr.p_filesz as usize)
             .map_err(|_| Error::ReadKernelImage)?;
     }
@@ -108,9 +110,10 @@ pub fn load_cmdline(guest_mem: &GuestMemory, guest_addr: GuestAddress, cmdline: 
         return Ok(());
     }
 
-    let end = guest_addr + len + 1; // Extra for null termination.
+    let end = guest_addr.checked_add(len + 1)
+        .ok_or(Error::CommandLineOverflow)?; // Extra for null termination.
     if end > guest_mem.end_addr() {
-        return Err(Error::CommandLineOverflow);
+        return Err(Error::CommandLineOverflow)?;
     }
 
     guest_mem.write_slice_at_addr(cmdline.to_bytes_with_nul(), guest_addr)
@@ -142,20 +145,24 @@ mod test {
     #[test]
     fn cmdline_write_end() {
         let gm = create_guest_mem();
-        let cmdline_address = GuestAddress::new(45);
+        let mut cmdline_address = GuestAddress::new(45);
         assert_eq!(Ok(()),
                    load_cmdline(&gm,
                                 cmdline_address,
                                 CStr::from_bytes_with_nul(b"1234\0").unwrap()));
-        let val: u8 = unsafe { gm.read_obj_from_addr(cmdline_address).unwrap() };
+        let val: u8 = gm.read_obj_from_addr(cmdline_address).unwrap();
         assert_eq!(val, '1' as u8);
-        let val: u8 = unsafe { gm.read_obj_from_addr(cmdline_address + 1).unwrap() };
+        cmdline_address = cmdline_address.unchecked_add(1);
+        let val: u8 = gm.read_obj_from_addr(cmdline_address).unwrap();
         assert_eq!(val, '2' as u8);
-        let val: u8 = unsafe { gm.read_obj_from_addr(cmdline_address + 2).unwrap() };
+        cmdline_address = cmdline_address.unchecked_add(1);
+        let val: u8 = gm.read_obj_from_addr(cmdline_address).unwrap();
         assert_eq!(val, '3' as u8);
-        let val: u8 = unsafe { gm.read_obj_from_addr(cmdline_address + 3).unwrap() };
+        cmdline_address = cmdline_address.unchecked_add(1);
+        let val: u8 = gm.read_obj_from_addr(cmdline_address).unwrap();
         assert_eq!(val, '4' as u8);
-        let val: u8 = unsafe { gm.read_obj_from_addr(cmdline_address + 4).unwrap() };
+        cmdline_address = cmdline_address.unchecked_add(1);
+        let val: u8 = gm.read_obj_from_addr(cmdline_address).unwrap();
         assert_eq!(val, '\0' as u8);
     }
 

@@ -173,7 +173,10 @@ const BOOT_GDT_MAX: usize = 4;
 fn write_gdt_table(table: &[u64], guest_mem: &GuestMemory) -> Result<()> {
     let boot_gdt_addr = GuestAddress::new(BOOT_GDT_OFFSET);
     for (index, entry) in table.iter().enumerate() {
-        guest_mem.write_obj_at_addr(*entry, boot_gdt_addr + index * mem::size_of::<u64>())
+        let addr = guest_mem
+            .checked_offset(boot_gdt_addr, index *mem::size_of::<u64>())
+            .ok_or(Error::WriteGDTFailure)?;
+        guest_mem.write_obj_at_addr(*entry, addr)
             .map_err(|_| Error::WriteGDTFailure)?;
     }
     Ok(())

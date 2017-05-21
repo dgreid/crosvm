@@ -34,6 +34,8 @@ use sys_util::{GuestAddress, GuestMemory};
 pub enum Error {
     /// Error configuring the VCPU.
     CpuSetup(cpuid::Error),
+    /// The kernel extends past the end of RAM
+    KernelOffsetPastEnd,
     /// Error configuring the VCPU registers.
     RegisterConfiguration(regs::Error),
     /// Error configuring the VCPU floating point registers.
@@ -96,8 +98,10 @@ pub fn configure_vcpu(guest_mem: &GuestMemory,
                       -> Result<()> {
     cpuid::setup_cpuid(&kvm, &vcpu, 0, num_cpus as u64).map_err(|e| Error::CpuSetup(e))?;
     regs::setup_msrs(&vcpu).map_err(|e| Error::RegisterConfiguration(e))?;
+    let kernel_end = guest_mem.checked_offset(kernel_load_addr, KERNEL_64BIT_ENTRY_OFFSET)
+        .ok_or(Error::KernelOffsetPastEnd)?;
     regs::setup_regs(&vcpu,
-                     (kernel_load_addr + KERNEL_64BIT_ENTRY_OFFSET).offset() as u64,
+                     (kernel_end).offset() as u64,
                      BOOT_STACK_POINTER as u64,
                      ZERO_PAGE_OFFSET as u64).map_err(|e| Error::RegisterConfiguration(e))?;
     regs::setup_fpu(&vcpu).map_err(|e| Error::FpuRegisterConfiguration(e))?;
@@ -158,10 +162,9 @@ pub fn configure_system(guest_mem: &GuestMemory,
     }
 
     let zero_page_addr = GuestAddress::new(ZERO_PAGE_OFFSET);
-    let zero_page_end = zero_page_addr + mem::size_of::<boot_params>();
-    if !guest_mem.address_in_range(zero_page_end) {
-        return Err(Error::ZeroPagePastRamEnd);
-    }
+    guest_mem
+        .checked_offset(zero_page_addr, mem::size_of::<boot_params>())
+        .ok_or(Error::ZeroPagePastRamEnd)?;
     guest_mem.write_obj_at_addr(params, zero_page_addr)
         .map_err(|_| Error::ZeroPageSetup)?;
 

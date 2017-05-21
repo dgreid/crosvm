@@ -67,7 +67,7 @@ fn test_run() {
     assert_eq!(out, "9\n");
     let result: u8 =
         vm.get_memory()
-            .read_obj_from_addr(load_addr + 0xf1)
+            .read_obj_from_addr(load_addr.checked_add(0xf1).unwrap())
             .expect("Error reading the result.");
     assert_eq!(result, 0x13);
 }

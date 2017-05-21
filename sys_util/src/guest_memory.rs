@@ -33,7 +33,7 @@ pub struct GuestMemory {
 }
 
 impl GuestMemory {
-    /// Creates the container for guest memory regions.
+    /// Creates a container for guest memory regions.
     /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
     pub fn new(ranges: &[(GuestAddress, usize)]) -> Result<GuestMemory> {
         if ranges.is_empty() {
@@ -43,7 +43,8 @@ impl GuestMemory {
         let mut regions = Vec::<MemoryRegion>::new();
         for range in ranges.iter() {
             if let Some(last) = regions.last() {
-                if range.0 < last.guest_base + last.mapping.size() {
+		if last.guest_base.checked_add(last.mapping.size()).map_or(true,
+			|a| a > range.0) {
                     return Err(Error::MemoryRegionOverlap);
                 }
             }
@@ -67,7 +68,7 @@ impl GuestMemory {
     /// # fn test_end_addr() -> Result<(), ()> {
     ///     let start_addr = GuestAddress::new(0x1000);
     ///     let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
-    ///     assert_eq!(start_addr + 0x400, gm.end_addr());
+    ///     assert_eq!(start_addr.checked_add(0x400), Some(gm.end_addr()));
     ///     Ok(())
     /// # }
     pub fn end_addr(&self) -> GuestAddress {
@@ -75,12 +76,18 @@ impl GuestMemory {
             .iter()
             .max_by_key(|region| region.guest_base)
             .map_or(GuestAddress::new(0),
-                    |region| region.guest_base + region.mapping.size())
+                    |region| region.guest_base.unchecked_add(region.mapping.size()))
     }
 
     /// Returns true if the given address is within the memory range available to the guest.
     pub fn address_in_range(&self, addr: GuestAddress) -> bool {
         addr < self.end_addr()
+    }
+
+    /// Returns the address plus the offset if it is in range.
+    pub fn checked_offset(&self, addr: GuestAddress, offset: usize) -> Option<GuestAddress> {
+        addr.checked_add(offset)
+            .and_then(|a| { if a < self.end_addr() { Some(a) } else { None } })
     }
 
     /// Returns the size of the memory region in bytes.
@@ -201,7 +208,8 @@ impl GuestMemory {
     ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
     ///       let addr = GuestAddress::new(0x1010);
     ///       gm.read_to_memory(addr, &mut file, 128).map_err(|_| ())?;
-    ///       let rand_val: u32 = gm.read_obj_from_addr(addr + 8).map_err(|_| ())?;
+    ///       let read_addr = addr.checked_add(8).ok_or(())?;
+    ///       let rand_val: u32 = gm.read_obj_from_addr(read_addr).map_err(|_| ())?;
     /// #     Ok(rand_val)
     /// # }
     /// ```
@@ -262,7 +270,7 @@ impl GuestMemory {
     {
         for region in self.regions.iter() {
             if guest_addr >= region.guest_base &&
-               guest_addr < (region.guest_base + region.mapping.size()) {
+               guest_addr < (region.guest_base.unchecked_add(region.mapping.size())) {
                 return cb(&region.mapping, guest_addr.offset_from(region.guest_base));
             }
         }

@@ -5,7 +5,7 @@
 //! Represents an address in the guest's memory space.
 
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
-use std::ops::{Add, Sub, BitAnd, BitOr};
+use std::ops::{Sub, BitAnd, BitOr};
 
 /// Represents an Address in the guest's memory.
 #[derive(Clone, Copy, Debug)]
@@ -42,25 +42,15 @@ impl GuestAddress {
         self.0.checked_add(other).map(GuestAddress)
     }
 
+    /// Returns the result of the base address + the size.
+    /// Only use this when `offset` is guaranteed not to overflow.
+    pub fn unchecked_add(&self, offset: usize) -> GuestAddress {
+        GuestAddress(self.0 + offset)
+    }
+
     /// Returns the bitwise and of the address with the given mask.
     pub fn mask(&self, mask: u64) -> GuestAddress {
         GuestAddress(self.0 & mask as usize)
-    }
-}
-
-impl Add for GuestAddress {
-    type Output = GuestAddress;
-
-    fn add(self, other: GuestAddress) -> GuestAddress {
-        GuestAddress(self.0 + other.0)
-    }
-}
-
-impl Add<usize> for GuestAddress {
-    type Output = GuestAddress;
-
-    fn add(self, other: usize) -> GuestAddress {
-        GuestAddress(self.0 + other)
     }
 }
 
@@ -143,9 +133,9 @@ mod tests {
     fn add_sub() {
         let a = GuestAddress::new(0x50);
         let b = GuestAddress::new(0x60);
-        assert_eq!(GuestAddress::new(0xb0), a + b);
+        assert_eq!(Some(GuestAddress::new(0xb0)), a.checked_add(0x60));
         assert_eq!(GuestAddress::new(0x10), b - a);
-        assert_eq!(a, a + b - b);
+        assert_eq!(a, a.checked_add(0x60).unwrap() - b);
     }
 
     #[test]
