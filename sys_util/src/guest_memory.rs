@@ -43,13 +43,15 @@ impl GuestMemory {
         let mut regions = Vec::<MemoryRegion>::new();
         for range in ranges.iter() {
             if let Some(last) = regions.last() {
-		if last.guest_base.checked_add(last.mapping.size()).map_or(true,
-			|a| a > range.0) {
+                if last.guest_base
+                       .checked_add(last.mapping.size())
+                       .map_or(true, |a| a > range.0) {
                     return Err(Error::MemoryRegionOverlap);
                 }
             }
 
-            let mapping = MemoryMapping::new(range.1).map_err(|_| Error::MemoryMappingFailed)?;
+            let mapping = MemoryMapping::new(range.1)
+                .map_err(|_| Error::MemoryMappingFailed)?;
             regions.push(MemoryRegion {
                              mapping: mapping,
                              guest_base: range.0,
@@ -87,7 +89,7 @@ impl GuestMemory {
     /// Returns the address plus the offset if it is in range.
     pub fn checked_offset(&self, addr: GuestAddress, offset: usize) -> Option<GuestAddress> {
         addr.checked_add(offset)
-            .and_then(|a| { if a < self.end_addr() { Some(a) } else { None } })
+            .and_then(|a| if a < self.end_addr() { Some(a) } else { None })
     }
 
     /// Returns the size of the memory region in bytes.
