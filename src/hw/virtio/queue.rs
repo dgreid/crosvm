@@ -12,6 +12,13 @@ const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 #[allow(dead_code)]
 const VIRTQ_DESC_F_INDIRECT: u16 = 0x4;
 
+#[derive(Clone, Debug)]
+pub enum Error {
+    RequestOutOfBounds,
+    SectorOutOfBounds,
+}
+pub type Result<T> = result::Result<T, Error>;
+
 /// A virtio descriptor chain.
 pub struct DescriptorChain<'a> {
     mem: &'a GuestMemory,
@@ -46,12 +53,18 @@ impl<'a> DescriptorChain<'a> {
             return None;
         }
 
-        let desc_head = desc_table + (index as usize) * 16;
+        let desc_head = match mem.checked_offset(desc_table, (index as usize) * 16) {
+            Some(a) => a,
+            None => return None,
+        };
         // These reads can't fail unless Guest memory is hopelessly broken.
         let addr = GuestAddress::new(mem.read_obj_from_addr::<u64>(desc_head).unwrap() as usize);
-        let len: u32 = mem.read_obj_from_addr(desc_head + 8).unwrap();
-        let flags: u16 = mem.read_obj_from_addr(desc_head + 12).unwrap();
-        let next: u16 = mem.read_obj_from_addr(desc_head + 14).unwrap();
+        if mem.checked_offset(desc_head, 16).is_none() {
+            return None;
+        }
+        let len: u32 = mem.read_obj_from_addr(desc_head.unchecked_add(8)).unwrap();
+        let flags: u16 = mem.read_obj_from_addr(desc_head.unchecked_add(12)).unwrap();
+        let next: u16 = mem.read_obj_from_addr(desc_head.unchecked_add(14)).unwrap();
         let chain = DescriptorChain {
             mem: mem,
             desc_table: desc_table,
@@ -112,17 +125,19 @@ impl<'a> DescriptorChain<'a> {
     }
 
     /// Returns the type of the request.
-    pub fn request_type(&self) -> result::Result<u32, ()> { // TODO(dgreid) error value
+    pub fn request_type(&self) -> Result<u32> {
         // Reading a u32 is OK because you can't end up with an invalid u32.
         self.mem.read_obj_from_addr(self.addr)
-            .map_err(|_| ())
+            .map_err(|_| Error::RequestOutOfBounds)
     }
 
     /// Returns the sector from the request.
-    pub fn sector(&self) -> result::Result<u64, ()> { // TODO(dgreid) error value
+    pub fn sector(&self) -> Result<u64> {
         const SECTOR_OFFSET: usize = 8;
-        self.mem.read_obj_from_addr(self.addr + SECTOR_OFFSET)
-            .map_err(|_| ())
+        let addr = self.mem.checked_offset(self.addr, SECTOR_OFFSET)
+            .ok_or(Error::SectorOutOfBounds)?;
+        self.mem.read_obj_from_addr(addr)
+            .map_err(|_| Error::SectorOutOfBounds)
     }
 }
 
@@ -145,9 +160,13 @@ impl<'a, 'b> Iterator for AvailIter<'a, 'b> {
             return None;
         }
 
-        // This index is checked below in checked_newh
-        let desc_index: u16 = self.mem.read_obj_from_addr(self.avail_ring + 4 + self.next_index * 2)
-                .unwrap();
+        let avail_addr =
+            match self.mem.checked_offset(self.avail_ring, 4 + self.next_index * 2) {
+                Some(a) => a,
+                None => return None,
+            };
+        // This index is checked below in checked_new
+        let desc_index: u16 = self.mem.read_obj_from_addr(avail_addr).unwrap();
 
         self.next_index += 1;
         self.next_index %= self.queue_size;
@@ -266,8 +285,9 @@ impl Queue {
         let queue_size = self.actual_size();
         let avail_ring = self.avail_ring;
 
+        let index_addr = mem.checked_offset(avail_ring, 2).unwrap();
         // Note that last_index has no invalid values
-        let last_index: u16 = mem.read_obj_from_addr::<u16>(avail_ring + 2).unwrap() % queue_size;
+        let last_index: u16 = mem.read_obj_from_addr::<u16>(index_addr).unwrap() % queue_size;
         AvailIter {
             mem: mem,
             desc_table: self.desc_table,
@@ -290,13 +310,13 @@ impl Queue {
 
         let used_ring = self.used_ring;
         let next_used = (self.next_used % self.actual_size()) as usize;
-        let used_elem = used_ring + 4 + next_used * 8;
+        let used_elem = used_ring.unchecked_add(4 + next_used * 8);
 
         // TODO(dgreid) handle write errors.
         mem.write_obj_at_addr(desc_index as u32, used_elem).unwrap();
-        mem.write_obj_at_addr(len as u32, used_elem + 4).unwrap();
+        mem.write_obj_at_addr(len as u32, used_elem.unchecked_add(4)).unwrap();
 
         self.next_used = self.next_used.wrapping_add(1);
-        mem.write_obj_at_addr(self.next_used as u16, used_ring + 2).unwrap();
+        mem.write_obj_at_addr(self.next_used as u16, used_ring.unchecked_add(2)).unwrap();
     }
 }
