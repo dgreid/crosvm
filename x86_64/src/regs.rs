@@ -111,8 +111,8 @@ pub fn setup_msrs(vcpu: &kvm::Vcpu) -> Result<()> {
     }
     msrs.nmsrs = entry_vec.len() as u32;
 
-    vcpu.set_msrs(&msrs)
-        .map_err(|e| Error::MsrIoctlFailed(e))?;
+    vcpu.set_msrs(msrs)
+        .map_err(Error::MsrIoctlFailed)?;
 
     Ok(())
 }
@@ -130,7 +130,7 @@ pub fn setup_fpu(vcpu: &kvm::Vcpu) -> Result<()> {
     };
 
     vcpu.set_fpu(&fpu)
-        .map_err(|e| Error::FpuIoctlFailed(e))?;
+        .map_err(Error::FpuIoctlFailed)?;
 
     Ok(())
 }
@@ -154,7 +154,7 @@ pub fn setup_regs(vcpu: &kvm::Vcpu, boot_ip: u64, boot_sp: u64, boot_si: u64) ->
     };
 
     vcpu.set_regs(&regs)
-        .map_err(|e| Error::SettingRegistersIoctl(e))?;
+        .map_err(Error::SettingRegistersIoctl)?;
 
     Ok(())
 }
@@ -248,13 +248,13 @@ fn setup_page_tables(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Result<()> {
 /// * `vcpu_fd` - The FD returned from the KVM_CREATE_VCPU ioctl.
 pub fn setup_sregs(mem: &GuestMemory, vcpu: &kvm::Vcpu) -> Result<()> {
     let mut sregs: kvm_sregs = vcpu.get_sregs()
-        .map_err(|e| Error::SRegsIoctlFailed(e))?;
+        .map_err(Error::SRegsIoctlFailed)?;
 
     configure_segments_and_sregs(mem, &mut sregs)?;
     setup_page_tables(mem, &mut sregs)?; // TODO(dgreid) - Can this be done once per system instead?
 
     vcpu.set_sregs(&sregs)
-        .map_err(|e| Error::SRegsIoctlFailed(e))?;
+        .map_err(Error::SRegsIoctlFailed)?;
 
     Ok(())
 }
