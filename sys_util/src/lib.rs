@@ -15,6 +15,7 @@ mod guest_memory;
 mod poll;
 mod struct_util;
 mod tempdir;
+mod terminal;
 
 pub use mmap::*;
 pub use eventfd::*;
@@ -25,5 +26,6 @@ pub use guest_memory::*;
 pub use poll::*;
 pub use struct_util::*;
 pub use tempdir::*;
+pub use terminal::*;
 
 pub use guest_memory::Error as GuestMemoryError;
