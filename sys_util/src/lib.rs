@@ -6,6 +6,7 @@
 
 extern crate data_model;
 extern crate libc;
+extern crate syscall_defines;
 
 mod mmap;
 mod eventfd;
@@ -17,6 +18,7 @@ mod struct_util;
 mod tempdir;
 mod terminal;
 mod signal;
+mod fork;
 
 pub use mmap::*;
 pub use eventfd::*;
@@ -29,5 +31,6 @@ pub use struct_util::*;
 pub use tempdir::*;
 pub use terminal::*;
 pub use signal::*;
+pub use fork::*;
 
 pub use guest_memory::Error as GuestMemoryError;
