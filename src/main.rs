@@ -11,7 +11,6 @@ extern crate kvm;
 extern crate x86_64;
 extern crate kernel_loader;
 extern crate byteorder;
-extern crate syscall_defines;
 extern crate sys_util;
 
 use std::ffi::{CString, CStr};
