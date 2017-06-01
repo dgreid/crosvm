@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{stdin, stdout};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::{Arc, Mutex, Barrier};
 use std::thread::{spawn, JoinHandle};
@@ -27,7 +27,7 @@ use clap::{Arg, App, SubCommand};
 
 use io_jail::Minijail;
 use kvm::*;
-use sys_util::{GuestAddress, GuestMemory, EventFd, Terminal, Poller, Pollable,
+use sys_util::{GuestAddress, GuestMemory, EventFd, TempDir, Terminal, Poller, Pollable,
                register_signal_handler, Killable};
 
 pub mod hw;
@@ -118,7 +118,7 @@ const KERNEL_START_OFFSET: usize = 0x200000;
 const CMDLINE_OFFSET: usize = 0x20000;
 const CMDLINE_MAX_SIZE: usize = KERNEL_START_OFFSET - CMDLINE_OFFSET;
 
-fn create_block_device_jail() -> Result<Minijail> {
+fn create_block_device_jail(root: &Path) -> Result<Minijail> {
     // All child jails run in a new user namespace without any users mapped,
     // they run as nobody unless otherwise configured.
     let mut j = Minijail::new().map_err(|e| Error::BlockDeviceJail(e))?;
@@ -126,7 +126,7 @@ fn create_block_device_jail() -> Result<Minijail> {
     j.use_caps(0);
     // Create a new mount namespace with an empty root FS.
     j.namespace_vfs();
-    j.enter_pivot_root(Path::new("/run/asdf"))
+    j.enter_pivot_root(root)
         .map_err(|e| Error::BlockDevicePivotRoot(e))?;
     // Run in an empty network namespace.
     j.namespace_net();
@@ -163,6 +163,9 @@ fn run_config(cfg: Config) -> Result<()> {
     let mut mmio_base: u64 = 0xd0000000;
     let mut irq: u32 = 5;
 
+    let block_root = TempDir::new(&PathBuf::from("/tmp/block_root"))?;
+    let block_root_path = block_root.as_path().unwrap(); // Won't fail if new succeeded.
+
     if let Some(ref disk_path) = cfg.disk_path {
         // List of FDs to keep open in the child after it forks.
         let mut keep_fds: Vec<RawFd> = Vec::new();
@@ -185,7 +188,7 @@ fn run_config(cfg: Config) -> Result<()> {
         }
 
         if cfg.multiprocess {
-            let jail = create_block_device_jail()?;
+            let jail = create_block_device_jail(block_root_path)?;
             let proxy_dev = hw::ProxyDevice::new(block_mmio, move |keep_pipe| {
                 keep_fds.push(keep_pipe.as_raw_fd());
                 // Need to panic here as there isn't a way to recover from a
