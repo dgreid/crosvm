@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::result;
 use std::sync::Arc;
 
+use data_model::DataInit;
 use guest_address::GuestAddress;
 use mmap::MemoryMapping;
 
@@ -160,7 +161,7 @@ impl GuestMemory {
     /// #     Ok(num1 + num2)
     /// # }
     /// ```
-    pub fn read_obj_from_addr<T: Copy>(&self, guest_addr: GuestAddress) -> Result<T> {
+    pub fn read_obj_from_addr<T: DataInit>(&self, guest_addr: GuestAddress) -> Result<T> {
         self.do_in_region(guest_addr, |mapping, offset| {
             mapping
                 .read_obj(offset)

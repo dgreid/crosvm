@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 extern crate byteorder;
+extern crate data_model;
 extern crate kvm;
 extern crate kvm_sys;
 extern crate libc;
@@ -22,6 +23,10 @@ mod msr_index;
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
 mod mpspec;
+// mpc_table is only data, reading it from data is a safe initialization.
+unsafe impl data_model::DataInit for mpspec::mpc_table {}
+// mpf_intel is only data, reading it from data is a safe initialization.
+unsafe impl data_model::DataInit for mpspec::mpf_intel {}
 
 mod cpuid;
 mod gdt;
