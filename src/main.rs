@@ -12,11 +12,15 @@ extern crate x86_64;
 extern crate kernel_loader;
 extern crate byteorder;
 extern crate sys_util;
+extern crate net_util;
+extern crate vhost;
+extern crate virtio_sys;
 
 use std::ffi::{CString, CStr};
 use std::fmt;
 use std::fs::File;
 use std::io::{stdin, stdout};
+use std::net;
 use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::{Arc, Mutex, Barrier};
@@ -40,9 +44,13 @@ use control_socket::*;
 enum Error {
     Socket(std::io::Error),
     Disk(std::io::Error),
+    Net(hw::virtio::NetError),
+    MacAddressNeedsNetConfig,
+    NetMissingConfig,
     DeviceJail(io_jail::Error),
     DevicePivotRoot(io_jail::Error),
     RegisterBlock(device_manager::Error),
+    RegisterNet(device_manager::Error),
     Cmdline(kernel_cmdline::Error),
     RegisterIoevent(sys_util::Error),
     RegisterIrqfd(sys_util::Error),
@@ -78,11 +86,15 @@ impl fmt::Display for Error {
         match self {
             &Error::Socket(ref e) => write!(f, "failed to create socket: {}", e),
             &Error::Disk(ref e) => write!(f, "failed to load disk image: {}", e),
+            &Error::Net(ref e) => write!(f, "failed to set up networking: {:?}", e),
+            &Error::MacAddressNeedsNetConfig => write!(f, "MAC address can only be specified when host IP and netmask are provided"),
+            &Error::NetMissingConfig => write!(f, "networking requires both host IP and netmask specified"),
             &Error::DeviceJail(ref e) => write!(f, "failed to jail device: {:?}", e),
             &Error::DevicePivotRoot(ref e) => {
                 write!(f, "failed to pivot root device: {:?}", e)
             }
             &Error::RegisterBlock(ref e) => write!(f, "error registering block device: {:?}", e),
+            &Error::RegisterNet(ref e) => write!(f, "error registering net device: {:?}", e),
             &Error::Cmdline(ref e) => write!(f, "the given kernel command line was invalid: {}", e),
             &Error::RegisterIoevent(ref e) => write!(f, "error registering ioevent: {:?}", e),
             &Error::RegisterIrqfd(ref e) => write!(f, "error registering irqfd: {:?}", e),
@@ -108,6 +120,9 @@ struct Config {
     socket_path: Option<String>,
     multiprocess: bool,
     warn_unknown_ports: bool,
+    host_ip: Option<net::Ipv4Addr>,
+    netmask: Option<net::Ipv4Addr>,
+    mac_address: Option<String>,
 }
 
 const KERNEL_START_OFFSET: usize = 0x200000;
@@ -135,6 +150,15 @@ fn create_base_minijail(root: &Path, sepolicy: &Path) -> Result<Minijail> {
 }
 
 fn run_config(cfg: Config) -> Result<()> {
+    if cfg.mac_address.is_some() &&
+       (cfg.netmask.is_none() || cfg.host_ip.is_none()) {
+        return Err(Error::MacAddressNeedsNetConfig);
+    }
+
+    if cfg.netmask.is_some() != cfg.host_ip.is_some() {
+        return Err(Error::NetMissingConfig);
+    }
+
     let socket = if let Some(ref socket_path) = cfg.socket_path {
         Some(ControlSocketRecv::new(socket_path)
                  .map_err(|e| Error::Socket(e))?)
@@ -173,6 +197,25 @@ fn run_config(cfg: Config) -> Result<()> {
             .map_err(Error::Cmdline)?;
 
         device_manager.register_mmio(block_box, jail, &mut cmdline).map_err(Error::RegisterBlock)?;
+    }
+
+    // We checked above that if the IP is defined, then the netmask is, too.
+    if let Some(host_ip) = cfg.host_ip {
+        if let Some(netmask) = cfg.netmask {
+            let net_box = Box::new(hw::virtio::Net::new(host_ip, netmask)
+                                   .map_err(|e| Error::Net(e))?);
+
+            let net_root = TempDir::new(&PathBuf::from("/tmp/net_root"))?;
+            let net_root_path = net_root.as_path().unwrap(); // Won't fail if new succeeded.
+            let jail = if cfg.multiprocess {
+                Some(create_base_minijail(net_root_path, Path::new("net_device.policy"))?)
+            }
+            else {
+                None
+            };
+
+            device_manager.register_mmio(net_box, jail, &mut cmdline).map_err(Error::RegisterNet)?;
+        }
     }
 
     if let Some(params) = cfg.params {
@@ -494,6 +537,18 @@ fn main() {
                                  .short("u")
                                  .long("multiprocess")
                                  .help("run the devices in a child process"))
+                        .arg(Arg::with_name("host_ip")
+                                 .long("host_ip")
+                                 .value_name("HOST_IP")
+                                 .help("IP address to assign to host tap interface"))
+                        .arg(Arg::with_name("netmask")
+                                 .long("netmask")
+                                 .value_name("NETMASK")
+                                 .help("netmask for VM subnet"))
+                        .arg(Arg::with_name("mac")
+                                 .long("mac")
+                                 .value_name("MAC")
+                                 .help("mac address for VM"))
                         .arg(Arg::with_name("socket")
                                  .short("s")
                                  .long("socket")
@@ -532,6 +587,9 @@ fn main() {
                     .expect("Expected kernel image path to be valid"),
                 params: matches.value_of("params").map(|s| s.to_string()),
                 multiprocess: matches.is_present("multiprocess"),
+                host_ip: matches.value_of("host_ip").and_then(|v| v.parse().ok()),
+                netmask: matches.value_of("netmask").and_then(|v| v.parse().ok()),
+                mac_address: matches.value_of("mac").map(|s| s.to_string()),
                 socket_path: matches.value_of("socket").map(|s| s.to_string()),
                 warn_unknown_ports: matches.is_present("warn-unknown-ports"),
             };
