@@ -20,6 +20,7 @@ use super::{VirtioDevice, Queue, DescriptorChain, INTERRUPT_STATUS_USED_RING, TY
 const QUEUE_SIZE: u16 = 256;
 const QUEUE_SIZES: &'static [u16] = &[QUEUE_SIZE];
 const SECTOR_SHIFT: u8 = 9;
+const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -273,6 +274,12 @@ impl Block {
     /// The given file must be seekable and sizable.
     pub fn new(mut disk_image: File) -> SysResult<Block> {
         let disk_size = disk_image.seek(SeekFrom::End(0))? as u64;
+        if disk_size % SECTOR_SIZE != 0 {
+            println!("block: Disk size {} is not a multiple of sector size {}; \
+                         the remainder will not be visible to the guest.",
+                     disk_size,
+                     SECTOR_SIZE);
+        }
         Ok(Block {
                kill_evt: None,
                disk_size: disk_size,
@@ -310,9 +317,11 @@ impl VirtioDevice for Block {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        // We only support the first word of configuration space.
+        // We only support disk size, which uses the first two words of the configuration space.
+        // If the image is not a multiple of the sector size, the tail bits are not exposed.
         let v = match offset {
-            0 => ((self.disk_size + 0x511) >> SECTOR_SHIFT) as u32,
+            0 => (self.disk_size >> SECTOR_SHIFT) as u32,
+            4 => ((self.disk_size >> SECTOR_SHIFT) >> 32) as u32,
             _ => return,
         };
 
