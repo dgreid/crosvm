@@ -8,11 +8,13 @@ mod queue;
 mod mmio;
 mod block;
 mod net;
+mod rng;
 
 pub use self::queue::*;
 pub use self::mmio::*;
 pub use self::block::*;
 pub use self::net::*;
+pub use self::rng::*;
 
 const DEVICE_ACKNOWLEDGE: u32 = 0x01;
 const DEVICE_DRIVER: u32 = 0x02;
@@ -20,8 +22,10 @@ const DEVICE_DRIVER_OK: u32 = 0x04;
 const DEVICE_FEATURES_OK: u32 = 0x08;
 const DEVICE_FAILED: u32 = 0x80;
 
+// Types taken from linux/virtio_ids.h
 const TYPE_NET: u32 = 1;
 const TYPE_BLOCK: u32 = 2;
+const TYPE_RNG: u32 = 4;
 
 const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
 
