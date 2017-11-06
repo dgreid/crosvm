@@ -50,6 +50,7 @@ enum Error {
     OpenKernel(PathBuf, std::io::Error),
     Socket(std::io::Error),
     Disk(std::io::Error),
+    BalloonDeviceNew(devices::virtio::BalloonError),
     BlockDeviceNew(sys_util::Error),
     VhostNetDeviceNew(devices::virtio::vhost::Error),
     NetDeviceNew(devices::virtio::NetError),
@@ -57,6 +58,7 @@ enum Error {
     VhostVsockDeviceNew(devices::virtio::vhost::Error),
     DeviceJail(io_jail::Error),
     DevicePivotRoot(io_jail::Error),
+    RegisterBalloon(device_manager::Error),
     RegisterBlock(device_manager::Error),
     RegisterNet(device_manager::Error),
     RegisterWayland(device_manager::Error),
@@ -106,6 +108,7 @@ impl fmt::Display for Error {
             &Error::OpenKernel(ref p, ref e) => write!(f, "failed to open kernel image {:?}: {}", p, e),
             &Error::Socket(ref e) => write!(f, "failed to create socket: {}", e),
             &Error::Disk(ref e) => write!(f, "failed to load disk image: {}", e),
+            &Error::BalloonDeviceNew(ref e) => write!(f, "failed to create balloon: {:?}", e),
             &Error::BlockDeviceNew(ref e) => write!(f, "failed to create block device: {:?}", e),
             &Error::RegisterBlock(ref e) => write!(f, "error registering block device: {:?}", e),
             &Error::VhostNetDeviceNew(ref e) => write!(f, "failed to set up vhost networking: {:?}", e),
@@ -115,6 +118,9 @@ impl fmt::Display for Error {
             &Error::DeviceJail(ref e) => write!(f, "failed to jail device: {}", e),
             &Error::DevicePivotRoot(ref e) => write!(f, "failed to pivot root device: {}", e),
             &Error::VhostVsockDeviceNew(ref e) => write!(f, "failed to set up virtual socket device: {:?}", e),
+            &Error::RegisterBalloon(ref e) => {
+                write!(f, "error registering balloon device: {:?}", e)
+            },
             &Error::RegisterNet(ref e) => write!(f, "error registering net device: {:?}", e),
             &Error::RegisterRng(ref e) => write!(f, "error registering rng device: {:?}", e),
             &Error::RngDeviceNew(ref e) => write!(f, "failed to set up rng: {:?}", e),
@@ -335,6 +341,19 @@ fn run_config(cfg: Config) -> Result<()> {
     };
     device_manager.register_mmio(rng_box, rng_jail, &mut cmdline)
         .map_err(Error::RegisterRng)?;
+
+    let (_, balloon_device_socket) = UnixDatagram::pair().map_err(Error::Socket)?;
+    let balloon_box = Box::new(devices::virtio::Balloon::new(balloon_device_socket)
+                                   .map_err(Error::BalloonDeviceNew)?);
+    let balloon_jail = if cfg.multiprocess {
+        let balloon_root_path = Path::new("/var/empty");
+        let policy_path: PathBuf = cfg.seccomp_policy_dir.join("balloon_device.policy");
+        Some(create_base_minijail(balloon_root_path, &policy_path)?)
+    } else {
+        None
+    };
+    device_manager.register_mmio(balloon_box, balloon_jail, &mut cmdline)
+        .map_err(Error::RegisterBalloon)?;
 
     // We checked above that if the IP is defined, then the netmask is, too.
     if let Some(host_ip) = cfg.host_ip {
