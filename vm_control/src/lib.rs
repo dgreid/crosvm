@@ -65,6 +65,8 @@ impl AsRawFd for MaybeOwnedFd {
 ///
 /// Unless otherwise noted, each request should expect a `VmResponse::Ok` to be received on success.
 pub enum VmRequest {
+    /// Try to grow or shrink the VM's balloon.
+    BalloonAdjust(isize),
     /// Break the VM's run loop and exit.
     Exit,
     /// Register the given ioevent address along with given datamatch to trigger the `EventFd`.
@@ -81,6 +83,7 @@ pub enum VmRequest {
 const VM_REQUEST_TYPE_EXIT: u32 = 1;
 const VM_REQUEST_TYPE_REGISTER_MEMORY: u32 = 2;
 const VM_REQUEST_TYPE_UNREGISTER_MEMORY: u32 = 3;
+const VM_REQUEST_TYPE_BALLOON_ADJUST: u32 = 4;
 const VM_REQUEST_SIZE: usize = 16;
 
 #[repr(C)]
@@ -118,6 +121,9 @@ impl VmRequest {
                                              req.size.to_native() as usize))
             }
             VM_REQUEST_TYPE_UNREGISTER_MEMORY => Ok(VmRequest::UnregisterMemory(req.slot.into())),
+            VM_REQUEST_TYPE_BALLOON_ADJUST => {
+                Ok(VmRequest::BalloonAdjust(req.size.to_native() as isize))
+            },
             _ => Err(VmControlError::InvalidType),
         }
     }
@@ -142,6 +148,10 @@ impl VmRequest {
                 req.type_ = Le32::from(VM_REQUEST_TYPE_UNREGISTER_MEMORY);
                 req.slot = Le32::from(slot);
             }
+            &VmRequest::BalloonAdjust(size) => {
+                req.type_ = Le32::from(VM_REQUEST_TYPE_BALLOON_ADJUST);
+                req.size = Le64::from(size);
+            },
             _ => return Err(VmControlError::InvalidType),
         }
         let mut buf = [0; VM_REQUEST_SIZE];

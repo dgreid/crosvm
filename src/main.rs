@@ -334,7 +334,7 @@ fn run_config(cfg: Config) -> Result<()> {
     device_manager.register_mmio(rng_box, rng_jail, &mut cmdline)
         .map_err(Error::RegisterRng)?;
 
-    let (_, balloon_device_socket) = UnixDatagram::pair().map_err(Error::Socket)?;
+    let (balloon_host_socket, balloon_device_socket) = UnixDatagram::pair().map_err(Error::Socket)?;
     let balloon_box = Box::new(devices::virtio::Balloon::new(balloon_device_socket)
                                    .map_err(Error::BalloonDeviceNew)?);
     let balloon_jail = if cfg.multiprocess {
