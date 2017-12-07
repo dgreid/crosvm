@@ -342,13 +342,12 @@ fn run_config(cfg: Config) -> Result<()> {
     device_manager.register_mmio(rng_box, rng_jail, &mut cmdline)
         .map_err(Error::RegisterRng)?;
 
-    let (_, balloon_device_socket) = UnixDatagram::pair().map_err(Error::Socket)?;
+    let (balloon_host_socket, balloon_device_socket) = UnixDatagram::pair().map_err(Error::Socket)?;
     let balloon_box = Box::new(devices::virtio::Balloon::new(balloon_device_socket)
                                    .map_err(Error::BalloonDeviceNew)?);
     let balloon_jail = if cfg.multiprocess {
-        let balloon_root_path = Path::new("/var/empty");
         let policy_path: PathBuf = cfg.seccomp_policy_dir.join("balloon_device.policy");
-        Some(create_base_minijail(balloon_root_path, &policy_path)?)
+        Some(create_base_minijail(empty_root_path, &policy_path)?)
     } else {
         None
     };
@@ -477,7 +476,8 @@ fn run_config(cfg: Config) -> Result<()> {
             cfg.vcpu_count.unwrap_or(1),
             guest_mem,
             &device_manager.bus,
-            control_sockets)
+            control_sockets,
+            balloon_host_socket)
 }
 
 fn run_kvm(requests: Vec<VmRequest>,
@@ -486,7 +486,8 @@ fn run_kvm(requests: Vec<VmRequest>,
            vcpu_count: u32,
            guest_mem: GuestMemory,
            mmio_bus: &devices::Bus,
-           control_sockets: Vec<UnlinkUnixDatagram>)
+           control_sockets: Vec<UnlinkUnixDatagram>,
+           balloon_host_socket: UnixDatagram)
            -> Result<()> {
     let kvm = Kvm::new().map_err(Error::Kvm)?;
     let kernel_start_addr = GuestAddress(KERNEL_START_OFFSET);
@@ -504,7 +505,8 @@ fn run_kvm(requests: Vec<VmRequest>,
     let mut next_dev_pfn = BASE_DEV_MEMORY_PFN;
     for request in requests {
         let mut running = false;
-        if let VmResponse::Err(e) = request.execute(&mut vm, &mut next_dev_pfn, &mut running) {
+        if let VmResponse::Err(e) = request.execute(&mut vm, &mut next_dev_pfn,
+                                                    &mut running, &balloon_host_socket) {
             return Err(Error::Vm(e));
         }
         if !running {
@@ -663,7 +665,8 @@ fn run_kvm(requests: Vec<VmRequest>,
                 exit_evt,
                 sigchld_fd,
                 kill_signaled,
-                vcpu_handles)
+                vcpu_handles,
+                balloon_host_socket)
 }
 
 fn run_control(mut vm: Vm,
@@ -673,7 +676,8 @@ fn run_control(mut vm: Vm,
                exit_evt: EventFd,
                sigchld_fd: SignalFd,
                kill_signaled: Arc<AtomicBool>,
-               vcpu_handles: Vec<JoinHandle<()>>)
+               vcpu_handles: Vec<JoinHandle<()>>,
+               balloon_host_socket: UnixDatagram)
                -> Result<()> {
     const MAX_VM_FD_RECV: usize = 1;
 
@@ -755,7 +759,8 @@ fn run_control(mut vm: Vm,
                         Ok(request) => {
                             let mut running = true;
                             let response =
-                                request.execute(&mut vm, &mut next_dev_pfn, &mut running);
+                                request.execute(&mut vm, &mut next_dev_pfn,
+                                                &mut running, &balloon_host_socket);
                             if let Err(e) = response.send(&mut scm, socket.as_ref()) {
                                 error!("failed to send VmResponse: {:?}", e);
                             }
@@ -1066,6 +1071,36 @@ fn stop_vms(args: std::env::Args) {
     }
 }
 
+fn balloon_vms(mut args: std::env::Args) {
+    let mut scm = Scm::new(1);
+    if args.len() < 2 {
+        print_help("crosvm balloon", "PAGE_ADJUST VM_SOCKET...", &[]);
+        println!("Adjust the ballon size of the crosvm instance for each `VM_SOCKET` given.");
+    }
+    let num_pages: i32 = match args.nth(0).unwrap().parse::<i32>() {
+        Ok(n) => n,
+        Err(_) => {
+            error!("Failed to parse number of pages");
+            return;
+        },
+    };
+
+    for socket_path in args {
+        match UnixDatagram::unbound().and_then(|s| {
+                                                   s.connect(&socket_path)?;
+                                                   Ok(s)
+                                               }) {
+            Ok(s) => {
+                if let Err(e) = VmRequest::BalloonAdjust(num_pages).send(&mut scm, &s) {
+                    error!("failed to send balloon request to socket at '{}': {:?}",
+                           socket_path,
+                           e);
+                }
+            }
+            Err(e) => error!("failed to connect to socket at '{}': {}", socket_path, e),
+        }
+    }
+}
 
 fn print_usage() {
     print_help("crosvm", "[stop|run]", &[]);
@@ -1093,6 +1128,9 @@ fn main() {
         }
         Some("run") => {
             run_vm(args);
+        }
+        Some("balloon") => {
+            balloon_vms(args);
         }
         Some(c) => {
             println!("invalid subcommand: {:?}", c);

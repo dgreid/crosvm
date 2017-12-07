@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use sys_util::{self, EventFd, GuestAddress, GuestMemory, Pollable, Poller};
 
 use super::{VirtioDevice, Queue, DescriptorChain, INTERRUPT_STATUS_CONFIG_CHANGED,
@@ -162,7 +162,7 @@ impl Worker {
                             if count == 4 {
                                 let mut buf = &buf[0..];
                                 let increment: i32 =
-                                    buf.read_i32::<NativeEndian>().unwrap();
+                                    buf.read_i32::<LittleEndian>().unwrap();
                                 let num_pages =
                                     self.config.num_pages.load(Ordering::Relaxed) as i32;
                                 if increment < 0 &&
@@ -199,7 +199,7 @@ impl Balloon {
     pub fn new(command_socket: UnixDatagram) -> Result<Balloon> {
         Ok(Balloon {
                command_socket: Some(command_socket),
-                config: Arc::new(BalloonConfig {
+               config: Arc::new(BalloonConfig {
                     num_pages: AtomicUsize::new(0),
                     actual_pages: AtomicUsize::new(0),
                 }),
