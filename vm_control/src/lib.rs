@@ -66,7 +66,7 @@ impl AsRawFd for MaybeOwnedFd {
 /// Unless otherwise noted, each request should expect a `VmResponse::Ok` to be received on success.
 pub enum VmRequest {
     /// Try to grow or shrink the VM's balloon.
-    BalloonAdjust(isize),
+    BalloonAdjust(i64),
     /// Break the VM's run loop and exit.
     Exit,
     /// Register the given ioevent address along with given datamatch to trigger the `EventFd`.
@@ -122,7 +122,7 @@ impl VmRequest {
             }
             VM_REQUEST_TYPE_UNREGISTER_MEMORY => Ok(VmRequest::UnregisterMemory(req.slot.into())),
             VM_REQUEST_TYPE_BALLOON_ADJUST => {
-                Ok(VmRequest::BalloonAdjust(req.size.to_native() as isize))
+                Ok(VmRequest::BalloonAdjust(req.size.to_native() as i64))
             },
             _ => Err(VmControlError::InvalidType),
         }
@@ -150,7 +150,7 @@ impl VmRequest {
             }
             &VmRequest::BalloonAdjust(size) => {
                 req.type_ = Le32::from(VM_REQUEST_TYPE_BALLOON_ADJUST);
-                req.size = Le64::from(size);
+                req.size = Le64::from(size as u64);
             },
             _ => return Err(VmControlError::InvalidType),
         }
@@ -219,6 +219,9 @@ impl VmRequest {
                     Err(e) => VmResponse::Err(e),
                 }
             }
+            &VmRequest::BalloonAdjust(size) => {
+                VmResponse::Ok
+            },
         }
     }
 }
