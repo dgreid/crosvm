@@ -13,12 +13,18 @@ path = "../kernel_loader"
 git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
 
 [dependencies]
+byteorder = "*"
 libc = "*"
+qcow = { path = "../qcow" }
 sys_util = { path = "../sys_util" }
 
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "fuzz_qcow"
+path = "fuzzers/fuzz_qcow.rs"
 
 [[bin]]
 name = "fuzz_zimage"
