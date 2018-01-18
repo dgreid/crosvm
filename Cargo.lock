@@ -1,4 +1,9 @@
 [[package]]
+name = "bitflags"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "byteorder"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15,6 +20,7 @@ dependencies = [
  "kvm 0.1.0",
  "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
  "qcow 0.1.0",
+ "qcow_utils 0.1.0",
  "sys_util 0.1.0",
  "vm_control 0.1.0",
  "x86_64 0.1.0",
@@ -39,6 +45,20 @@ dependencies = [
  "virtio_sys 0.1.0",
  "vm_control 0.1.0",
 ]
+
+[[package]]
+name = "fuchsia-zircon"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fuchsia-zircon-sys 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "fuchsia-zircon-sys"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "gcc"
@@ -108,6 +128,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "qcow_utils"
+version = "0.1.0"
+dependencies = [
+ "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qcow 0.1.0",
+ "qcow_utils_test 0.1.0",
+]
+
+[[package]]
+name = "qcow_utils_test"
+version = "0.1.0"
+dependencies = [
+ "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qcow_utils 0.1.0",
+ "rand 0.3.20 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "rand"
+version = "0.3.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "fuchsia-zircon 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "sys_util"
 version = "0.1.0"
 dependencies = [
@@ -162,6 +209,10 @@ dependencies = [
 ]
 
 [metadata]
+"checksum bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)" = "b3c30d3802dfb7281680d6285f2ccdaa8c2d8fee41f93805dba5c4cf50dc23cf"
 "checksum byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ff81738b726f5d099632ceaffe7fb65b90212e8dce59d518729e7e8634032d3d"
+"checksum fuchsia-zircon 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)" = "2e9763c69ebaae630ba35f74888db465e49e259ba1bc0eda7d06f4a067615d82"
+"checksum fuchsia-zircon-sys 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)" = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 "checksum gcc 0.3.54 (registry+https://github.com/rust-lang/crates.io-index)" = "5e33ec290da0d127825013597dbdfc28bee4964690c7ce1166cbc2a7bd08b1bb"
 "checksum libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)" = "36fbc8a8929c632868295d0178dd8f63fc423fd7537ad0738372bd010b3ac9b0"
+"checksum rand 0.3.20 (registry+https://github.com/rust-lang/crates.io-index)" = "512870020642bb8c221bf68baa1b2573da814f6ccfe5c9699b1c303047abe9b1"
