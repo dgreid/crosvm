@@ -271,6 +271,7 @@ pub struct Block<T: DiskFile> {
     kill_evt: Option<EventFd>,
     disk_image: Option<T>,
     config_space: Vec<u8>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 fn build_config_space(disk_size: u64) -> Vec<u8> {
@@ -301,6 +302,7 @@ impl<T: DiskFile> Block<T> {
                kill_evt: None,
                disk_image: Some(disk_image),
                config_space: build_config_space(disk_size),
+               worker: None,
            })
     }
 }
@@ -310,6 +312,9 @@ impl<T: DiskFile> Drop for Block<T> {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
             let _ = kill_evt.write(1);
+            if let Some(worker) = self.worker.take() {
+                worker.join();
+            }
         }
     }
 }
@@ -379,10 +384,14 @@ impl<T: 'static + AsRawFd + DiskFile + Send> VirtioDevice for Block<T> {
                     worker.run(queue_evts.remove(0), kill_evt);
                 });
 
-            if let Err(e) = worker_result {
-                error!("failed to spawn virtio_blk worker: {}", e);
-                return;
+            match worker_result {
+                Err(e) => {
+                    error!("failed to spawn virtio_blk worker: {}", e);
+                    return;
+                }
+                Ok(c) => self.worker = Some(c)
             }
+
         }
     }
 }

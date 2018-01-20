@@ -14,6 +14,7 @@ git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
 
 [dependencies]
 byteorder = "*"
+devices = { path = "../devices" }
 libc = "*"
 qcow = { path = "../qcow" }
 sys_util = { path = "../sys_util" }
@@ -21,6 +22,10 @@ sys_util = { path = "../sys_util" }
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "fuzz_block"
+path = "fuzzers/fuzz_block.rs"
 
 [[bin]]
 name = "fuzz_qcow"
