@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std;
+use std::fs::OpenOptions;
+use std::fs::File;
 use std::cmp;
 use std::io::{self, Seek, SeekFrom, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -9,6 +12,8 @@ use std::result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+
+use byteorder::{LittleEndian, WriteBytesExt};
 
 use sys_util::Result as SysResult;
 use sys_util::{EventFd, GuestAddress, GuestMemory, GuestMemoryError, Poller};
@@ -108,9 +113,20 @@ struct Request {
     status_addr: GuestAddress,
 }
 
+fn write_desc(f: &mut File, desc: &DescriptorChain) {
+    warn!("block descriptor: {:x} {:x} {:x} {:x} {:x}",
+          desc.index, desc.addr.0, desc.len, desc.flags, desc.next);
+    f.seek(SeekFrom::Start(desc.index as u64 * 16)).unwrap();
+    f.write_u64::<LittleEndian>(desc.addr.0 as u64);
+    f.write_u32::<LittleEndian>(desc.len);
+    f.write_u16::<LittleEndian>(desc.flags);
+    f.write_u16::<LittleEndian>(desc.next);
+}
+
 impl Request {
     fn parse(avail_desc: &DescriptorChain,
-             mem: &GuestMemory)
+             mem: &GuestMemory,
+             corp_index: usize)
              -> result::Result<Request, ParseError> {
         // The head contains the request type which MUST be readable.
         if avail_desc.is_write_only() {
@@ -126,6 +142,22 @@ impl Request {
             .next_descriptor()
             .ok_or(ParseError::DescriptorChainTooShort)?;
 
+        {
+            let corp_path = format!("/tmp/block_corp/{}", corp_index);
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(corp_path)
+                .unwrap();
+            f.write_u64::<LittleEndian>(avail_desc.index as u64);
+            f.write_u64::<LittleEndian>(avail_desc.addr.0 as u64);
+            let mut desc_data = [0u8; 16];
+            mem.read_slice_at_addr(&mut desc_data, avail_desc.addr);
+            f.write(&desc_data);
+            write_desc(&mut f, avail_desc);
+            write_desc(&mut f, &data_desc);
+            write_desc(&mut f, &status_desc);
+        }
         if data_desc.is_write_only() && req_type == RequestType::Out {
             return Err(ParseError::UnexpectedWriteOnlyDescriptor);
         }
@@ -181,6 +213,7 @@ struct Worker<T: DiskFile> {
     disk_image: T,
     interrupt_status: Arc<AtomicUsize>,
     interrupt_evt: EventFd,
+    corp_index: usize,
 }
 
 impl<T: DiskFile> Worker<T> {
@@ -191,7 +224,7 @@ impl<T: DiskFile> Worker<T> {
         let mut used_count = 0;
         for avail_desc in queue.iter(&self.mem) {
             let len;
-            match Request::parse(&avail_desc, &self.mem) {
+            match Request::parse(&avail_desc, &self.mem, self.corp_index) {
                 Ok(request) => {
                     let status = match request.execute(&mut self.disk_image, &self.mem) {
                         Ok(l) => {
@@ -215,6 +248,7 @@ impl<T: DiskFile> Worker<T> {
                     len = 0;
                 }
             }
+            self.corp_index += 1;
             used_desc_heads[used_count] = (avail_desc.index, len);
             used_count += 1;
         }
@@ -380,6 +414,7 @@ impl<T: 'static + AsRawFd + DiskFile + Send> VirtioDevice for Block<T> {
                         disk_image: disk_image,
                         interrupt_status: status,
                         interrupt_evt: interrupt_evt,
+                        corp_index: 0,
                     };
                     worker.run(queue_evts.remove(0), kill_evt);
                 });
