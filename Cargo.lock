@@ -29,6 +29,7 @@ dependencies = [
  "net_util 0.1.0",
  "plugin_proto 0.5.0",
  "qcow 0.1.0",
+ "qcow_tests 0.1.0",
  "qcow_utils 0.1.0",
  "sys_util 0.1.0",
  "vhost 0.1.0",
@@ -194,6 +195,13 @@ dependencies = [
  "byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
  "sys_util 0.1.0",
+]
+
+[[package]]
+name = "qcow_tests"
+version = "0.1.0"
+dependencies = [
+ "qcow 0.1.0",
 ]
 
 [[package]]

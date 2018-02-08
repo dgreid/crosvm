@@ -8,6 +8,10 @@ extern crate libc;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::{EINVAL, ENOTSUP};
 
+use std::fs;
+use std::fs::OpenOptions;
+use std::path::Path;
+
 use std::cmp::min;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -30,6 +34,13 @@ pub enum Error {
     UnsupportedVersion(u32),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+enum ActionType {
+    Read(u64),
+    Write(u64),
+    Seek(u64),
+    Flush,
+}
 
 // QCOW magic constant that starts the header.
 const QCOW_MAGIC: u32 = 0x5146_49fb;
@@ -230,6 +241,7 @@ pub struct QcowFile {
     cluster_mask: u64,
     current_offset: u64,
     refcount_bits: u64,
+    action_index: u64,
     //TODO(dgreid) Add support for backing files. - backing_file: Option<Box<QcowFile<T>>>,
 }
 
@@ -283,6 +295,7 @@ impl QcowFile {
             cluster_mask: cluster_size - 1,
             current_offset: 0,
             refcount_bits: refcount_bits,
+            action_index: 0,
         };
 
         // Check that the L1 and refcount tables fit in a 64bit address space.
@@ -432,6 +445,33 @@ impl QcowFile {
         self.file.seek(SeekFrom::Start(refcount_address))?;
         self.file.write_u16::<BigEndian>(refcount)
     }
+
+    fn dump_action(&mut self, action: ActionType) {
+        let dump_path = format!("/tmp/qcow_acts/{:08}", self.action_index);
+        self.action_index += 1;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(dump_path)
+            .unwrap();
+        match action {
+            ActionType::Write(len) => {
+                f.write_u64::<BigEndian>(0);
+                f.write_u64::<BigEndian>(len);
+            }
+            ActionType::Flush => {
+                f.write_u64::<BigEndian>(1);
+            }
+            ActionType::Seek(offset) => {
+                f.write_u64::<BigEndian>(2);
+                f.write_u64::<BigEndian>(offset);
+            }
+            ActionType::Read(len) => {
+                f.write_u64::<BigEndian>(3);
+                f.write_u64::<BigEndian>(len);
+            }
+        };
+    }
 }
 
 impl AsRawFd for QcowFile {
@@ -444,6 +484,8 @@ impl Read for QcowFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let address: u64 = self.current_offset as u64;
         let read_count: usize = self.limit_range_file(address, buf.len());
+
+        self.dump_action(ActionType::Read(buf.len() as u64));
 
         let mut nread: usize = 0;
         while nread < read_count {
@@ -494,6 +536,7 @@ impl Seek for QcowFile {
 
         if let Some(o) = new_offset {
             if o <= self.virtual_size() {
+                self.dump_action(ActionType::Seek(o as u64));
                 self.current_offset = o;
                 return Ok(o);
             }
@@ -506,6 +549,8 @@ impl Write for QcowFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let address: u64 = self.current_offset as u64;
         let write_count: usize = self.limit_range_file(address, buf.len());
+
+        self.dump_action(ActionType::Write(buf.len() as u64));
 
         let mut nwritten: usize = 0;
         while nwritten < write_count {
@@ -528,7 +573,65 @@ impl Write for QcowFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        self.dump_action(ActionType::Flush);
         self.file.flush()
+    }
+}
+
+fn actions_from_directory(path: &Path) -> Vec<ActionType> {
+    let mut actions = Vec::new();
+
+    let mut paths: Vec<_> = fs::read_dir(path).unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    paths.sort_by_key(|dir| dir.path());
+    for act_ent in paths {
+        if !act_ent.path().is_file() {
+            continue;
+        }
+        let mut f = OpenOptions::new()
+            .read(true)
+            .open(&act_ent.path())
+            .unwrap();
+        match f.read_u64::<BigEndian>().unwrap() {
+            0 => actions.push(ActionType::Write(f.read_u64::<BigEndian>().unwrap())),
+            1 => actions.push(ActionType::Flush),
+            2 => actions.push(ActionType::Seek(f.read_u64::<BigEndian>().unwrap())),
+            3 => actions.push(ActionType::Read(f.read_u64::<BigEndian>().unwrap())),
+            _ => panic!("unknown action"),
+        }
+    }
+    actions
+}
+
+pub fn playback_actions(mut qcow: QcowFile, path: &Path) {
+    let actions = actions_from_directory(path);
+
+    println!("Playing back {} actions.", actions.len());
+
+    for (act_idx, action) in actions.iter().enumerate() {
+        match action {
+            &ActionType::Write(ref len) => {
+                let zero_vec = vec![0u8; *len as usize];
+                qcow.write(&zero_vec).unwrap();
+            }
+            &ActionType::Flush => {
+                qcow.flush();
+            }
+            &ActionType::Seek(ref offset) => {
+                qcow.seek(SeekFrom::Start(*offset)).unwrap();
+            }
+            &ActionType::Read(ref len) => {
+                let mut zero_vec = vec![0u8; *len as usize];
+                qcow.read(&mut zero_vec).unwrap();
+                for i in zero_vec {
+                    if i != 0 {
+                        println!("Read action {} failed at offset {}", act_idx, i);
+                        assert_eq!(i, 0);
+                    }
+                }
+            }
+        }
     }
 }
 

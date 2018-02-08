@@ -1,0 +1,11 @@
+[package]
+name = "qcow_tests"
+version = "0.1.0"
+authors = ["The Chromium OS Authors"]
+
+[[bin]]
+name = "replay"
+path = "src/replay.rs"
+
+[dependencies]
+qcow = { path = "../qcow" }
