@@ -61,6 +61,7 @@ sync = { path = "sync" }
 sys_util = "*"
 vhost = { path = "vhost" }
 vm_control = { path = "vm_control" }
+qcow_tests = { path = "qcow_tests" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { path = "x86_64" }
