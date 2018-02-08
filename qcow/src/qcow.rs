@@ -550,6 +550,9 @@ extern crate sys_util;
 
 #[cfg(test)]
 mod tests {
+    extern crate sha1;
+
+    use std::collections::HashMap;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
     use super::*;
@@ -775,13 +778,28 @@ mod tests {
                 Transfer {write: true, addr: 0xffff000},
             ];
 
+            let mut shas_map = HashMap::new();
+
             for xfer in xfers.iter() {
                 q.seek(SeekFrom::Start(xfer.addr)).expect("Failed to seek.");
                 if xfer.write {
+                    let mut sha = sha1::Sha1::new();
+                    sha.update(&b);
                     q.write(&b).expect("Failed to write.");
+                    shas_map.insert(xfer.addr, sha.digest());
                 } else {
                     let read_count: usize = q.read(&mut b).expect("Failed to read.");
                     assert_eq!(read_count, BUF_SIZE);
+                }
+            }
+
+            for xfer in xfers.iter() {
+                if xfer.write {
+                    let read_count: usize = q.read(&mut b).expect("Failed to read.");
+                    assert_eq!(read_count, BUF_SIZE);
+                    let mut read_sha = sha1::Sha1::new();
+                    read_sha.update(&b);
+                    assert_eq!(read_sha.digest(), shas_map[&xfer.addr]);
                 }
             }
         });

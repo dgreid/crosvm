@@ -180,6 +180,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha1 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "sys_util 0.1.0",
 ]
 
@@ -199,6 +200,11 @@ dependencies = [
  "fuchsia-zircon 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "sha1"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "sys_util"
@@ -275,4 +281,5 @@ dependencies = [
 "checksum protoc 1.4.3 (registry+https://github.com/rust-lang/crates.io-index)" = "5379c34ea2f9c69b99e6f25f6d0e6619876195ae7a3dcaf69f66bdb6c2e4dceb"
 "checksum protoc-rust 1.4.3 (registry+https://github.com/rust-lang/crates.io-index)" = "e211a7f56b2d020a59d483f652cfdfa6fd42e37bf544c0231e373807aa316c45"
 "checksum rand 0.3.20 (registry+https://github.com/rust-lang/crates.io-index)" = "512870020642bb8c221bf68baa1b2573da814f6ccfe5c9699b1c303047abe9b1"
+"checksum sha1 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)" = "171698ce4ec7cbb93babeb3190021b4d72e96ccb98e33d277ae4ea959d6f2d9e"
 "checksum tempdir 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)" = "87974a6f5c1dfb344d733055601650059a3363de2a6104819293baff662132d6"

@@ -11,4 +11,5 @@ byteorder = "*"
 libc = "*"
 
 [dev-dependencies]
+sha1 = "*"
 sys_util = { path = "../sys_util" }
