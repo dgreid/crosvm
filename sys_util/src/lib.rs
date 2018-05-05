@@ -59,8 +59,9 @@ pub use guest_memory::Error as GuestMemoryError;
 pub use signalfd::Error as SignalFdError;
 
 use std::ffi::CStr;
-use std::fs::File;
+use std::fs::{File, remove_file};
 use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::net::UnixDatagram;
 use std::ptr;
 
 use libc::{kill, syscall, sysconf, waitpid, pipe2, c_long, pid_t, uid_t, gid_t, _SC_PAGESIZE,
@@ -222,3 +223,23 @@ pub fn pipe(close_on_exec: bool) -> Result<(File, File)> {
         })
     }
 }
+
+/// Used to attempt to clean up a named pipe after it is no longer used.
+pub struct UnlinkUnixDatagram(pub UnixDatagram);
+impl AsRef<UnixDatagram> for UnlinkUnixDatagram {
+    fn as_ref(&self) -> &UnixDatagram {
+        &self.0
+    }
+}
+impl Drop for UnlinkUnixDatagram {
+    fn drop(&mut self) {
+        if let Ok(addr) = self.0.local_addr() {
+            if let Some(path) = addr.as_pathname() {
+                if let Err(e) = remove_file(path) {
+                    warn!("failed to remove control socket file: {:?}", e);
+                }
+            }
+        }
+    }
+}
+
