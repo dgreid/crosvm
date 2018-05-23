@@ -568,7 +568,10 @@ pub fn run_config(cfg: Config) -> Result<()> {
         info!("crosvm entering multiprocess mode");
     }
 
-    let pci_devices = devices::PciDeviceList::new();
+    let mut pci_devices = devices::PciDeviceList::new();
+    let ac97_dev = Box::new(devices::Ac97Dev::new()); // TODO unwrap
+    let ac97_jail = Minijail::new().unwrap(); // TODO unwrap
+    pci_devices.add_device(ac97_dev, ac97_jail);
 
     // Masking signals is inherently dangerous, since this can persist across clones/execs. Do this
     // before any jailed devices have been spawned, so that we can catch any of them that fail very

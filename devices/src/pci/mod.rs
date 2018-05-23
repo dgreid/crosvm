@@ -4,10 +4,12 @@
 
 //! Implements pci devices and busses.
 
+mod ac97;
 mod pci_configuration;
 mod pci_device;
 mod pci_root;
 
+pub use self::ac97::Ac97Dev;
 pub use self::pci_device::PciDevice;
 pub use self::pci_root::Error as PciRootError;
 pub use self::pci_root::{PciDeviceList, PciRoot};

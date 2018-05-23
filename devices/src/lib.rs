@@ -30,7 +30,7 @@ pub use self::bus::{Bus, BusDevice, BusRange};
 pub use self::cmos::Cmos;
 pub use self::pl030::Pl030;
 pub use self::i8042::I8042Device;
-pub use self::pci::{PciDevice, PciDeviceList, PciInterruptPin, PciRoot};
+pub use self::pci::{Ac97Dev, PciDevice, PciDeviceList, PciInterruptPin, PciRoot};
 pub use self::pci::PciRootError as PciRootError;
 pub use self::proxy::ProxyDevice;
 pub use self::proxy::Error as ProxyError;
