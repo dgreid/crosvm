@@ -10,6 +10,8 @@ mod pci_device;
 mod pci_root;
 
 pub use self::ac97::Ac97Dev;
+pub use self::pci_configuration::{PciClassCode, PciConfiguration, PciHeaderType, PciSubclass};
+pub use self::pci_device::Error as PciDeviceError;
 pub use self::pci_device::PciDevice;
 pub use self::pci_root::Error as PciRootError;
 pub use self::pci_root::{PciDeviceList, PciRoot};

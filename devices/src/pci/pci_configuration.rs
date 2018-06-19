@@ -263,7 +263,7 @@ impl PciConfiguration {
 
     /// Adds the capability `cap_data` to the list of capabilities.
     /// `cap_data` should include the three byte PCI capability header: type, next, length.
-    pub fn add_capability(&mut self, cap_type: u8, cap_data: &[u8]) -> Option<usize> {
+    pub fn add_capability(&mut self, cap_data: &[u8]) -> Option<usize> {
         // Check that the length is correct and that the next pointer is null.
         if *cap_data.get(2)? as usize != cap_data.len() || cap_data[1] != 0 {
             return None;
