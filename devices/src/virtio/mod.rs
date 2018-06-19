@@ -12,6 +12,7 @@ mod rng;
 mod net;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod virtio_device;
 mod wl;
 
 pub mod vhost;
@@ -24,6 +25,7 @@ pub use self::rng::*;
 pub use self::net::*;
 #[cfg(feature = "gpu")]
 pub use self::gpu::*;
+pub use self::virtio_device::*;
 pub use self::wl::*;
 
 const DEVICE_ACKNOWLEDGE: u32 = 0x01;
