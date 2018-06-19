@@ -7,11 +7,15 @@ use pci::PciInterruptPin;
 // The number of 32bit registers in the config space, 256 bytes.
 const NUM_CONFIGURATION_REGISTERS: usize = 64;
 
+const STATUS_REG: usize = 1;
+const STATUS_REG_CAPABILITIES_USED_MASK: u32 = 0x0000_0010;
 const BAR0_REG: usize = 4;
 const BAR_IO_ADDR_MASK: u32 = 0xffff_fffc;
 const BAR_IO_BIT: u32 = 0x0000_0001;
 const BAR_MEM_ADDR_MASK: u32 = 0xffff_fff0;
 const NUM_BAR_REGS: usize = 6;
+const CAPABILITY_LIST_HEAD_OFFSET: usize = 0x34;
+const FIRST_CAPABILITY_OFFSET: usize = 0x40;
 
 const INTERRUPT_LINE_PIN_REG: usize = 15;
 
@@ -123,6 +127,8 @@ pub struct PciConfiguration {
     registers: [u32; NUM_CONFIGURATION_REGISTERS],
     writable_bits: [u32; NUM_CONFIGURATION_REGISTERS], // writable bits for each register.
     num_bars: usize,
+    // Contains the byte offset and size of the last capability.
+    last_capability: Option<(usize, usize)>,
 }
 
 impl PciConfiguration {
@@ -145,6 +151,7 @@ impl PciConfiguration {
             registers,
             writable_bits: [0xffff_ffff; NUM_CONFIGURATION_REGISTERS],
             num_bars: 0,
+            last_capability: None,
         }
     }
 
@@ -252,5 +259,28 @@ impl PciConfiguration {
         self.registers[INTERRUPT_LINE_PIN_REG] = (self.registers[INTERRUPT_LINE_PIN_REG]
             & 0xffff_0000) | (pin_idx << 8)
             | u32::from(line);
+    }
+
+    /// Adds the capability `cap_data` to the list of capabilities.
+    /// `cap_data` should include the three byte PCI capability header: type, next, length.
+    pub fn add_capability(&mut self, cap_type: u8, cap_data: &[u8]) -> Option<usize> {
+        // Check that the length is correct and that the next pointer is null.
+        if *cap_data.get(2)? as usize != cap_data.len() || cap_data[1] != 0 {
+            return None;
+        }
+        let (cap_offset, list_tail)  = match self.last_capability {
+            Some((offset, len)) => (offset + len, offset + 1),
+            None => (FIRST_CAPABILITY_OFFSET, CAPABILITY_LIST_HEAD_OFFSET),
+        };
+        if cap_offset.checked_add(cap_data.len())? > 256 {
+            return None;
+        }
+        self.registers[STATUS_REG] |= STATUS_REG_CAPABILITIES_USED_MASK;
+        self.write_byte(list_tail, cap_offset as u8);
+        for (i, byte) in cap_data.iter().enumerate() {
+            self.write_byte(cap_offset + i, *byte);
+        }
+        self.last_capability = Some((cap_offset, cap_data.len()));
+        Some(cap_offset)
     }
 }
