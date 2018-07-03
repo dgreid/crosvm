@@ -4,7 +4,9 @@
 
 use address_allocator::AddressAllocator;
 use gpu_allocator::{self, GpuMemoryAllocator};
-use sys_util::pagesize;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use sys_util::{EventFd, pagesize};
 
 /// Manages allocating system resources such as address space and interrupt numbers.
 ///
@@ -28,7 +30,28 @@ pub struct SystemAllocator {
     mmio_address_space: AddressAllocator,
     gpu_allocator: Option<Box<GpuMemoryAllocator>>,
     next_irq: u32,
+    ioevents: HashSet<RegisteredIoEvent>,
 }
+
+struct RegisteredIoEvent {
+    addr: u64,
+    eventfd: EventFd,
+    data_match: Option<u32>,
+}
+
+impl Hash for RegisteredIoEvent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.addr.hash(state);
+        self.data_match.hash(state);
+    }
+}
+
+impl PartialEq for RegisteredIoEvent {
+    fn eq(&self, other: &RegisteredIoEvent) -> bool {
+        self.addr == other.addr && self.data_match == other.data_match
+    }
+}
+impl Eq for RegisteredIoEvent {}
 
 impl SystemAllocator {
     /// Creates a new `SystemAllocator` for managing addresses and irq numvers.
@@ -68,6 +91,7 @@ impl SystemAllocator {
                 None
             },
             next_irq: first_irq,
+            ioevents: HashSet::new(),
         })
     }
 
@@ -99,6 +123,27 @@ impl SystemAllocator {
     /// Gets an allocator to be used for GPU memory.
     pub fn gpu_memory_allocator(&self) -> Option<&GpuMemoryAllocator> {
         self.gpu_allocator.as_ref().map(|v| v.as_ref())
+    }
+
+    /// Allocate an ioevent. Returns an eventfd that will be triggered whenever `target_addr` is
+    /// written to by the guest. Optionally a datamatch can be specified to trigger the event only
+    /// when a certain value is written.
+    pub fn register_ioevent(&mut self, addr: u64, data_match: Option<u32>) -> Option<EventFd> {
+        let eventfd = EventFd::new().ok()?;
+        let registered_event = RegisteredIoEvent {
+            addr,
+            data_match,
+            eventfd: eventfd.try_clone().ok()?,
+        };
+
+        // Hashed on address and datamatch.
+        if self.ioevents.contains(&registered_event) {
+            return None;
+        }
+    
+        self.ioevents.insert(registered_event);
+
+        Some(eventfd)
     }
 }
 
