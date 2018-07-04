@@ -4,7 +4,6 @@
 
 extern crate io_jail;
 extern crate sys_util;
-extern crate resources;
 extern crate kernel_cmdline;
 extern crate kvm;
 extern crate libc;
@@ -21,7 +20,6 @@ use devices::virtio::VirtioDevice;
 use io_jail::Minijail;
 use kvm::{IoeventAddress, Kvm, Vm, Vcpu};
 use sys_util::{EventFd, GuestMemory, syslog};
-use resources::SystemAllocator;
 
 pub type Result<T> = result::Result<T, Box<std::error::Error>>;
 
@@ -40,7 +38,6 @@ pub struct VmComponents {
 pub struct RunnableLinuxVm {
     pub vm: Vm,
     pub kvm: Kvm,
-    pub resources: SystemAllocator,
     pub stdio_serial: Arc<Mutex<Serial>>,
     pub exit_evt: EventFd,
     pub vcpus: Vec<Vcpu>,
@@ -113,10 +110,9 @@ pub fn register_mmio(bus: &mut devices::Bus,
                      vm: &mut Vm,
                      device: Box<devices::virtio::VirtioDevice>,
                      jail: Option<Minijail>,
-                     resources: &mut SystemAllocator,
                      cmdline: &mut kernel_cmdline::Cmdline)
                      -> std::result::Result<(), MmioRegisterError> {
-    let irq = match resources.allocate_irq() {
+    let irq = match vm.get_resources_mut().allocate_irq() {
         None => return Err(MmioRegisterError::IrqsExhausted),
         Some(i) => i,
     };
@@ -128,7 +124,7 @@ pub fn register_mmio(bus: &mut devices::Bus,
     let mmio_device = devices::virtio::MmioDevice::new((*vm.get_memory()).clone(), device)
         .map_err(MmioRegisterError::CreateMmioDevice)?;
     let mmio_len = 0x1000; // TODO(dgreid) - configurable per arch?
-    let mmio_base = resources.allocate_mmio_addresses(mmio_len)
+    let mmio_base = vm.get_resources_mut().allocate_mmio_addresses(mmio_len)
         .ok_or(MmioRegisterError::AddrsExhausted)?;
     for (i, queue_evt) in mmio_device.queue_evts().iter().enumerate() {
         let io_addr = IoeventAddress::Mmio(mmio_base +

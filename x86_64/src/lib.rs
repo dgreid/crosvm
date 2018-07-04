@@ -257,11 +257,11 @@ impl arch::LinuxArch for X8664arch {
         where
             F: FnOnce(&GuestMemory, &EventFd) -> Result<Vec<VirtioDeviceStub>>
     {
-        let mut resources = Self::get_resource_allocator(components.memory_mb,
-                                                         components.wayland_dmabuf);
+        let resources = Self::get_resource_allocator(components.memory_mb,
+                                                     components.wayland_dmabuf);
         let mem = Self::setup_memory(components.memory_mb)?;
         let kvm = Kvm::new().map_err(Error::CreateKvm)?;
-        let mut vm = Self::create_vm(&kvm, mem.clone())?;
+        let mut vm = Self::create_vm(&kvm, mem.clone(), resources)?;
 
         let vcpu_count = components.vcpu_count;
         let mut vcpus = Vec::with_capacity(vcpu_count as usize);
@@ -278,7 +278,8 @@ impl arch::LinuxArch for X8664arch {
 
         let mut mmio_bus = devices::Bus::new();
 
-        let (pci, pci_irqs) = components.pci_devices.generate_root(&mut mmio_bus, &mut resources)
+        let (pci, pci_irqs) = components.pci_devices.generate_root(&mut mmio_bus,
+                                                                   vm.get_resources_mut())
             .map_err(Error::CreatePciRoot)?;
         let pci_bus = Arc::new(Mutex::new(pci));
 
@@ -294,7 +295,7 @@ impl arch::LinuxArch for X8664arch {
 
         for stub in mmio_devs {
             arch::register_mmio(&mut mmio_bus, &mut vm, stub.dev, stub.jail,
-                                &mut resources, &mut cmdline)
+                                &mut cmdline)
                 .map_err(Error::RegisterVsock)?;
         }
 
@@ -311,7 +312,6 @@ impl arch::LinuxArch for X8664arch {
         Ok(RunnableLinuxVm {
             vm,
             kvm,
-            resources,
             stdio_serial,
             exit_evt,
             vcpus,
@@ -359,8 +359,9 @@ impl X8664arch {
     ///
     /// * `kvm` - The opened /dev/kvm object.
     /// * `mem` - The memory to be used by the guest.
-    fn create_vm(kvm: &Kvm, mem: GuestMemory) -> Result<Vm> {
-        let vm = Vm::new(&kvm, mem)?;
+    /// * `resources` - Manages allocating system resources.
+    fn create_vm(kvm: &Kvm, mem: GuestMemory, resources: SystemAllocator) -> Result<Vm> {
+        let vm = Vm::new(&kvm, mem, resources)?;
         let tss_addr = GuestAddress(0xfffbd000);
         vm.set_tss_addr(tss_addr).expect("set tss addr failed");
         vm.create_pit().expect("create pit failed");

@@ -28,7 +28,7 @@ use libc::{ERANGE, EINVAL, ENODEV};
 use byteorder::{LittleEndian, WriteBytesExt};
 use data_model::{DataInit, Le32, Le64, VolatileMemory};
 use sys_util::{EventFd, Result, Error as SysError, MmapError, MemoryMapping, Scm, GuestAddress};
-use resources::{GpuMemoryDesc, GpuMemoryPlaneDesc, SystemAllocator};
+use resources::{GpuMemoryDesc, GpuMemoryPlaneDesc};
 use kvm::{IoeventAddress, Vm};
 
 #[derive(Debug, PartialEq)]
@@ -110,14 +110,13 @@ struct VmRequestStruct {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for VmRequestStruct {}
 
-fn register_memory(vm: &mut Vm, allocator: &mut SystemAllocator,
-                   fd: &AsRawFd, size: usize) -> Result<(u64, u32)> {
+fn register_memory(vm: &mut Vm, fd: &AsRawFd, size: usize) -> Result<(u64, u32)> {
     let mmap = match MemoryMapping::from_fd(fd, size) {
         Ok(v) => v,
         Err(MmapError::SystemCallFailed(e)) => return Err(e),
         _ => return Err(SysError::new(EINVAL)),
     };
-    let addr = match allocator.allocate_device_addresses(size as u64) {
+    let addr = match vm.get_resources_mut().allocate_device_addresses(size as u64) {
         Some(a) => a,
         None => return Err(SysError::new(EINVAL)),
     };
@@ -212,13 +211,12 @@ impl VmRequest {
     ///
     /// # Arguments
     /// * `vm` - The `Vm` to perform the request on.
-    /// * `allocator` - Used to allocate addresses.
     /// * `running` - Out argument that is set to false if the request was to stop running the VM.
     ///
     /// This does not return a result, instead encapsulating the success or failure in a
     /// `VmResponse` with the intended purpose of sending the response back over the  socket that
     /// received this `VmRequest`.
-    pub fn execute(&self, vm: &mut Vm, sys_allocator: &mut SystemAllocator, running: &mut bool,
+    pub fn execute(&self, vm: &mut Vm, running: &mut bool,
                    balloon_host_socket: &UnixDatagram) -> VmResponse {
         *running = true;
         match self {
@@ -239,7 +237,7 @@ impl VmRequest {
                 }
             }
             &VmRequest::RegisterMemory(ref fd, size) => {
-                match register_memory(vm, sys_allocator, fd, size) {
+                match register_memory(vm, fd, size) {
                     Ok((pfn, slot)) => VmResponse::RegisterMemory { pfn, slot },
                     Err(e) => VmResponse::Err(e),
                 }
@@ -260,7 +258,7 @@ impl VmRequest {
                 }
             }
             &VmRequest::AllocateAndRegisterGpuMemory {width, height, format} => {
-                let (mut fd, desc) = match sys_allocator.gpu_memory_allocator() {
+                let (mut fd, desc) = match vm.get_resources_mut().gpu_memory_allocator() {
                     Some(gpu_allocator) => {
                         match gpu_allocator.allocate(width, height, format) {
                             Ok(v) => v,
@@ -275,7 +273,7 @@ impl VmRequest {
                     Ok(v) => v,
                     Err(e) => return VmResponse::Err(SysError::from(e)),
                 };
-                match register_memory(vm, sys_allocator, &fd, size as usize) {
+                match register_memory(vm, &fd, size as usize) {
                     Ok((pfn, slot)) => VmResponse::AllocateAndRegisterGpuMemory {
                         fd: MaybeOwnedFd::Owned(fd),
                         pfn,

@@ -189,11 +189,11 @@ impl arch::LinuxArch for AArch64 {
         where
             F: FnOnce(&GuestMemory, &EventFd) -> Result<Vec<VirtioDeviceStub>>
     {
-        let mut resources = Self::get_resource_allocator(components.memory_mb,
-                                                         components.wayland_dmabuf);
+        let resources = Self::get_resource_allocator(components.memory_mb,
+                                                     components.wayland_dmabuf);
         let mem = Self::setup_memory(components.memory_mb)?;
         let kvm = Kvm::new().map_err(Error::CreateKvm)?;
-        let mut vm = Self::create_vm(&kvm, mem.clone())?;
+        let mut vm = Self::create_vm(&kvm, mem.clone(), resources)?;
 
         let vcpu_count = components.vcpu_count;
         let mut vcpus = Vec::with_capacity(vcpu_count as usize);
@@ -210,7 +210,8 @@ impl arch::LinuxArch for AArch64 {
 
         let mut mmio_bus = devices::Bus::new();
 
-        let (pci, pci_irqs) = components.pci_devices.generate_root(&mut mmio_bus, &mut resources)
+        let (pci, pci_irqs) = components.pci_devices.generate_root(&mut mmio_bus,
+                                                                   vm.get_resources_mut())
             .map_err(Error::CreatePciRoot)?;
 
         let exit_evt = EventFd::new().map_err(Error::CreateEventFd)?;
@@ -222,8 +223,7 @@ impl arch::LinuxArch for AArch64 {
         Self::add_arch_devs(&mut vm, &mut mmio_bus)?;
 
         for stub in mmio_devs {
-            arch::register_mmio(&mut mmio_bus, &mut vm, stub.dev, stub.jail,
-                                &mut resources, &mut cmdline)
+            arch::register_mmio(&mut mmio_bus, &mut vm, stub.dev, stub.jail, &mut cmdline)
                 .map_err(Error::RegisterVsock)?;
         }
 
@@ -240,7 +240,6 @@ impl arch::LinuxArch for AArch64 {
         Ok(RunnableLinuxVm {
             vm,
             kvm,
-            resources,
             stdio_serial,
             exit_evt,
             vcpus,
@@ -281,8 +280,8 @@ impl AArch64 {
         Ok(())
     }
 
-    fn create_vm(kvm: &Kvm, mem: GuestMemory) -> Result<Vm> {
-        let vm = Vm::new(&kvm, mem)?;
+    fn create_vm(kvm: &Kvm, mem: GuestMemory, resources: SystemAllocator) -> Result<Vm> {
+        let vm = Vm::new(&kvm, mem, resources)?;
         Ok(vm)
     }
 

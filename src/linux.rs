@@ -835,7 +835,6 @@ fn run_control(mut linux: RunnableLinuxVm,
                                 let mut running = true;
                                 let response =
                                     request.execute(&mut linux.vm,
-                                                    &mut linux.resources,
                                                     &mut running,
                                                     &balloon_host_socket);
                                 if let Err(e) = response.send(&mut scm, socket.as_ref()) {

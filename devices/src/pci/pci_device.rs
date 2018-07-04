@@ -33,14 +33,6 @@ pub trait PciDevice: Send {
     ) -> Result<Vec<(u64, u64)>> {
         Ok(Vec::new())
     }
-    /// Allocates any ioeventfds that this device needs.
-    fn allocate_io_eventfds(
-        &mut self,
-        _allocate_eventfd: F
-    ) -> Result<()>
-    where F: Fn(u64) -> Result<EventFd> {
-        Ok(())
-    }
     /// Gets the configuration registers of the Pci Device.
     fn config_registers(&self) -> &PciConfiguration; // TODO - remove these
     /// Gets the configuration registers of the Pci Device for modification.
