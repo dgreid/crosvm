@@ -125,8 +125,7 @@ pub fn register_mmio(bus: &mut devices::Bus,
     let mut keep_fds: Vec<RawFd> = device.keep_fds();
     syslog::push_fds(&mut keep_fds);
 
-    let mmio_device = devices::virtio::MmioDevice::new((*vm.get_memory()).clone(),
-    device)
+    let mmio_device = devices::virtio::MmioDevice::new((*vm.get_memory()).clone(), device)
         .map_err(MmioRegisterError::CreateMmioDevice)?;
     let mmio_len = 0x1000; // TODO(dgreid) - configurable per arch?
     let mmio_base = resources.allocate_mmio_addresses(mmio_len)

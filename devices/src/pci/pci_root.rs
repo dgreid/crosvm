@@ -124,7 +124,9 @@ impl PciRoot {
         let ranges = device
             .allocate_io_bars(resources)
             .map_err(Error::DeviceIoSpaceAllocation)?;
-        let proxy = ProxyDevice::new(device, &jail, Vec::new())
+        let keep_fds = Vec::new();
+        // TODO(dgreid) - allocate ioeventfds, add to keep_fds
+        let proxy = ProxyDevice::new(device, &jail, keep_fds)
             .map_err(Error::ProxyCreation)?;
         let arced_dev = Arc::new(Mutex::new(proxy));
         for range in &ranges {

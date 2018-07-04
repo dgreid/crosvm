@@ -33,7 +33,9 @@ pub struct SystemAllocator {
     ioevents: HashSet<RegisteredIoEvent>,
 }
 
-struct RegisteredIoEvent {
+/// An ioevent. `eventfd` will be triggered when `addr` is written to. The `data_match` field limits
+/// eventfd to be triggered only when `addr` is written with the value contained in `data_match`.
+pub struct RegisteredIoEvent {
     addr: u64,
     eventfd: EventFd,
     data_match: Option<u32>,
@@ -128,7 +130,7 @@ impl SystemAllocator {
     /// Allocate an ioevent. Returns an eventfd that will be triggered whenever `target_addr` is
     /// written to by the guest. Optionally a datamatch can be specified to trigger the event only
     /// when a certain value is written.
-    pub fn register_ioevent(&mut self, addr: u64, data_match: Option<u32>) -> Option<EventFd> {
+    pub fn allocate_ioevent(&mut self, addr: u64, data_match: Option<u32>) -> Option<EventFd> {
         let eventfd = EventFd::new().ok()?;
         let registered_event = RegisteredIoEvent {
             addr,
