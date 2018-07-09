@@ -13,8 +13,7 @@ pub use self::ac97::Ac97Dev;
 pub use self::pci_configuration::{PciClassCode, PciConfiguration, PciHeaderType, PciSubclass};
 pub use self::pci_device::Error as PciDeviceError;
 pub use self::pci_device::PciDevice;
-pub use self::pci_root::Error as PciRootError;
-pub use self::pci_root::{PciDeviceList, PciRoot};
+pub use self::pci_root::PciRoot;
 
 /// PCI has four interrupt pins A->D.
 #[derive(Copy, Clone)]

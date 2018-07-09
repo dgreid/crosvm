@@ -25,7 +25,7 @@ use rand::thread_rng;
 use rand::distributions::{IndependentSample, Range};
 
 use byteorder::{ByteOrder, LittleEndian};
-use devices;
+use devices::{self, PciDevice};
 use io_jail::{self, Minijail};
 use kvm::*;
 use net_util::Tap;
@@ -73,13 +73,13 @@ pub enum Error {
     QcowDeviceCreate(qcow::Error),
     ReadLowmemAvailable(io::Error),
     ReadLowmemMargin(io::Error),
-    RegisterBalloon(arch::MmioRegisterError),
-    RegisterBlock(arch::MmioRegisterError),
-    RegisterGpu(arch::MmioRegisterError),
-    RegisterNet(arch::MmioRegisterError),
-    RegisterRng(arch::MmioRegisterError),
+    RegisterBalloon(arch::DeviceRegistrationError),
+    RegisterBlock(arch::DeviceRegistrationError),
+    RegisterGpu(arch::DeviceRegistrationError),
+    RegisterNet(arch::DeviceRegistrationError),
+    RegisterRng(arch::DeviceRegistrationError),
     RegisterSignalHandler(sys_util::Error),
-    RegisterWayland(arch::MmioRegisterError),
+    RegisterWayland(arch::DeviceRegistrationError),
     ResetTimerFd(sys_util::Error),
     RngDeviceNew(devices::virtio::RngError),
     SettingGidMap(io_jail::Error),
@@ -568,10 +568,10 @@ pub fn run_config(cfg: Config) -> Result<()> {
         info!("crosvm entering multiprocess mode");
     }
 
-    let mut pci_devices = devices::PciDeviceList::new();
+    let mut pci_devices: Vec<(Box<PciDevice + 'static>, Minijail)> = Vec::new();
     let ac97_dev = Box::new(devices::Ac97Dev::new()); // TODO unwrap
     let ac97_jail = Minijail::new().unwrap(); // TODO unwrap
-    pci_devices.add_device(ac97_dev, ac97_jail);
+    pci_devices.push((ac97_dev, ac97_jail));
 
     // Masking signals is inherently dangerous, since this can persist across clones/execs. Do this
     // before any jailed devices have been spawned, so that we can catch any of them that fail very
