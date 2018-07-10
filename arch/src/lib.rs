@@ -20,8 +20,7 @@ use devices::{Bus, BusError, PciDevice, PciDeviceError, PciInterruptPin,
               PciRoot, ProxyDevice, Serial};
 use devices::virtio::VirtioDevice;
 use io_jail::Minijail;
-use kvm::{IoeventAddress, Kvm, Vm, Vcpu};
-use resources::SystemAllocator;
+use kvm::{IoeventAddress, Kvm, NoDatamatch, Vm, Vcpu};
 use sys_util::{EventFd, GuestMemory, syslog};
 
 pub type Result<T> = result::Result<T, Box<std::error::Error>>;
@@ -154,15 +153,17 @@ pub fn generate_pci_root(devices: Vec<(Box<PciDevice + 'static>, Minijail)>,
             _ => panic!(""), // Obviously not possible, but the compiler is not smart enough.
         };
         device.assign_irq(irqfd, irq_num, pci_irq_pin);
-        pci_irqs.push((irq_num, pci_irq_pin));
+        pci_irqs.push((dev_idx as u32, pci_irq_pin));
+
+        device.set_guest_memory(vm.get_memory().clone());
 
         let ranges = device
             .allocate_io_bars(vm.get_resources_mut())
             .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
-        let keep_fds = Vec::new();
+        let mut keep_fds = Vec::new();
         for (event, addr) in device.ioeventfds() {
             let io_addr = IoeventAddress::Mmio(addr);
-            vm.register_ioevent(&event,  io_addr, ())
+            vm.register_ioevent(&event, io_addr, NoDatamatch)
                 .map_err(DeviceRegistrationError::RegisterIoevent)?;
             keep_fds.push(event.as_raw_fd());
         }

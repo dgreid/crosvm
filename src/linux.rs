@@ -25,7 +25,7 @@ use rand::thread_rng;
 use rand::distributions::{IndependentSample, Range};
 
 use byteorder::{ByteOrder, LittleEndian};
-use devices::{self, PciDevice};
+use devices::{self, PciDevice, VirtioPciDevice};
 use io_jail::{self, Minijail};
 use kvm::*;
 use net_util::Tap;
@@ -45,6 +45,8 @@ use arch::{self, LinuxArch, RunnableLinuxVm, VirtioDeviceStub, VmComponents};
 use x86_64::X8664arch as Arch;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use aarch64::AArch64 as Arch;
+
+const DEFAULT_PIVOT_ROOT: &'static str = "/var/empty";
 
 #[derive(Debug)]
 pub enum Error {
@@ -89,6 +91,7 @@ pub enum Error {
     TimerFd(sys_util::Error),
     VhostNetDeviceNew(devices::virtio::vhost::Error),
     VhostVsockDeviceNew(devices::virtio::vhost::Error),
+    VirtioPciDev(sys_util::Error),
     WaylandDeviceNew(sys_util::Error),
     LoadKernel(Box<error::Error>),
 }
@@ -159,6 +162,7 @@ impl fmt::Display for Error {
             &Error::VhostVsockDeviceNew(ref e) => {
                 write!(f, "failed to set up virtual socket device: {:?}", e)
             }
+            &Error::VirtioPciDev(ref e) => write!(f, "failed create virtio pci dev: {}", e),
             &Error::WaylandDeviceNew(ref e) => {
                 write!(f, "failed to create wayland device: {:?}", e)
             }
@@ -232,8 +236,6 @@ fn create_virtio_devs(cfg: VirtIoDeviceInfo,
                       wayland_device_socket: UnixDatagram,
                       balloon_device_socket: UnixDatagram)
                       -> std::result::Result<Vec<VirtioDeviceStub>, Box<error::Error>> {
-    static DEFAULT_PIVOT_ROOT: &'static str = "/var/empty";
-
     let mut devs = Vec::new();
 
     // An empty directory for jailed device's pivot root.
@@ -291,15 +293,6 @@ fn create_virtio_devs(cfg: VirtIoDeviceInfo,
 
         devs.push(VirtioDeviceStub {dev: block_box, jail});
     }
-
-    let rng_box = Box::new(devices::virtio::Rng::new().map_err(Error::RngDeviceNew)?);
-    let rng_jail = if cfg.multiprocess {
-        let policy_path: PathBuf = cfg.seccomp_policy_dir.join("rng_device.policy");
-        Some(create_base_minijail(empty_root_path, &policy_path)?)
-    } else {
-        None
-    };
-    devs.push(VirtioDeviceStub {dev: rng_box, jail: rng_jail});
 
     let balloon_box = Box::new(devices::virtio::Balloon::new(balloon_device_socket)
                                    .map_err(Error::BalloonDeviceNew)?);
@@ -567,11 +560,27 @@ pub fn run_config(cfg: Config) -> Result<()> {
         // access to those files will not be possible.
         info!("crosvm entering multiprocess mode");
     }
+ 
+    // An empty directory for jailed device's pivot root.
+    let empty_root_path = Path::new(DEFAULT_PIVOT_ROOT);
+    if cfg.virtio_dev_info.multiprocess && !empty_root_path.exists() {
+        return Err(Error::NoVarEmpty);
+    }
 
     let mut pci_devices: Vec<(Box<PciDevice + 'static>, Minijail)> = Vec::new();
     let ac97_dev = Box::new(devices::Ac97Dev::new()); // TODO unwrap
     let ac97_jail = Minijail::new().unwrap(); // TODO unwrap
     pci_devices.push((ac97_dev, ac97_jail));
+
+    let rng_box = Box::new(devices::virtio::Rng::new().map_err(Error::RngDeviceNew)?);
+    let rng_pci = Box::new(VirtioPciDevice::new(rng_box).map_err(Error::VirtioPciDev)?);
+    let rng_jail = if cfg.virtio_dev_info.multiprocess {
+        let policy_path: PathBuf = cfg.virtio_dev_info.seccomp_policy_dir.join("rng_device.policy");
+        create_base_minijail(empty_root_path, &policy_path)?
+    } else {
+        Minijail::new().unwrap()
+    };
+    pci_devices.push((rng_pci, rng_jail));
 
     // Masking signals is inherently dangerous, since this can persist across clones/execs. Do this
     // before any jailed devices have been spawned, so that we can catch any of them that fail very

@@ -8,7 +8,7 @@ use std;
 
 use pci::pci_configuration::PciConfiguration;
 use pci::PciInterruptPin;
-use sys_util::EventFd;
+use sys_util::{EventFd, GuestMemory};
 use resources::SystemAllocator;
 
 use BusDevice;
@@ -25,6 +25,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait PciDevice: Send {
     /// Assign a legacy PCI IRQ to this device.
     fn assign_irq(&mut self, _irq_evt: EventFd, _irq_num: u32, _irq_pin: PciInterruptPin) {}
+    /// Gives the device gues memory if it is needed.
+    fn set_guest_memory(&mut self, mem: GuestMemory) {}
     /// Allocates the needed IO BAR space using the `allocate` function which takes a size and
     /// returns an address. Returns a Vec of (address, length) tuples.
     fn allocate_io_bars(
@@ -87,6 +89,10 @@ impl<T: PciDevice> BusDevice for T {
 impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     fn assign_irq(&mut self, irq_evt: EventFd, irq_num: u32, irq_pin: PciInterruptPin) {
      (**self).assign_irq(irq_evt, irq_num, irq_pin)
+    }
+    /// Gives the device gues memory if it is needed.
+    fn set_guest_memory(&mut self, mem: GuestMemory) {
+        (**self).set_guest_memory(mem)
     }
     /// Allocates the needed IO BAR space using the `allocate` function which takes a size and
     /// returns an address. Returns a Vec of (address, length) tuples.

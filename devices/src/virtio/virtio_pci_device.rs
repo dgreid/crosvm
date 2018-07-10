@@ -116,7 +116,7 @@ pub struct VirtioPciDevice {
 
 impl VirtioPciDevice {
     /// Constructs a new PCI transport for the given virtio device.
-    pub fn new(mem: GuestMemory, device: Box<VirtioDevice>) -> Result<Self> {
+    pub fn new(device: Box<VirtioDevice>) -> Result<Self> {
         let mut queue_evts = Vec::new();
         for _ in device.queue_max_sizes().iter() {
             queue_evts.push(EventFd::new()?)
@@ -129,7 +129,7 @@ impl VirtioPciDevice {
 
         let config_regs = PciConfiguration::new(
             0x1af4, // Virtio vendor ID.
-            0x1040 + device.device_type() as u16,
+            0x1000 + device.device_type() as u16,
             PciClassCode::Other, // TODO(dgreid)
             &PciVirtioSubclass::NonTransitionalBase,
             PciHeaderType::Device,
@@ -143,7 +143,7 @@ impl VirtioPciDevice {
             interrupt_evt: Some(EventFd::new()?),
             queues,
             queue_evts,
-            mem: Some(mem),
+            mem: None,
             settings_bar: 0,
             common_config: VirtioPciCommonConfig {
                 driver_status: 0,
@@ -234,10 +234,15 @@ impl PciDevice for VirtioPciDevice {
         self.config_regs.set_irq(irq_num as u8, irq_pin);
     }
 
+    fn set_guest_memory(&mut self, mem: GuestMemory) {
+        self.mem = Some(mem);
+    }
+
     fn allocate_io_bars(
         &mut self,
         resources: &mut SystemAllocator,
     ) -> std::result::Result<Vec<(u64, u64)>, PciDeviceError> {
+        println!("vpci allocate");
         // Allocate one bar for the structures pointed to by the capability structures.
         let mut ranges = Vec::new();
         let settings_config_addr = resources
@@ -273,6 +278,7 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
+        println!("vpci read");
         // The driver is only allowed to do aligned, properly sized access.
         let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
         let offset = addr - bar0;
@@ -303,6 +309,7 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn write_bar(&mut self, addr: u64, data: &[u8]) {
+        println!("vpci write");
         let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
         let offset = addr - bar0;
         match offset {
@@ -332,114 +339,11 @@ impl PciDevice for VirtioPciDevice {
         };
 
         if !self.device_activated && self.is_driver_ready() && self.are_queues_valid() {
+            println!("vpci 0");
             if let Some(interrupt_evt) = self.interrupt_evt.take() {
+                println!("vpci 1");
                 if let Some(mem) = self.mem.take() {
-                    self.device.activate(
-                        mem,
-                        interrupt_evt,
-                        self.interrupt_status.clone(),
-                        self.queues.clone(),
-                        self.queue_evts.split_off(0),
-                    );
-                    self.device_activated = true;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(asdfasdf)]
-impl BusDevice for MmioDevice {
-    fn read(&mut self, offset: u64, data: &mut [u8]) {
-        match offset {
-            0x00...0xff if data.len() == 4 => {
-                let v = match offset {
-                    0x0 => MMIO_MAGIC_VALUE,
-                    0x04 => MMIO_VERSION,
-                    0x08 => self.device.device_type(),
-                    0x0c => VENDOR_ID, // vendor id
-                    0x10 => {
-                        self.device.features(self.device_features_select)
-                            | if self.features_select == 1 { 0x1 } else { 0x0 }
-                    }
-                    0x34 => self.with_queue(0, |q| q.max_size as u32),
-                    0x44 => self.with_queue(0, |q| q.ready as u32),
-                    0x60 => self.interrupt_status.load(Ordering::SeqCst) as u32,
-                    0x70 => self.driver_status,
-                    0xfc => self.config_generation,
-                    _ => {
-                        warn!("unknown virtio mmio register read: 0x{:x}", offset);
-                        return;
-                    }
-                };
-                LittleEndian::write_u32(data, v);
-            }
-            0x100...0xfff => self.device.read_config(offset - 0x100, data),
-            _ => {
-                warn!(
-                    "invalid virtio mmio read: 0x{:x}:0x{:x}",
-                    offset,
-                    data.len()
-                );
-            }
-        };
-    }
-
-    fn write(&mut self, offset: u64, data: &[u8]) {
-        fn hi(v: &mut GuestAddress, x: u32) {
-            *v = (*v & 0xffffffff) | ((x as u64) << 32)
-        }
-
-        fn lo(v: &mut GuestAddress, x: u32) {
-            *v = (*v & !0xffffffff) | (x as u64)
-        }
-
-        let mut mut_q = false;
-        match offset {
-            0x00...0xff if data.len() == 4 => {
-                let v = LittleEndian::read_u32(data);
-                match offset {
-                    0x14 => self.features_select = v,
-                    0x20 => self.device.ack_features(self.driver_features_select, v),
-                    0x24 => self.driver_features_select = v,
-                    0x30 => self.queue_select = v,
-                    0x38 => mut_q = self.with_queue_mut(|q| q.size = v as u16),
-                    0x44 => mut_q = self.with_queue_mut(|q| q.ready = v == 1),
-                    0x64 => {
-                        self.interrupt_status
-                            .fetch_and(!(v as usize), Ordering::SeqCst);
-                    }
-                    0x70 => self.driver_status = v,
-                    0x80 => mut_q = self.with_queue_mut(|q| lo(&mut q.desc_table, v)),
-                    0x84 => mut_q = self.with_queue_mut(|q| hi(&mut q.desc_table, v)),
-                    0x90 => mut_q = self.with_queue_mut(|q| lo(&mut q.avail_ring, v)),
-                    0x94 => mut_q = self.with_queue_mut(|q| hi(&mut q.avail_ring, v)),
-                    0xa0 => mut_q = self.with_queue_mut(|q| lo(&mut q.used_ring, v)),
-                    0xa4 => mut_q = self.with_queue_mut(|q| hi(&mut q.used_ring, v)),
-                    _ => {
-                        warn!("unknown virtio mmio register write: 0x{:x}", offset);
-                        return;
-                    }
-                }
-            }
-            0x100...0xfff => return self.device.write_config(offset - 0x100, data),
-            _ => {
-                warn!(
-                    "invalid virtio mmio write: 0x{:x}:0x{:x}",
-                    offset,
-                    data.len()
-                );
-                return;
-            }
-        }
-
-        if self.device_activated && mut_q {
-            warn!("virtio queue was changed after device was activated");
-        }
-
-        if !self.device_activated && self.is_driver_ready() && self.are_queues_valid() {
-            if let Some(interrupt_evt) = self.interrupt_evt.take() {
-                if let Some(mem) = self.mem.take() {
+                    println!("vpci 2");
                     self.device.activate(
                         mem,
                         interrupt_evt,
