@@ -277,7 +277,7 @@ impl arch::LinuxArch for X8664arch {
 
         let (pci, pci_irqs) = arch::generate_pci_root(components.pci_devices,
                                                       &mut mmio_bus,
-                                                      vm.get_resources_mut())
+                                                      &mut vm)
             .map_err(Error::CreatePciRoot)?;
         let pci_bus = Arc::new(Mutex::new(pci));
 

@@ -93,6 +93,8 @@ const NOTIFICATION_BAR_OFFSET: u64 = 0x3000;
 const NOTIFICATION_SIZE: u64 = 0x1000;
 const CAPABILITY_BAR_SIZE: u64 = 0x4000;
 
+const NOTIFY_OFF_MULTIPLIER: u32 = 4; // A dword per notifcation address.
+
 /// Implements the
 /// [PCI](http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-650001)
 /// transport for virtio devices.
@@ -200,19 +202,22 @@ impl VirtioPciDevice {
 
         // TODO(dgreid) - set based on device's configuration size?
         let device_cap = VirtioPciCap::new(
-            PciCapabilityType::IsrConfig,
+            PciCapabilityType::DeviceConfig,
             settings_bar,
             DEVICE_CONFIG_BAR_OFFSET as u32,
             DEVICE_CONFIG_SIZE as u32,
         );
         self.config_regs.add_capability(device_cap.as_slice());
 
-        let notify_cap = VirtioPciCap::new(
-            PciCapabilityType::IsrConfig,
-            settings_bar,
-            NOTIFICATION_BAR_OFFSET as u32,
-            NOTIFICATION_SIZE as u32,
-        );
+        let notify_cap = VirtioPciNotifyCap {
+            cap: VirtioPciCap::new(
+                PciCapabilityType::NotifyConfig,
+                settings_bar,
+                NOTIFICATION_BAR_OFFSET as u32,
+                NOTIFICATION_SIZE as u32,
+            ),
+            notify_off_multiplier: Le32::from(NOTIFY_OFF_MULTIPLIER),
+        };
         self.config_regs.add_capability(notify_cap.as_slice());
 
         //TODO(dgreid) - How will the configuration_cap work?
@@ -251,6 +256,14 @@ impl PciDevice for VirtioPciDevice {
         Ok(ranges)
     }
 
+    fn ioeventfds(&self) -> Vec<(&EventFd, u64)> {
+        self.queue_evts()
+            .iter()
+            .enumerate()
+            .map(|(i, event)| (event, i as u64 * NOTIFY_OFF_MULTIPLIER as u64))
+            .collect()
+    }
+
     fn config_registers(&self) -> &PciConfiguration {
         &self.config_regs
     }
@@ -283,7 +296,7 @@ impl PciDevice for VirtioPciDevice {
             o if NOTIFICATION_BAR_OFFSET <= o
                 && o < NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE =>
             {
-                // TODO(dgreid) - notify the correct virt queue, use eventFD and allocator?
+                // Handled with ioeventfds.
             }
             _ => (),
         }

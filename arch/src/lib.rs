@@ -135,14 +135,17 @@ impl fmt::Display for DeviceRegistrationError {
 /// Creates a root PCI device for use by this Vm.
 pub fn generate_pci_root(devices: Vec<(Box<PciDevice + 'static>, Minijail)>,
                          mmio_bus: &mut Bus,
-                         resources: &mut SystemAllocator)
+                         vm: &mut Vm)
     -> std::result::Result<(PciRoot, Vec<(u32, PciInterruptPin)>), DeviceRegistrationError>
 {
     let mut root = PciRoot::new();
     let mut pci_irqs = Vec::new();
     for (dev_idx, (mut device, jail)) in devices.into_iter().enumerate() {
         let irqfd = EventFd::new().map_err(DeviceRegistrationError::EventFdCreate)?;
-        let irq_num = resources.allocate_irq().ok_or(DeviceRegistrationError::AllocateIrq)? as u32;
+        let irq_num = vm
+            .get_resources_mut()
+            .allocate_irq()
+            .ok_or(DeviceRegistrationError::AllocateIrq)? as u32;
         let pci_irq_pin = match dev_idx % 4 {
             0 => PciInterruptPin::IntA,
             1 => PciInterruptPin::IntB,
@@ -154,10 +157,15 @@ pub fn generate_pci_root(devices: Vec<(Box<PciDevice + 'static>, Minijail)>,
         pci_irqs.push((irq_num, pci_irq_pin));
 
         let ranges = device
-            .allocate_io_bars(resources)
+            .allocate_io_bars(vm.get_resources_mut())
             .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
         let keep_fds = Vec::new();
-        // TODO(dgreid) - allocate ioeventfds, add to keep_fds
+        for (event, addr) in device.ioeventfds() {
+            let io_addr = IoeventAddress::Mmio(addr);
+            vm.register_ioevent(&event,  io_addr, ())
+                .map_err(DeviceRegistrationError::RegisterIoevent)?;
+            keep_fds.push(event.as_raw_fd());
+        }
         let proxy = ProxyDevice::new(device, &jail, keep_fds)
             .map_err(DeviceRegistrationError::ProxyDeviceCreation)?;
         let arced_dev = Arc::new(Mutex::new(proxy));

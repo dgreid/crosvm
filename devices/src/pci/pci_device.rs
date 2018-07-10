@@ -35,7 +35,7 @@ pub trait PciDevice: Send {
     }
     /// Gets a list of ioeventfds that should be registered with the running VM. The list is
     /// returned as a Vec of (eventfd, addr) tuples.
-    fn ioeventfds(&self) -> Vec<(EventFd, u64)> {
+    fn ioeventfds(&self) -> Vec<(&EventFd, u64)> {
         Vec::new()
     }
     /// Gets the configuration registers of the Pci Device.
@@ -98,7 +98,7 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     }
     /// Gets a list of ioeventfds that should be registered with the running VM. The list is
     /// returned as a Vec of (eventfd, addr) tuples.
-    fn ioeventfds(&self) -> Vec<(EventFd, u64)> {
+    fn ioeventfds(&self) -> Vec<(&EventFd, u64)> {
         (**self).ioeventfds()
     }
     /// Gets the configuration registers of the Pci Device.
