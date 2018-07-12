@@ -33,6 +33,8 @@ impl Ac97Dev {
             PciClassCode::MultimediaController,
             &PciMultimediaSubclass::AudioDevice,
             PciHeaderType::Device,
+            0, // TODO(dgreid) set subsystem and vendor id here?
+            0
         );
 
         Ac97Dev {

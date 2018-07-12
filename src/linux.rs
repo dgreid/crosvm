@@ -233,8 +233,7 @@ fn create_base_minijail(root: &Path, seccomp_policy: &Path) -> Result<Minijail> 
 fn create_virtio_devs(cfg: VirtIoDeviceInfo,
                       mem: &GuestMemory,
                       _exit_evt: &EventFd,
-                      wayland_device_socket: UnixDatagram,
-                      balloon_device_socket: UnixDatagram)
+                      wayland_device_socket: UnixDatagram)
                       -> std::result::Result<Vec<VirtioDeviceStub>, Box<error::Error>> {
     let mut devs = Vec::new();
 
@@ -293,16 +292,6 @@ fn create_virtio_devs(cfg: VirtIoDeviceInfo,
 
         devs.push(VirtioDeviceStub {dev: block_box, jail});
     }
-
-    let balloon_box = Box::new(devices::virtio::Balloon::new(balloon_device_socket)
-                                   .map_err(Error::BalloonDeviceNew)?);
-    let balloon_jail = if cfg.multiprocess {
-        let policy_path: PathBuf = cfg.seccomp_policy_dir.join("balloon_device.policy");
-        Some(create_base_minijail(empty_root_path, &policy_path)?)
-    } else {
-        None
-    };
-    devs.push(VirtioDeviceStub {dev: balloon_box, jail: balloon_jail});
 
     // We checked above that if the IP is defined, then the netmask is, too.
     if let Some(tap_fd) = cfg.tap_fd {
@@ -582,6 +571,21 @@ pub fn run_config(cfg: Config) -> Result<()> {
     };
     pci_devices.push((rng_pci, rng_jail));
 
+    // Balloon gets a special socket so balloon requests can be forwarded from the main process.
+    let (balloon_host_socket, balloon_device_socket) = UnixDatagram::pair()
+        .map_err(Error::CreateSocket)?;
+    let balloon_box = Box::new(devices::virtio::Balloon::new(balloon_device_socket)
+                                   .map_err(Error::BalloonDeviceNew)?);
+    let balloon_pci = Box::new(VirtioPciDevice::new(balloon_box).map_err(Error::VirtioPciDev)?);
+    let balloon_jail = if cfg.virtio_dev_info.multiprocess {
+        let policy_path: PathBuf = cfg.virtio_dev_info.seccomp_policy_dir
+                                    .join("balloon_device.policy");
+        create_base_minijail(empty_root_path, &policy_path)?
+    } else {
+        Minijail::new().unwrap()
+    };
+    pci_devices.push((balloon_pci, balloon_jail));
+
     // Masking signals is inherently dangerous, since this can persist across clones/execs. Do this
     // before any jailed devices have been spawned, so that we can catch any of them that fail very
     // quickly.
@@ -606,15 +610,11 @@ pub fn run_config(cfg: Config) -> Result<()> {
     let (wayland_host_socket, wayland_device_socket) = UnixDatagram::pair()
         .map_err(Error::CreateSocket)?;
     control_sockets.push(UnlinkUnixDatagram(wayland_host_socket));
-    // Balloon gets a special socket so balloon requests can be forwarded from the main process.
-    let (balloon_host_socket, balloon_device_socket) = UnixDatagram::pair()
-        .map_err(Error::CreateSocket)?;
 
     let virtio_dev_info = cfg.virtio_dev_info;
     let linux = Arch::build_vm(components,
                                |m, e| create_virtio_devs(virtio_dev_info, m, e,
-                                                         wayland_device_socket,
-                                                         balloon_device_socket))
+                                                         wayland_device_socket))
         .map_err(Error::BuildingVm)?;
     run_control(linux, control_sockets, balloon_host_socket, sigchld_fd)
 }

@@ -138,6 +138,8 @@ impl PciConfiguration {
         class_code: PciClassCode,
         subclass: &PciSubclass,
         header_type: PciHeaderType,
+        subsystem_id: u16,
+        subsystem_vendor_id: u16,
     ) -> Self {
         let mut registers = [0u32; NUM_CONFIGURATION_REGISTERS];
         registers[0] = u32::from(device_id) << 16 | u32::from(vendor_id);
@@ -147,6 +149,7 @@ impl PciConfiguration {
             PciHeaderType::Device => (),
             PciHeaderType::Bridge => registers[3] = 0x0001_0000,
         };
+        registers[0xb] = (subsystem_id as u32) << 16 | subsystem_vendor_id as u32;
         PciConfiguration {
             registers,
             writable_bits: [0xffff_ffff; NUM_CONFIGURATION_REGISTERS],
@@ -221,14 +224,15 @@ impl PciConfiguration {
                 return None;
         }
 
-        let bar_idx = BAR0_REG + self.num_bars;
+        let this_bar = self.num_bars;
+        let bar_idx = BAR0_REG + this_bar;
 
         self.registers[bar_idx] = addr as u32 & addr_mask | mem_type;
         // The first writable bit represents the size of the region.
         self.writable_bits[bar_idx] = !(size - 1) as u32;
 
         self.num_bars += 1;
-        Some(bar_idx)
+        Some(this_bar)
     }
 
     /// Adds a memory region of `size` at `addr`. Configures the next available BAR register to

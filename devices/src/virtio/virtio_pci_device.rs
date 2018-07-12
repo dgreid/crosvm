@@ -45,15 +45,6 @@ unsafe impl DataInit for VirtioPciCap {}
 const PCI_CAP_ID_VNDR: u8 = 0x09; // Vendor specific capability.
 const VIRTIO_PCI_CAPABILITY_BYTES: u8 = 16;
 
-#[repr(packed)]
-#[derive(Clone, Copy)]
-struct VirtioPciNotifyCap {
-    cap: VirtioPciCap,
-    notify_off_multiplier: Le32,
-}
-// It is safe to implement DataInit; all members are simple numbers and any value is valid.
-unsafe impl DataInit for VirtioPciNotifyCap {}
-
 impl VirtioPciCap {
     pub fn new(cfg_type: PciCapabilityType, bar: u8, offset: u32, length: u32) -> Self {
         VirtioPciCap {
@@ -69,11 +60,44 @@ impl VirtioPciCap {
     }
 }
 
+#[repr(packed)]
+#[derive(Clone, Copy)]
+struct VirtioPciNotifyCap {
+    cap: VirtioPciCap,
+    notify_off_multiplier: Le32,
+}
+// It is safe to implement DataInit; all members are simple numbers and any value is valid.
+unsafe impl DataInit for VirtioPciNotifyCap {}
+
+impl VirtioPciNotifyCap {
+    pub fn new(
+        cfg_type: PciCapabilityType,
+        bar: u8,
+        offset: u32,
+        length: u32,
+        multiplier: Le32,
+    ) -> Self {
+        VirtioPciNotifyCap {
+            cap: VirtioPciCap {
+                cap_vndr: PCI_CAP_ID_VNDR,
+                cap_next: 0,
+                cap_len: std::mem::size_of::<VirtioPciNotifyCap>() as u8,
+                cfg_type: cfg_type as u8,
+                bar,
+                padding: [0; 3],
+                offset: Le32::from(offset),
+                length: Le32::from(length),
+            },
+            notify_off_multiplier: multiplier,
+        }
+    }
+}
+
 /// Subclasses for virtio.
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
 pub enum PciVirtioSubclass {
-    NonTransitionalBase = 0x40,
+    NonTransitionalBase = 0xff,
 }
 
 impl PciSubclass for PciVirtioSubclass {
@@ -130,9 +154,11 @@ impl VirtioPciDevice {
         let config_regs = PciConfiguration::new(
             0x1af4, // Virtio vendor ID.
             0x1000 + device.device_type() as u16,
-            PciClassCode::Other, // TODO(dgreid)
+            PciClassCode::TooOld,
             &PciVirtioSubclass::NonTransitionalBase,
             PciHeaderType::Device,
+            device.device_type() as u16,
+            0x1af4,
         );
 
         Ok(VirtioPciDevice {
@@ -209,19 +235,21 @@ impl VirtioPciDevice {
         );
         self.config_regs.add_capability(device_cap.as_slice());
 
-        let notify_cap = VirtioPciNotifyCap {
-            cap: VirtioPciCap::new(
-                PciCapabilityType::NotifyConfig,
-                settings_bar,
-                NOTIFICATION_BAR_OFFSET as u32,
-                NOTIFICATION_SIZE as u32,
-            ),
-            notify_off_multiplier: Le32::from(NOTIFY_OFF_MULTIPLIER),
-        };
-        self.config_regs.add_capability(notify_cap.as_slice());
+        let notify_cap = VirtioPciNotifyCap::new(
+            PciCapabilityType::NotifyConfig,
+            settings_bar,
+            NOTIFICATION_BAR_OFFSET as u32,
+            NOTIFICATION_SIZE as u32,
+            Le32::from(NOTIFY_OFF_MULTIPLIER),
+        );
+        let notify_offset = self
+            .config_regs
+            .add_capability(notify_cap.as_slice())
+            .unwrap();
 
+        println!("notify offset {}", notify_offset);
         //TODO(dgreid) - How will the configuration_cap work?
-        let configuration_cap = VirtioPciCap::new(PciCapabilityType::IsrConfig, 0, 0, 0);
+        let configuration_cap = VirtioPciCap::new(PciCapabilityType::PciConfig, 0, 0, 0);
         self.config_regs
             .add_capability(configuration_cap.as_slice());
 
@@ -262,10 +290,11 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn ioeventfds(&self) -> Vec<(&EventFd, u64)> {
+        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
         self.queue_evts()
             .iter()
             .enumerate()
-            .map(|(i, event)| (event, i as u64 * NOTIFY_OFF_MULTIPLIER as u64))
+            .map(|(i, event)| (event, bar0 + i as u64 * NOTIFY_OFF_MULTIPLIER as u64))
             .collect()
     }
 
