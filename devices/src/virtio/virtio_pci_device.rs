@@ -6,6 +6,7 @@ use std;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use libc::EINVAL;
 use super::*;
 use data_model::{DataInit, Le32};
 use pci::{
@@ -13,7 +14,7 @@ use pci::{
     PciSubclass,
 };
 use resources::SystemAllocator;
-use sys_util::{EventFd, GuestMemory, Result};
+use sys_util::{self, EventFd, GuestMemory, Result};
 
 use self::virtio_pci_common_config::VirtioPciCommonConfig;
 
@@ -119,6 +120,15 @@ const CAPABILITY_BAR_SIZE: u64 = 0x4000;
 
 const NOTIFY_OFF_MULTIPLIER: u32 = 4; // A dword per notifcation address.
 
+const PCI_DEVICE_ID_VIRTIO_NET: u16 = 0x1000;
+const PCI_DEVICE_ID_VIRTIO_BLOCK: u16 = 0x1001;
+const PCI_DEVICE_ID_VIRTIO_BALLOON: u16 = 0x1002;
+const PCI_DEVICE_ID_VIRTIO_CONSOLE: u16 = 0x1003;
+const PCI_DEVICE_ID_VIRTIO_SCSI: u16 = 0x1004;
+const PCI_DEVICE_ID_VIRTIO_RNG: u16 = 0x1005;
+const PCI_DEVICE_ID_VIRTIO_9P: u16 = 0x1009;
+const PCI_DEVICE_ID_VIRTIO_VSOCK: u16 = 0x1012;
+
 /// Implements the
 /// [PCI](http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-650001)
 /// transport for virtio devices.
@@ -151,9 +161,18 @@ impl VirtioPciDevice {
             .map(|&s| Queue::new(s))
             .collect();
 
+        let pci_device_id = match device.device_type() {
+            TYPE_NET => PCI_DEVICE_ID_VIRTIO_NET,
+            TYPE_BLOCK => PCI_DEVICE_ID_VIRTIO_BLOCK,
+            TYPE_RNG => PCI_DEVICE_ID_VIRTIO_RNG,
+            TYPE_BALLOON => PCI_DEVICE_ID_VIRTIO_BALLOON,
+            TYPE_VSOCK => PCI_DEVICE_ID_VIRTIO_VSOCK,
+            _ => return Err(sys_util::Error::new(EINVAL)),
+        };
+
         let config_regs = PciConfiguration::new(
             0x1af4, // Virtio vendor ID.
-            0x1000 + device.device_type() as u16,
+            pci_device_id,
             PciClassCode::TooOld,
             &PciVirtioSubclass::NonTransitionalBase,
             PciHeaderType::Device,
