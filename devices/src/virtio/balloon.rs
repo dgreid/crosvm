@@ -288,6 +288,7 @@ impl VirtioDevice for Balloon {
     fn features(&self, page: u32) -> u32 {
         match page {
             0 => VIRTIO_BALLOON_F_MUST_TELL_HOST | VIRTIO_BALLOON_F_DEFLATE_ON_OOM,
+            1 => 0x01,
             _ => 0u32,
         }
     }

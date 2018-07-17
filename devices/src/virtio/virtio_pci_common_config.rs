@@ -87,15 +87,15 @@ impl VirtioPciCommonConfig {
     fn read_common_config_byte(&self, offset: u64) -> u8 {
         // The driver is only allowed to do aligned, properly sized access.
         match offset {
-            0x20 => self.driver_status,
-            0x21 => self.config_generation,
+            0x13 => self.config_generation,
+            0x14 => self.driver_status,
             _ => 0,
         }
     }
 
     fn write_common_config_byte(&mut self, offset: u64, value: u8) {
         match offset {
-            0x20 => self.driver_status = value,
+            0x14 => self.driver_status = value,
             _ => {
                 warn!("invalid virtio config byt access: 0x{:x}", offset);
             }
