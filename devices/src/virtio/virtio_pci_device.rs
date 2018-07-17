@@ -144,6 +144,7 @@ pub struct VirtioPciDevice {
     queue_evts: Vec<EventFd>,
     mem: Option<GuestMemory>,
     settings_bar: u8,
+    settings_config_addr: u64,
 
     common_config: VirtioPciCommonConfig,
 }
@@ -190,6 +191,7 @@ impl VirtioPciDevice {
             queue_evts,
             mem: None,
             settings_bar: 0,
+            settings_config_addr: 0,
             common_config: VirtioPciCommonConfig {
                 driver_status: 0,
                 config_generation: 0,
@@ -302,14 +304,18 @@ impl PciDevice for VirtioPciDevice {
             as u8;
         ranges.push((settings_config_addr, CAPABILITY_BAR_SIZE));
 
+        error!("virtio pci settings at {:x} {:x}", settings_config_addr, CAPABILITY_BAR_SIZE);
+
         // Once the BARs are allocated, the capabilities can be added to the PCI configuration.
         self.add_pci_capabilities(settings_bar);
+        self.settings_config_addr = settings_config_addr;
 
         Ok(ranges)
     }
 
     fn ioeventfds(&self) -> Vec<(&EventFd, u64)> {
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
+//        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
+        let bar0 = self.settings_config_addr;
         self.queue_evts()
             .iter()
             .enumerate()
@@ -326,10 +332,11 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
-        println!("vpci read");
         // The driver is only allowed to do aligned, properly sized access.
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
+        //let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
+        let bar0 = self.settings_config_addr;
         let offset = addr - bar0;
+        error!("vpci read {:x} {:x} {:x}", addr, bar0, offset);
         match offset {
             o if COMMON_CONFIG_BAR_OFFSET <= o
                 && o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE =>
@@ -357,8 +364,9 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn write_bar(&mut self, addr: u64, data: &[u8]) {
-        println!("vpci write");
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
+        error!("vpci write {:x}", addr);
+        //let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
+        let bar0 = self.settings_config_addr;
         let offset = addr - bar0;
         match offset {
             o if COMMON_CONFIG_BAR_OFFSET <= o
