@@ -314,8 +314,7 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn ioeventfds(&self) -> Vec<(&EventFd, u64)> {
-//        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
-        let bar0 = self.settings_config_addr;
+        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
         self.queue_evts()
             .iter()
             .enumerate()
@@ -333,8 +332,7 @@ impl PciDevice for VirtioPciDevice {
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
         // The driver is only allowed to do aligned, properly sized access.
-        //let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
-        let bar0 = self.settings_config_addr;
+        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
         let offset = addr - bar0;
         error!("vpci read {:x} {:x} {:x}", addr, bar0, offset);
         match offset {
@@ -365,8 +363,7 @@ impl PciDevice for VirtioPciDevice {
 
     fn write_bar(&mut self, addr: u64, data: &[u8]) {
         error!("vpci write {:x}", addr);
-        //let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
-        let bar0 = self.settings_config_addr;
+        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize) as u64;
         let offset = addr - bar0;
         match offset {
             o if COMMON_CONFIG_BAR_OFFSET <= o
