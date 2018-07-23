@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![feature(test)]
+
 extern crate byteorder;
 extern crate libc;
+extern crate test;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::{EINVAL, ENOTSUP};
@@ -451,8 +454,6 @@ impl QcowFile {
         let new_addr: u64 = self.append_new_cluster()?;
         // Save the new block to the table and mark it as used.
         write_u64_to_offset(&mut self.file, entry_addr, new_addr | CLUSTER_USED_FLAG)?;
-        // Ensure that the metadata update is commited before writing data.
-        self.file.sync_data()?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
         self.set_cluster_refcount(new_addr, 1)?;
         // Ensure that the refcount is updated before starting to use the cluster.
@@ -645,6 +646,7 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
     use super::*;
     use sys_util::SharedMemory;
+	use test::Bencher;
 
     fn valid_header() -> Vec<u8> {
         vec![
@@ -929,5 +931,19 @@ mod tests {
 
             assert_eq!(qcow_file.first_zero_refcount().unwrap(), None);
         });
+    }
+
+    #[bench]
+    fn bench_grow_blocks(b: &mut Bencher) {
+		const WRITE_SIZE: usize = 1024;
+		const TOTAL_SIZE: usize = 1024 * 1024 * 50;
+		let data = [0xffu8; WRITE_SIZE];
+        b.iter(|| {
+			with_default_file(1024 * 1024 * 1024 * 256, |mut qcow_file| {
+				for _i in (0..TOTAL_SIZE / WRITE_SIZE) {
+					qcow_file.write(&data).expect("Failed to write test data.");
+				}
+			});
+		});
     }
 }
