@@ -234,6 +234,7 @@ impl QcowHeader {
 pub struct QcowFile {
     file: File,
     header: QcowHeader,
+    l1_table: Vec<u64>,
     l2_entries: u64,
     cluster_size: u64,
     cluster_mask: u64,
@@ -284,9 +285,13 @@ impl QcowFile {
         offset_is_cluster_boundary(header.refcount_table_offset, header.cluster_bits)?;
         offset_is_cluster_boundary(header.snapshots_offset, header.cluster_bits)?;
 
+        let l1_table = read_l1_table(&mut file, header.l1_table_offset, header.l1_size as usize)
+            .map_err(Error::ReadingHeader)?;
+
         let qcow = QcowFile {
             file,
             header,
+            l1_table,
             l2_entries: cluster_size / size_of::<u64>() as u64,
             cluster_size,
             cluster_mask: cluster_size - 1,
@@ -301,6 +306,8 @@ impl QcowFile {
         qcow.header.refcount_table_offset
             .checked_add(u64::from(qcow.header.refcount_table_clusters) * qcow.cluster_size)
             .ok_or(Error::InvalidRefcountTableOffset)?;
+
+        println!("size: {} l2 ents: {} L1 size {}", qcow.header.size, qcow.l2_entries, qcow.header.l1_size);
 
         Ok(qcow)
     }
@@ -366,8 +373,13 @@ impl QcowFile {
 
     // Gets the offset of `address` in the L1 table.
     fn l1_address_offset(&self, address: u64) -> u64 {
-        let l1_index = (address / self.cluster_size) / self.l2_entries;
+        let l1_index = self.l1_table_index(address);
         l1_index * size_of::<u64>() as u64
+    }
+
+    // Gets the offset of `address` in the L1 table.
+    fn l1_table_index(&self, address: u64) -> u64 {
+        (address / self.cluster_size) / self.l2_entries
     }
 
     // Gets the offset of `address` in the L2 table.
@@ -391,26 +403,24 @@ impl QcowFile {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
         }
 
-        let l1_entry_offset: u64 = self.header.l1_table_offset + self.l1_address_offset(address);
-        if l1_entry_offset >= self.file.metadata()?.len() {
-            // L1 table is not allocated in image. No data has ever been written.
-            if allocate {
-                self.file.set_len(
-                    self.header.l1_table_offset +
-                        self.l1_address_offset(self.virtual_size()),
-                )?;
-            } else {
-                return Ok(None);
-            }
+        let l1_file_addr = self.header.l1_table_offset + self.l1_address_offset(address);
+        if l1_file_addr >= self.file.metadata()?.len() {
+            self.file.set_len(self.header.l1_table_offset +
+                              self.l1_address_offset(self.virtual_size()))?;
         }
-        let l2_addr_disk = read_u64_from_offset(&mut self.file, l1_entry_offset)?;
+        let l1_entry_index = self.l1_table_index(address) as usize;
+        let l2_addr_disk = self.l1_table.get(l1_entry_index)
+            .ok_or(std::io::Error::from_raw_os_error(ENOTSUP))?
+            .clone(); // Fine, it's a u64 anyways.
         if l2_addr_disk & COMPRESSED_FLAG != 0 {
             return Err(std::io::Error::from_raw_os_error(ENOTSUP));
         }
         let l2_addr_from_table: u64 = l2_addr_disk & L1_TABLE_OFFSET_MASK;
         let l2_addr = if l2_addr_from_table == 0 {
             if allocate {
-                self.append_data_cluster(l1_entry_offset)?
+                let new_addr = self.append_l2_cluster()?;
+                self.l1_table[l1_entry_index as usize] = new_addr;
+                new_addr
             } else {
                 return Ok(None);
             }
@@ -445,6 +455,17 @@ impl QcowFile {
         self.file.sync_all()?;
 
         Ok(new_cluster_address)
+    }
+
+    // Allocate and initialize a new l2 cluster. Returns the offset of the
+    // cluster in to the file on success.
+    fn append_l2_cluster(&mut self) -> std::io::Result<u64> {
+        let new_addr: u64 = self.append_new_cluster()?;
+        // The cluster refcount starts at one indicating it is used but doesn't need COW.
+        self.set_cluster_refcount(new_addr, 1)?;
+        // Ensure that the refcount is updated before starting to use the cluster.
+        self.file.sync_data()?;
+        Ok(new_addr)
     }
 
     // Allocate and initialize a new data cluster. Returns the offset of the
@@ -506,6 +527,12 @@ impl QcowFile {
                 .ok_or_else(|| std::io::Error::from_raw_os_error(EINVAL))?;
         self.file.seek(SeekFrom::Start(refcount_address))?;
         self.file.read_u16::<BigEndian>()
+    }
+}
+
+impl Drop for QcowFile {
+    fn drop(&mut self) {
+        let _ = write_l1_table(&mut self.file, self.header.l1_table_offset, &self.l1_table);
     }
 }
 
@@ -627,6 +654,25 @@ fn write_u64_to_offset(f: &mut File, offset: u64, value: u64) -> std::io::Result
     f.write_u64::<BigEndian>(value)
 }
 
+// Writes the L1 table to the file.
+fn write_l1_table(file: &mut File, offset: u64, table: &Vec<u64>) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    for addr in table {
+        file.write_u64::<BigEndian>(*addr)?;
+    }
+    Ok(())
+}
+
+// Reads the L1 table from the file and returns a Vec containing the table.
+fn read_l1_table(f: &mut File, offset: u64, size: usize) -> std::io::Result<Vec<u64>> {
+    let mut table = Vec::with_capacity(size as usize);
+    f.seek(SeekFrom::Start(offset))?;
+    for _ in 0..size {
+        table.push(f.read_u64::<BigEndian>()?);
+    }
+    Ok(table)
+}
+
 // Ceiling of the division of `dividend`/`divisor`.
 fn div_round_up_u64(dividend: u64, divisor: u64) -> u64 {
     (dividend + divisor - 1) / divisor
@@ -657,7 +703,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x0c, // cluster_bits
             0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, // size
             0x00, 0x00, 0x00, 0x00, // crypt method
-            0x00, 0x00, 0x00, 0x00, // L1 size
+            0x00, 0x00, 0x01, 0x00, // L1 size
             0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, // L1 table offset
             0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, // refcount table offset
             0x00, 0x00, 0x00, 0x01, // refcount table clusters
@@ -678,6 +724,7 @@ mod tests {
         let shm = SharedMemory::new(None).unwrap();
         let mut disk_file: File = shm.into();
         disk_file.write_all(&header).unwrap();
+        disk_file.set_len(0x3_0000).unwrap();
         disk_file.seek(SeekFrom::Start(0)).unwrap();
 
         testfn(disk_file); // File closed when the function exits.
@@ -712,7 +759,7 @@ mod tests {
 
     #[test]
     fn invalid_magic() {
-        let invalid_header = vec![0x51u8, 0x46, 0x49, 0xfb];
+        let invalid_header = vec![0x51u8, 0x46, 0x4a, 0xfb];
         with_basic_file(&invalid_header, |mut disk_file: File| {
             QcowHeader::new(&mut disk_file).expect_err("Invalid header worked.");
         });
@@ -940,7 +987,7 @@ mod tests {
 		let data = [0xffu8; WRITE_SIZE];
         b.iter(|| {
 			with_default_file(1024 * 1024 * 1024 * 256, |mut qcow_file| {
-				for _i in (0..TOTAL_SIZE / WRITE_SIZE) {
+				for _i in 0..TOTAL_SIZE / WRITE_SIZE {
 					qcow_file.write(&data).expect("Failed to write test data.");
 				}
 			});
