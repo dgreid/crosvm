@@ -152,10 +152,9 @@ impl QcowHeader {
                 // Pre-allocate enough clusters for the entire refcount table as it must be
                 // continuous in the file. Allocate enough space to refcount all clusters, including
                 // the refcount clusters.
-                let refcount_bytes = (0x01u32 << DEFAULT_REFCOUNT_ORDER) / 8;
-                let for_data = div_round_up_u32(num_clusters * refcount_bytes, cluster_size);
-                let for_refcounts = div_round_up_u32(for_data * refcount_bytes, cluster_size);
-                let max_refcount_clusters = for_data + for_refcounts;
+                let max_refcount_clusters = max_refcount_clusters(DEFAULT_REFCOUNT_ORDER,
+                                                                  cluster_size,
+                                                                  num_clusters) as u32;
                 // The refcount table needs to store the offset of each refcount cluster.
                 div_round_up_u32(max_refcount_clusters * size_of::<u64>() as u32, cluster_size)
             },
@@ -214,6 +213,15 @@ impl QcowHeader {
     }
 }
 
+fn max_refcount_clusters(refcount_order: u32, cluster_size: u32, num_clusters: u32) -> usize {
+    let refcount_bytes = (0x01u32 << refcount_order) / 8;
+    let for_data = div_round_up_u32(num_clusters * refcount_bytes, cluster_size);
+    println!("for_data {}", for_data);
+    let for_refcounts = div_round_up_u32(for_data * refcount_bytes, cluster_size);
+    println!("for_refcounts {}", for_refcounts);
+    for_data as usize + for_refcounts as usize
+}
+
 /// Represents a qcow2 file. This is a sparse file format maintained by the qemu project.
 /// Full documentation of the format can be found in the qemu repository.
 ///
@@ -235,6 +243,7 @@ pub struct QcowFile {
     file: File,
     header: QcowHeader,
     l1_table: Vec<u64>,
+    ref_table: Vec<u64>,
     l2_entries: u64,
     cluster_size: u64,
     cluster_mask: u64,
@@ -288,10 +297,20 @@ impl QcowFile {
         let l1_table = read_l1_table(&mut file, header.l1_table_offset, header.l1_size as usize)
             .map_err(Error::ReadingHeader)?;
 
+        let num_clusters = div_round_up_u64(header.size, u64::from(cluster_size)) as u32;
+        println!("{:x} {:x} {}", header.refcount_table_offset, header.refcount_order, max_refcount_clusters(header.refcount_order, cluster_size as u32, num_clusters));
+        let ref_table = read_l1_table(
+            &mut file,
+            header.refcount_table_offset,
+            max_refcount_clusters(header.refcount_order, cluster_size as u32, num_clusters)
+        )
+            .map_err(Error::ReadingHeader)?;
+
         let qcow = QcowFile {
             file,
             header,
             l1_table,
+            ref_table,
             l2_entries: cluster_size / size_of::<u64>() as u64,
             cluster_size,
             cluster_mask: cluster_size - 1,
