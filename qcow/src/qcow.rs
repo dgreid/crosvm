@@ -294,12 +294,11 @@ impl QcowFile {
         offset_is_cluster_boundary(header.refcount_table_offset, header.cluster_bits)?;
         offset_is_cluster_boundary(header.snapshots_offset, header.cluster_bits)?;
 
-        let l1_table = read_l1_table(&mut file, header.l1_table_offset, header.l1_size as usize)
+        let l1_table = read_pointer_table(&mut file, header.l1_table_offset, header.l1_size as usize)
             .map_err(Error::ReadingHeader)?;
 
         let num_clusters = div_round_up_u64(header.size, u64::from(cluster_size)) as u32;
-        println!("{:x} {:x} {}", header.refcount_table_offset, header.refcount_order, max_refcount_clusters(header.refcount_order, cluster_size as u32, num_clusters));
-        let ref_table = read_l1_table(
+        let ref_table = read_pointer_table(
             &mut file,
             header.refcount_table_offset,
             max_refcount_clusters(header.refcount_order, cluster_size as u32, num_clusters)
@@ -551,7 +550,10 @@ impl QcowFile {
 
 impl Drop for QcowFile {
     fn drop(&mut self) {
-        let _ = write_l1_table(&mut self.file, self.header.l1_table_offset, &self.l1_table);
+        let _ = write_pointer_table(&mut self.file, self.header.l1_table_offset, &self.l1_table);
+        let _ = write_pointer_table(&mut self.file,
+                                    self.header.refcount_table_offset,
+                                    &self.ref_table);
     }
 }
 
@@ -649,7 +651,12 @@ impl Write for QcowFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.sync_all()
+        let _ = self.file.sync_all();
+        let _ = write_pointer_table(&mut self.file, self.header.l1_table_offset, &self.l1_table);
+        let _ = write_pointer_table(&mut self.file,
+                                    self.header.refcount_table_offset,
+                                    &self.ref_table);
+        self.file.sync_data()
     }
 }
 
@@ -674,7 +681,7 @@ fn write_u64_to_offset(f: &mut File, offset: u64, value: u64) -> std::io::Result
 }
 
 // Writes the L1 table to the file.
-fn write_l1_table(file: &mut File, offset: u64, table: &Vec<u64>) -> std::io::Result<()> {
+fn write_pointer_table(file: &mut File, offset: u64, table: &Vec<u64>) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     for addr in table {
         file.write_u64::<BigEndian>(*addr)?;
@@ -683,7 +690,7 @@ fn write_l1_table(file: &mut File, offset: u64, table: &Vec<u64>) -> std::io::Re
 }
 
 // Reads the L1 table from the file and returns a Vec containing the table.
-fn read_l1_table(f: &mut File, offset: u64, size: usize) -> std::io::Result<Vec<u64>> {
+fn read_pointer_table(f: &mut File, offset: u64, size: usize) -> std::io::Result<Vec<u64>> {
     let mut table = Vec::with_capacity(size as usize);
     f.seek(SeekFrom::Start(offset))?;
     for _ in 0..size {
@@ -719,7 +726,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x03, // version
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // backing file offset
             0x00, 0x00, 0x00, 0x00, // backing file size
-            0x00, 0x00, 0x00, 0x0c, // cluster_bits
+            0x00, 0x00, 0x00, 0x10, // cluster_bits
             0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, // size
             0x00, 0x00, 0x00, 0x00, // crypt method
             0x00, 0x00, 0x01, 0x00, // L1 size
