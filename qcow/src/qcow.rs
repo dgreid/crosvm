@@ -8,6 +8,9 @@ extern crate byteorder;
 extern crate libc;
 extern crate test;
 
+mod l2_cache;
+use l2_cache::L2Cache;
+
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::{EINVAL, ENOTSUP};
 
@@ -245,6 +248,7 @@ pub struct QcowFile {
     l1_table: Vec<u64>,
     ref_table: Vec<u64>,
     l2_entries: u64,
+    l2_cache: L2Cache,
     cluster_size: u64,
     cluster_mask: u64,
     current_offset: u64,
@@ -305,12 +309,15 @@ impl QcowFile {
         )
             .map_err(Error::ReadingHeader)?;
 
+        let l2_entries = cluster_size / size_of::<u64>() as u64;
+
         let qcow = QcowFile {
             file,
             header,
             l1_table,
             ref_table,
-            l2_entries: cluster_size / size_of::<u64>() as u64,
+            l2_entries,
+            l2_cache: L2Cache::new(l2_entries as usize, 100),
             cluster_size,
             cluster_mask: cluster_size - 1,
             current_offset: 0,
