@@ -46,6 +46,10 @@ impl L2Table {
     pub fn addrs(&self) -> &Vec<u64> {
         &self.cluster_addrs
     }
+
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
 }
 
 #[derive(Debug)]
@@ -61,7 +65,11 @@ impl L2Cache {
             table_size,
         }
     }
-    
+
+    pub fn contains(&self, l1_index: usize) -> bool {
+        self.tables.contains_key(&l1_index)
+    }
+
     pub fn get_table(&self, l1_index: usize) -> Option<&L2Table> {
         self.tables.get(&l1_index)
     }
@@ -71,14 +79,14 @@ impl L2Cache {
     }
 
     pub fn take_table(&mut self, l1_index: usize) -> Option<L2Table> {
-        self.tables.remove(&l1_index).map(|mut t| {t.dirty = true; t})
+        self.tables.remove(&l1_index)
     }
 
-    pub fn insert(&mut self, l1_index: usize, table: L2Table) -> Option<L2Table> {
+    pub fn insert(&mut self, l1_index: usize, table: L2Table) -> Option<(usize, L2Table)> {
         let evicted = if self.tables.len() == self.tables.capacity() {
             // TODO(dgreid) smarter eviction
             let k = self.tables.keys().nth(0).unwrap().clone();
-            self.tables.remove(&k)
+            self.tables.remove_entry(&k)
         } else {
             None
         };
@@ -88,7 +96,7 @@ impl L2Cache {
         evicted
     }
 
-    pub fn insert_vec(&mut self, l1_index: usize, addrs: Vec<u64>) -> Result<Option<L2Table>> {
+    pub fn insert_vec(&mut self, l1_index: usize, addrs: Vec<u64>) -> Result<Option<(usize, L2Table)>> {
         if addrs.len() != self.table_size {
             return Err(Error::InvalidVectorLength);
         }

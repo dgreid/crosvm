@@ -9,10 +9,10 @@ extern crate libc;
 extern crate test;
 
 mod l2_cache;
-use l2_cache::L2Cache;
+use l2_cache::{L2Cache, L2Table};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use libc::{EINVAL, ENOTSUP};
+use libc::EINVAL;
 
 use std::cmp::min;
 use std::fs::File;
@@ -23,6 +23,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 #[derive(Debug)]
 pub enum Error {
     BackingFilesNotSupported,
+    CompressedBlocksNotSupported,
     GettingFileSize(io::Error),
     GettingRefcount(io::Error),
     InvalidClusterSize,
@@ -300,6 +301,9 @@ impl QcowFile {
 
         let l1_table = read_pointer_table(&mut file, header.l1_table_offset, header.l1_size as usize)
             .map_err(Error::ReadingHeader)?;
+        if l1_table.iter().any(|entry| entry & COMPRESSED_FLAG != 0) {
+            return Err(Error::CompressedBlocksNotSupported);
+        }
 
         let num_clusters = div_round_up_u64(header.size, u64::from(cluster_size)) as u32;
         let ref_table = read_pointer_table(
@@ -418,6 +422,50 @@ impl QcowFile {
         address & self.cluster_mask
     }
 
+    fn file_offset_read(&mut self, address: u64) -> std::io::Result<Option<u64>> {
+        if address >= self.virtual_size() as u64 {
+            return Err(std::io::Error::from_raw_os_error(EINVAL));
+        }
+
+        let l1_index = self.l1_table_index(address) as usize;
+        let l2_addr_disk = *self.l1_table.get(l1_index)
+            .ok_or(std::io::Error::from_raw_os_error(EINVAL))?;
+
+        if !self.l2_cache.contains(l1_index) {
+            // Not in the cache.
+            if l2_addr_disk == 0 {
+                return Ok(None); // Reading from an unallocated cluster will return zeros.
+            }
+            self.cache_l2_table(l1_index as u64, l2_addr_disk)?;
+        };
+        let l2_table = self.l2_cache.get_table(l1_index).unwrap(); // Just checked/inserted.
+
+        let cluster_addr_from_table = l2_table.get(self.l2_address_offset(address) as usize);
+        let cluster_addr = match cluster_addr_from_table {
+            0 => return Ok(None),
+            a => a,
+        };
+        Ok(Some(cluster_addr + self.cluster_offset(address)))
+    }
+
+    fn cache_l2_table(&mut self, l1_index: u64, l2_addr: u64) -> std::io::Result<()> {
+        // Read the table from the disk, add it to the cache, and write back a potentially evicted
+        // block.
+        let addrs = read_pointer_table(&mut self.file, l2_addr, self.l2_entries as usize)?;
+        if let Some((evicted_idx, evicted)) = self.l2_cache.insert_vec(l1_index as usize, addrs)
+            .map_err(|_| std::io::Error::from_raw_os_error(EINVAL))?
+        {
+            if evicted.dirty() {
+                if let Some(i) = self.l1_table.get(evicted_idx) {
+                    // Sync all data that has been written.
+                    self.file.sync_all()?;
+                    write_pointer_table(&mut self.file, *i, evicted.addrs())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Returns the file offset for the given `address`. If `address` doesn't
     // have a cluster allocated, the behavior is determined by the `allocate`
     // argument. If `allocate` is true, then allocate the cluster and return the
@@ -435,11 +483,9 @@ impl QcowFile {
         }
         let l1_entry_index = self.l1_table_index(address) as usize;
         let l2_addr_disk = self.l1_table.get(l1_entry_index)
-            .ok_or(std::io::Error::from_raw_os_error(ENOTSUP))?
+            .ok_or(std::io::Error::from_raw_os_error(EINVAL))?
             .clone(); // Fine, it's a u64 anyways.
-        if l2_addr_disk & COMPRESSED_FLAG != 0 {
-            return Err(std::io::Error::from_raw_os_error(ENOTSUP));
-        }
+
         let l2_addr_from_table: u64 = l2_addr_disk & L1_TABLE_OFFSET_MASK;
         let l2_addr = if l2_addr_from_table == 0 {
             if allocate {
