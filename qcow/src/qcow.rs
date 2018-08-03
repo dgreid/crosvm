@@ -520,7 +520,6 @@ impl QcowFile {
         if let Some((evicted_idx, evicted)) = self
             .l2_cache
             .insert(l1_index as usize, table)
-            .map_err(|_| std::io::Error::from_raw_os_error(EINVAL))?
         {
             if !evicted.dirty() {
                 return Ok(());
@@ -530,6 +529,7 @@ impl QcowFile {
             let addr = *self.l1_table.get(evicted_idx).unwrap();
             if addr != 0 {
                 self.unref_clusters.push(addr);
+                self.set_cluster_refcount(addr, 0)?;
             }
 
             // Allocate a new cluster to store the L2 table and update the L1 table to point to the

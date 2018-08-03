@@ -2,14 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std;
 use std::collections::HashMap;
-
-#[derive(Debug)]
-pub enum Error {
-    InvalidVectorLength,
-}
-pub type Result<T> = std::result::Result<T, Error>;
 
 pub trait Cacheable {
     /// Used to check if the item needs to be written out or if it can be discarded.
@@ -89,7 +82,7 @@ impl<T: Cacheable> L2Cache<T> {
         self.tables.get_mut(&l1_index)
     }
 
-    pub fn insert(&mut self, l1_index: usize, table: T) -> Result<Option<(usize, T)>> {
+    pub fn insert(&mut self, l1_index: usize, table: T) -> Option<(usize, T)> {
         let evicted = if self.tables.len() == self.tables.capacity() {
             // TODO(dgreid) smarter eviction
             let k = self.tables.keys().nth(0).unwrap().clone();
@@ -100,7 +93,7 @@ impl<T: Cacheable> L2Cache<T> {
 
         self.tables.insert(l1_index, table);
 
-        Ok(evicted)
+        evicted
     }
 
     pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &mut T)> {
