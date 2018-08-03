@@ -622,8 +622,9 @@ impl QcowFile {
         }
         // TODO(dgreid) - Newly update refcount blocks.
         self.file.sync_all()?; // Make sure metadata(file len) and all data clusters are written.
-                               // Push L1 table and refcount table last as all the clusters they point to are now
-                               // guaranteed to be valid.
+
+        // Push L1 table and refcount table last as all the clusters they point to are now
+        // guaranteed to be valid.
         write_pointer_table(
             &mut self.file,
             self.header.l1_table_offset,

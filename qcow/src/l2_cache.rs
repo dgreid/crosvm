@@ -75,7 +75,10 @@ impl L2Cache {
         self.tables.get_mut(&l1_index)
     }
 
-    pub fn insert(&mut self, l1_index: usize, table: L2Table) -> Option<(usize, L2Table)> {
+    pub fn insert(&mut self, l1_index: usize, table: L2Table) -> Result<Option<(usize, L2Table)>> {
+        if table.addrs().len() != self.table_size {
+            return Err(Error::InvalidVectorLength);
+        }
         let evicted = if self.tables.len() == self.tables.capacity() {
             // TODO(dgreid) smarter eviction
             let k = self.tables.keys().nth(0).unwrap().clone();
@@ -86,7 +89,7 @@ impl L2Cache {
 
         self.tables.insert(l1_index, table);
 
-        evicted
+        Ok(evicted)
     }
 
     pub fn insert_vec(
@@ -98,7 +101,7 @@ impl L2Cache {
             return Err(Error::InvalidVectorLength);
         }
 
-        Ok(self.insert(l1_index, L2Table::from_vec(addrs)))
+        self.insert(l1_index, L2Table::from_vec(addrs))
     }
 
     pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &mut L2Table)> {
