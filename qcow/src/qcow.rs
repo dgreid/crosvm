@@ -9,7 +9,7 @@ extern crate libc;
 extern crate test;
 
 mod l2_cache;
-use l2_cache::{L2Cache, L2Table};
+use l2_cache::L2Cache;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::EINVAL;
@@ -254,6 +254,10 @@ pub struct QcowFile {
     cluster_mask: u64,
     current_offset: u64,
     refcount_bits: u64,
+    unref_clusters: Vec<u64>, // List of freshly unreferenced clusters.
+    // List of unreferenced clusters available to be used. unref clusters become available once the
+    // removal of references to them have been synced to disk.
+    avail_clusters: Vec<u64>,
     //TODO(dgreid) Add support for backing files. - backing_file: Option<Box<QcowFile<T>>>,
 }
 
@@ -436,7 +440,8 @@ impl QcowFile {
             if l2_addr_disk == 0 {
                 return Ok(None); // Reading from an unallocated cluster will return zeros.
             }
-            self.cache_l2_table(l1_index as u64, l2_addr_disk)?;
+            let addrs = read_pointer_table(&mut self.file, l2_addr, self.l2_entries as usize)?;
+            self.cache_l2_table(l1_index as u64, addrs)?;
         };
         let l2_table = self.l2_cache.get_table(l1_index).unwrap(); // Just checked/inserted.
 
@@ -448,82 +453,69 @@ impl QcowFile {
         Ok(Some(cluster_addr + self.cluster_offset(address)))
     }
 
-    fn cache_l2_table(&mut self, l1_index: u64, l2_addr: u64) -> std::io::Result<()> {
+    fn file_offset_write(&mut self, address: u64) -> std::io::Result<Option<u64>> {
+        if address >= self.virtual_size() as u64 {
+            return Err(std::io::Error::from_raw_os_error(EINVAL));
+        }
+
+        let l1_index = self.l1_table_index(address) as usize;
+        let l2_addr_disk = *self.l1_table.get(l1_index)
+            .ok_or(std::io::Error::from_raw_os_error(EINVAL))?;
+
+        if !self.l2_cache.contains(l1_index) {
+            // Not in the cache.
+            let addrs = if l2_addr_disk == 0 {
+                vec![0; self.l2_entries as usize]
+            } else {
+                read_pointer_table(&mut self.file, l2_addr, self.l2_entries as usize)?
+            };
+            self.cache_l2_table(l1_index as u64, addrs)?;
+        };
+        let l2_table = self.l2_cache.get_table(l1_index).unwrap(); // Just checked/inserted.
+
+        let cluster_addr_from_table = l2_table.get(self.l2_address_offset(address) as usize);
+        let cluster_addr = match cluster_addr_from_table {
+            0 => self.append_data_cluster()?,
+            a => a,
+        };
+        Ok(Some(cluster_addr + self.cluster_offset(address)))
+    }
+
+    fn cache_l2_table(&mut self, l1_index: u64, addrs: Vec<u64>) -> std::io::Result<()> {
         // Read the table from the disk, add it to the cache, and write back a potentially evicted
         // block.
-        let addrs = read_pointer_table(&mut self.file, l2_addr, self.l2_entries as usize)?;
         if let Some((evicted_idx, evicted)) = self.l2_cache.insert_vec(l1_index as usize, addrs)
             .map_err(|_| std::io::Error::from_raw_os_error(EINVAL))?
         {
-            if evicted.dirty() {
-                if let Some(i) = self.l1_table.get(evicted_idx) {
-                    // Sync all data that has been written.
-                    self.file.sync_all()?;
-                    write_pointer_table(&mut self.file, *i, evicted.addrs())?;
-                }
+            if !evicted.dirty() {
+                return Ok(());
+            }
+
+            if let Some(addr) = self.l1_table.get_mut(evicted_idx) {
+                // Allocate a new cluster to store the L2 table and update the L1 table to point to
+                // the new table.
+                let new_addr = self.get_new_cluster()?;
+                self.unref_clusters.push(addr);
+                *addr = new_addr;
+
+                write_pointer_table(&mut self.file, *addr, evicted.addrs())?;
             }
         }
         Ok(())
     }
 
-    // Returns the file offset for the given `address`. If `address` doesn't
-    // have a cluster allocated, the behavior is determined by the `allocate`
-    // argument. If `allocate` is true, then allocate the cluster and return the
-    // new offset, otherwise return None.  Returns an error if the address is
-    // beyond the end or there is an issue accessing the file.
-    fn file_offset(&mut self, address: u64, allocate: bool) -> std::io::Result<Option<u64>> {
-        if address >= self.virtual_size() as u64 {
-            return Err(std::io::Error::from_raw_os_error(EINVAL));
-        }
-
-        let l1_file_addr = self.header.l1_table_offset + self.l1_address_offset(address);
-        if l1_file_addr >= self.file.metadata()?.len() {
-            self.file.set_len(self.header.l1_table_offset +
-                              self.l1_address_offset(self.virtual_size()))?;
-        }
-        let l1_entry_index = self.l1_table_index(address) as usize;
-        let l2_addr_disk = self.l1_table.get(l1_entry_index)
-            .ok_or(std::io::Error::from_raw_os_error(EINVAL))?
-            .clone(); // Fine, it's a u64 anyways.
-
-        let l2_addr_from_table: u64 = l2_addr_disk & L1_TABLE_OFFSET_MASK;
-        let l2_addr = if l2_addr_from_table == 0 {
-            if allocate {
-                let new_addr = self.append_l2_cluster()?;
-                self.l1_table[l1_entry_index as usize] = new_addr;
-                new_addr
-            } else {
-                return Ok(None);
-            }
-        } else {
-            l2_addr_from_table
-        };
-        let l2_entry_addr: u64 = l2_addr.checked_add(self.l2_address_offset(address))
-                .ok_or_else(|| std::io::Error::from_raw_os_error(EINVAL))?;
-        let cluster_addr_disk: u64 = read_u64_from_offset(&mut self.file, l2_entry_addr)?;
-        let cluster_addr_from_table: u64 = cluster_addr_disk & L2_TABLE_OFFSET_MASK;
-        let cluster_addr = if cluster_addr_from_table == 0 {
-            if allocate {
-                self.append_data_cluster(l2_entry_addr)?
-            } else {
-                return Ok(None);
-            }
-        } else {
-            cluster_addr_from_table
-        };
-        Ok(Some(cluster_addr + self.cluster_offset(address)))
-    }
-
     // Allocate a new cluster at the end of the current file, return the address.
-    fn append_new_cluster(&mut self) -> std::io::Result<u64> {
+    fn get_new_cluster(&mut self) -> std::io::Result<u64> {
+        // First use a pre allocated cluster if one is available.
+        if let Some(free_cluster) = self.avail_clusters.pop() {
+            return Ok(free_cluster);
+        }
         // Determine where the new end of the file should be and set_len, which
         // translates to truncate(2).
         let file_end: u64 = self.file.seek(SeekFrom::End(0))?;
         let cluster_size: u64 = self.cluster_size;
         let new_cluster_address: u64 = (file_end + cluster_size - 1) & !self.cluster_mask;
         self.file.set_len(new_cluster_address + cluster_size)?;
-        // Ensure the length is set before meta-data is updated.
-        self.file.sync_all()?;
 
         Ok(new_cluster_address)
     }
@@ -531,7 +523,7 @@ impl QcowFile {
     // Allocate and initialize a new l2 cluster. Returns the offset of the
     // cluster in to the file on success.
     fn append_l2_cluster(&mut self) -> std::io::Result<u64> {
-        let new_addr: u64 = self.append_new_cluster()?;
+        let new_addr: u64 = self.get_new_cluster()?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
         self.set_cluster_refcount(new_addr, 1)?;
         // Ensure that the refcount is updated before starting to use the cluster.
@@ -540,16 +532,11 @@ impl QcowFile {
     }
 
     // Allocate and initialize a new data cluster. Returns the offset of the
-    // cluster in to the file on success. Write the address to the offset in
-    // `entry_addr` to fill in the L1 or L2 table.
-    fn append_data_cluster(&mut self, entry_addr: u64) -> std::io::Result<u64> {
-        let new_addr: u64 = self.append_new_cluster()?;
-        // Save the new block to the table and mark it as used.
-        write_u64_to_offset(&mut self.file, entry_addr, new_addr | CLUSTER_USED_FLAG)?;
+    // cluster in to the file on success.
+    fn append_data_cluster(&mut self) -> std::io::Result<u64> {
+        let new_addr: u64 = self.get_new_cluster()?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
         self.set_cluster_refcount(new_addr, 1)?;
-        // Ensure that the refcount is updated before starting to use the cluster.
-        self.file.sync_data()?;
         Ok(new_addr)
     }
 
@@ -570,7 +557,7 @@ impl QcowFile {
         let (entry_addr, block_index) = self.get_refcount_block(address)?;
         let stored_addr = read_u64_from_offset(&mut self.file, entry_addr)?;
         let refcount_block_address = if stored_addr == 0 {
-            let new_addr = self.append_new_cluster()?;
+            let new_addr = self.get_new_cluster()?;
             write_u64_to_offset(&mut self.file, entry_addr, new_addr)?;
             self.set_cluster_refcount(new_addr, 1)?;
             new_addr
@@ -709,7 +696,9 @@ impl Write for QcowFile {
         let _ = write_pointer_table(&mut self.file,
                                     self.header.refcount_table_offset,
                                     &self.ref_table);
-        self.file.sync_data()
+        self.file.sync_data()?;
+        self.avail_clusters.append(&mut self.unref_clusters);
+        Ok(())
     }
 }
 
