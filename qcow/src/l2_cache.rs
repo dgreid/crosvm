@@ -89,7 +89,11 @@ impl L2Cache {
         evicted
     }
 
-    pub fn insert_vec(&mut self, l1_index: usize, addrs: Vec<u64>) -> Result<Option<(usize, L2Table)>> {
+    pub fn insert_vec(
+        &mut self,
+        l1_index: usize,
+        addrs: Vec<u64>,
+    ) -> Result<Option<(usize, L2Table)>> {
         if addrs.len() != self.table_size {
             return Err(Error::InvalidVectorLength);
         }
@@ -98,6 +102,8 @@ impl L2Cache {
     }
 
     pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &mut L2Table)> {
-        self.tables.iter_mut().filter_map(|(k, v)| if v.dirty { Some((k, v)) } else { None })
+        self.tables
+            .iter_mut()
+            .filter_map(|(k, v)| if v.dirty { Some((k, v)) } else { None })
     }
 }
