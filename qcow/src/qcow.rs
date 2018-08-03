@@ -303,7 +303,10 @@ impl QcowFile {
         offset_is_cluster_boundary(header.refcount_table_offset, header.cluster_bits)?;
         offset_is_cluster_boundary(header.snapshots_offset, header.cluster_bits)?;
 
-        let l1_table = read_pointer_table(&mut file, header.l1_table_offset, header.l1_size as usize)
+        let l1_table = read_pointer_table(&mut file,
+                                          header.l1_table_offset,
+                                          header.l1_size as usize,
+                                          Some(L1_TABLE_OFFSET_MASK))
             .map_err(Error::ReadingHeader)?;
         if l1_table.iter().any(|entry| entry & COMPRESSED_FLAG != 0) {
             return Err(Error::CompressedBlocksNotSupported);
@@ -313,7 +316,8 @@ impl QcowFile {
         let ref_table = read_pointer_table(
             &mut file,
             header.refcount_table_offset,
-            max_refcount_clusters(header.refcount_order, cluster_size as u32, num_clusters)
+            max_refcount_clusters(header.refcount_order, cluster_size as u32, num_clusters),
+            None
         )
             .map_err(Error::ReadingHeader)?;
 
@@ -330,6 +334,8 @@ impl QcowFile {
             cluster_mask: cluster_size - 1,
             current_offset: 0,
             refcount_bits,
+            unref_clusters: Vec::new(),
+            avail_clusters: Vec::new(),
         };
 
         // Check that the L1 and refcount tables fit in a 64bit address space.
@@ -440,7 +446,10 @@ impl QcowFile {
             if l2_addr_disk == 0 {
                 return Ok(None); // Reading from an unallocated cluster will return zeros.
             }
-            let addrs = read_pointer_table(&mut self.file, l2_addr, self.l2_entries as usize)?;
+            let addrs = read_pointer_table(&mut self.file,
+                                           l2_addr_disk,
+                                           self.l2_entries as usize,
+                                           Some(L2_TABLE_OFFSET_MASK))?;
             self.cache_l2_table(l1_index as u64, addrs)?;
         };
         let l2_table = self.l2_cache.get_table(l1_index).unwrap(); // Just checked/inserted.
@@ -453,7 +462,7 @@ impl QcowFile {
         Ok(Some(cluster_addr + self.cluster_offset(address)))
     }
 
-    fn file_offset_write(&mut self, address: u64) -> std::io::Result<Option<u64>> {
+    fn file_offset_write(&mut self, address: u64) -> std::io::Result<u64> {
         if address >= self.virtual_size() as u64 {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
         }
@@ -467,18 +476,21 @@ impl QcowFile {
             let addrs = if l2_addr_disk == 0 {
                 vec![0; self.l2_entries as usize]
             } else {
-                read_pointer_table(&mut self.file, l2_addr, self.l2_entries as usize)?
+                read_pointer_table(&mut self.file,
+                                   l2_addr_disk,
+                                   self.l2_entries as usize,
+                                   Some(L2_TABLE_OFFSET_MASK))?
             };
             self.cache_l2_table(l1_index as u64, addrs)?;
         };
-        let l2_table = self.l2_cache.get_table(l1_index).unwrap(); // Just checked/inserted.
-
-        let cluster_addr_from_table = l2_table.get(self.l2_address_offset(address) as usize);
+        let cluster_addr_from_table = self.l2_cache.get_table(l1_index)
+            .unwrap() // Just checked/inserted.
+            .get(self.l2_address_offset(address) as usize);
         let cluster_addr = match cluster_addr_from_table {
             0 => self.append_data_cluster()?,
             a => a,
         };
-        Ok(Some(cluster_addr + self.cluster_offset(address)))
+        Ok(cluster_addr + self.cluster_offset(address))
     }
 
     fn cache_l2_table(&mut self, l1_index: u64, addrs: Vec<u64>) -> std::io::Result<()> {
@@ -491,15 +503,20 @@ impl QcowFile {
                 return Ok(());
             }
 
-            if let Some(addr) = self.l1_table.get_mut(evicted_idx) {
-                // Allocate a new cluster to store the L2 table and update the L1 table to point to
-                // the new table.
-                let new_addr = self.get_new_cluster()?;
+            // The index must be from valid when we insterted it.
+            let addr = *self.l1_table.get(evicted_idx).unwrap();
+            if addr != 0 {
                 self.unref_clusters.push(addr);
-                *addr = new_addr;
-
-                write_pointer_table(&mut self.file, *addr, evicted.addrs())?;
             }
+
+            // Allocate a new cluster to store the L2 table and update the L1 table to point to the
+            // new table.
+            let new_addr = self.get_new_cluster()?;
+            // The cluster refcount starts at one indicating it is used but doesn't need COW.
+            self.set_cluster_refcount(new_addr, 1)?;
+            self.l1_table[evicted_idx] = new_addr;
+
+            write_pointer_table(&mut self.file, new_addr, evicted.addrs(), CLUSTER_USED_FLAG)?;
         }
         Ok(())
     }
@@ -590,10 +607,11 @@ impl QcowFile {
 
 impl Drop for QcowFile {
     fn drop(&mut self) {
-        let _ = write_pointer_table(&mut self.file, self.header.l1_table_offset, &self.l1_table);
+        let _ = write_pointer_table(&mut self.file, self.header.l1_table_offset, &self.l1_table, 0);
         let _ = write_pointer_table(&mut self.file,
                                     self.header.refcount_table_offset,
-                                    &self.ref_table);
+                                    &self.ref_table,
+                                    0);
     }
 }
 
@@ -611,7 +629,7 @@ impl Read for QcowFile {
         let mut nread: usize = 0;
         while nread < read_count {
             let curr_addr = address + nread as u64;
-            let file_offset = self.file_offset(curr_addr, false)?;
+            let file_offset = self.file_offset_read(curr_addr)?;
             let count = self.limit_range_cluster(curr_addr, read_count - nread);
 
             if let Some(offset) = file_offset {
@@ -673,8 +691,7 @@ impl Write for QcowFile {
         let mut nwritten: usize = 0;
         while nwritten < write_count {
             let curr_addr = address + nwritten as u64;
-            // file_offset always returns an address when allocate == true.
-            let offset = self.file_offset(curr_addr, true)?.unwrap();
+            let offset = self.file_offset_write(curr_addr)?;
             let count = self.limit_range_cluster(curr_addr, write_count - nwritten);
 
             if let Err(e) = self.file.seek(SeekFrom::Start(offset)) {
@@ -692,10 +709,11 @@ impl Write for QcowFile {
 
     fn flush(&mut self) -> std::io::Result<()> {
         let _ = self.file.sync_all();
-        let _ = write_pointer_table(&mut self.file, self.header.l1_table_offset, &self.l1_table);
+        let _ = write_pointer_table(&mut self.file, self.header.l1_table_offset, &self.l1_table, 0);
         let _ = write_pointer_table(&mut self.file,
                                     self.header.refcount_table_offset,
-                                    &self.ref_table);
+                                    &self.ref_table,
+                                    0);
         self.file.sync_data()?;
         self.avail_clusters.append(&mut self.unref_clusters);
         Ok(())
@@ -722,21 +740,35 @@ fn write_u64_to_offset(f: &mut File, offset: u64, value: u64) -> std::io::Result
     f.write_u64::<BigEndian>(value)
 }
 
-// Writes the L1 table to the file.
-fn write_pointer_table(file: &mut File, offset: u64, table: &Vec<u64>) -> std::io::Result<()> {
+// Writes the L1 table to `file`. Non-zero table entreis have `non_zero_flags` ORed before writing.
+fn write_pointer_table(
+    file: &mut File,
+    offset: u64,
+    table: &Vec<u64>,
+    non_zero_flags: u64)
+    -> std::io::Result<()>
+{
     file.seek(SeekFrom::Start(offset))?;
     for addr in table {
-        file.write_u64::<BigEndian>(*addr)?;
+        let val = if *addr == 0 {
+            0
+        } else {
+            *addr | non_zero_flags
+        };
+        file.write_u64::<BigEndian>(val)?;
     }
     Ok(())
 }
 
 // Reads the L1 table from the file and returns a Vec containing the table.
-fn read_pointer_table(f: &mut File, offset: u64, size: usize) -> std::io::Result<Vec<u64>> {
+fn read_pointer_table(f: &mut File, offset: u64, size: usize, mask: Option<u64>)
+    -> std::io::Result<Vec<u64>>
+{
     let mut table = Vec::with_capacity(size as usize);
     f.seek(SeekFrom::Start(offset))?;
+    let mask = mask.unwrap_or(0xffff_ffff_ffff_ffff);
     for _ in 0..size {
-        table.push(f.read_u64::<BigEndian>()?);
+        table.push(f.read_u64::<BigEndian>()? & mask);
     }
     Ok(table)
 }

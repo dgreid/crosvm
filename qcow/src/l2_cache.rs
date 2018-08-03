@@ -104,7 +104,7 @@ impl L2Cache {
         Ok(self.insert(l1_index, L2Table::from_vec(addrs)))
     }
 
-    pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = &L2Table> {
-        self.tables.iter().filter_map(|(k, v)| if v.dirty { Some(v) } else { None })
+    pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &L2Table)> {
+        self.tables.iter().filter_map(|(k, v)| if v.dirty { Some((k, v)) } else { None })
     }
 }
