@@ -11,6 +11,11 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub trait Cacheable {
+    /// Used to check if the item needs to be written out or if it can be discarded.
+    fn dirty(&self) -> bool;
+}
+
 #[derive(Debug)]
 pub struct L2Table {
     cluster_addrs: Vec<u64>,
@@ -18,7 +23,14 @@ pub struct L2Table {
 }
 
 impl L2Table {
-    fn from_vec(addrs: Vec<u64>) -> L2Table {
+    pub fn new(count: u64) -> L2Table {
+        L2Table {
+            cluster_addrs: vec![0, count],
+            dirty: false,
+        }
+    }
+
+    pub fn from_vec(addrs: Vec<u64>) -> L2Table {
         L2Table {
             cluster_addrs: addrs,
             dirty: false,
@@ -40,23 +52,25 @@ impl L2Table {
         &self.cluster_addrs
     }
 
-    pub fn dirty(&self) -> bool {
-        self.dirty
-    }
-
     pub fn mark_clean(&mut self) {
         self.dirty = false;
     }
 }
 
+impl Cacheable for L2Table {
+    fn dirty(&self) -> bool {
+        self.dirty
+    }
+}
+
 #[derive(Debug)]
-pub struct L2Cache {
-    tables: HashMap<usize, L2Table>,
+pub struct L2Cache<T: Cacheable> {
+    tables: HashMap<usize, T>,
     table_size: usize,
 }
 
-impl L2Cache {
-    pub fn new(table_size: usize, capacity: usize) -> L2Cache {
+impl<T: Cacheable> L2Cache<T> {
+    pub fn new(table_size: usize, capacity: usize) -> L2Cache<T> {
         L2Cache {
             tables: HashMap::with_capacity(capacity),
             table_size,
@@ -67,18 +81,15 @@ impl L2Cache {
         self.tables.contains_key(&l1_index)
     }
 
-    pub fn get_table(&self, l1_index: usize) -> Option<&L2Table> {
+    pub fn get_table(&self, l1_index: usize) -> Option<&T> {
         self.tables.get(&l1_index)
     }
 
-    pub fn get_table_mut(&mut self, l1_index: usize) -> Option<&mut L2Table> {
+    pub fn get_table_mut(&mut self, l1_index: usize) -> Option<&mut T> {
         self.tables.get_mut(&l1_index)
     }
 
-    pub fn insert(&mut self, l1_index: usize, table: L2Table) -> Result<Option<(usize, L2Table)>> {
-        if table.addrs().len() != self.table_size {
-            return Err(Error::InvalidVectorLength);
-        }
+    pub fn insert(&mut self, l1_index: usize, table: T) -> Result<Option<(usize, T)>> {
         let evicted = if self.tables.len() == self.tables.capacity() {
             // TODO(dgreid) smarter eviction
             let k = self.tables.keys().nth(0).unwrap().clone();
@@ -92,21 +103,9 @@ impl L2Cache {
         Ok(evicted)
     }
 
-    pub fn insert_vec(
-        &mut self,
-        l1_index: usize,
-        addrs: Vec<u64>,
-    ) -> Result<Option<(usize, L2Table)>> {
-        if addrs.len() != self.table_size {
-            return Err(Error::InvalidVectorLength);
-        }
-
-        self.insert(l1_index, L2Table::from_vec(addrs))
-    }
-
-    pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &mut L2Table)> {
+    pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &mut T)> {
         self.tables
             .iter_mut()
-            .filter_map(|(k, v)| if v.dirty { Some((k, v)) } else { None })
+            .filter_map(|(k, v)| if v.dirty() { Some((k, v)) } else { None })
     }
 }
