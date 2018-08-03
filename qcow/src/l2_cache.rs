@@ -18,13 +18,6 @@ pub struct L2Table {
 }
 
 impl L2Table {
-    fn new(table_size: usize) -> L2Table {
-        L2Table {
-            cluster_addrs: vec![0, table_size as u64],
-            dirty: true,
-        }
-    }
-
     fn from_vec(addrs: Vec<u64>) -> L2Table {
         L2Table {
             cluster_addrs: addrs,
@@ -50,6 +43,10 @@ impl L2Table {
     pub fn dirty(&self) -> bool {
         self.dirty
     }
+
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
 }
 
 #[derive(Debug)]
@@ -74,12 +71,8 @@ impl L2Cache {
         self.tables.get(&l1_index)
     }
 
-    pub fn create_table(&self) -> L2Table {
-        L2Table::new(self.table_size)
-    }
-
-    pub fn take_table(&mut self, l1_index: usize) -> Option<L2Table> {
-        self.tables.remove(&l1_index)
+    pub fn get_table_mut(&mut self, l1_index: usize) -> Option<&mut L2Table> {
+        self.tables.get_mut(&l1_index)
     }
 
     pub fn insert(&mut self, l1_index: usize, table: L2Table) -> Option<(usize, L2Table)> {
@@ -104,7 +97,7 @@ impl L2Cache {
         Ok(self.insert(l1_index, L2Table::from_vec(addrs)))
     }
 
-    pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &L2Table)> {
-        self.tables.iter().filter_map(|(k, v)| if v.dirty { Some((k, v)) } else { None })
+    pub fn dirty_iter_mut(&mut self) -> impl Iterator<Item = (&usize, &mut L2Table)> {
+        self.tables.iter_mut().filter_map(|(k, v)| if v.dirty { Some((k, v)) } else { None })
     }
 }
