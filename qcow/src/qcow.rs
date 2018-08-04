@@ -490,7 +490,7 @@ impl QcowFile {
         if !self.l2_cache.contains(l1_index) {
             // Not in the cache.
             let table = if l2_addr_disk == 0 {
-                L2Table::new(self.l2_entries)
+                L2Table::new(self.l2_entries as usize)
             } else {
                 self.read_l2_table(l2_addr_disk)?
             };

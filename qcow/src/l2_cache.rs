@@ -16,9 +16,9 @@ pub struct L2Table {
 }
 
 impl L2Table {
-    pub fn new(count: u64) -> L2Table {
+    pub fn new(count: usize) -> L2Table {
         L2Table {
-            cluster_addrs: vec![0, count],
+            cluster_addrs: vec![0; count],
             dirty: false,
         }
     }
