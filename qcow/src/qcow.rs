@@ -525,24 +525,38 @@ impl QcowFile {
                 return Ok(());
             }
 
-            // The index must be from valid when we insterted it.
-            let addr = *self.l1_table.get(evicted_idx).unwrap();
-            if addr != 0 {
-                self.unref_clusters.push(addr);
-                self.set_cluster_refcount(addr, 0)?;
-            }
-
-            // Allocate a new cluster to store the L2 table and update the L1 table to point to the
-            // new table.
-            let new_addr = self.get_new_cluster()?;
-            // The cluster refcount starts at one indicating it is used but doesn't need COW.
-            self.set_cluster_refcount(new_addr, 1)?;
-            self.l1_table[evicted_idx] = new_addr;
-
-            write_pointer_table(&mut self.file, new_addr, evicted.addrs(), CLUSTER_USED_FLAG)?;
+            self.write_l2_cluster(evicted_idx, evicted.addrs())?;
         }
         Ok(())
     }
+
+    // Writes an L2 cluster out to disk. Freeing a previously used cluster if one exists.
+    // modified clusters are alwas witten to new clusters so the L1 table can be committed to disk
+    // after they are and L1 never points at an invalid table.
+    fn write_l2_cluster(
+        &mut self,
+        l1_index: usize,
+        cluster: &Vec<u64>)
+        -> std::io::Result<()>
+    {
+        // The index must be from valid when we insterted it.
+        let addr = *self.l1_table.get(l1_index).unwrap();
+        if addr != 0 {
+            self.unref_clusters.push(addr);
+            self.set_cluster_refcount(addr, 0)?;
+        }
+
+        //TODO(dgreid) move to where l2 cluster is created.
+        // Allocate a new cluster to store the L2 table and update the L1 table to point to the
+        // new table.
+        let new_addr = self.get_new_cluster()?;
+        // The cluster refcount starts at one indicating it is used but doesn't need COW.
+        self.set_cluster_refcount(new_addr, 1)?;
+        self.l1_table[l1_index] = new_addr;
+
+        write_pointer_table(&mut self.file, new_addr, cluster, CLUSTER_USED_FLAG)
+    }
+
 
     // Allocate a new cluster at the end of the current file, return the address.
     fn get_new_cluster(&mut self) -> std::io::Result<u64> {
@@ -616,8 +630,7 @@ impl QcowFile {
     fn sync_caches(&mut self) -> std::io::Result<()> {
         // Write out all dirty L2 tables.
         for (l1_index, l2_table) in self.l2_cache.dirty_iter_mut() {
-            let addr = self.l1_table[*l1_index];
-            write_pointer_table(&mut self.file, addr, l2_table.addrs(), CLUSTER_USED_FLAG)?;
+            self.write_l2_cluster(*l1_index, l2_table.addrs())?;
             l2_table.mark_clean();
         }
         // TODO(dgreid) - Newly update refcount blocks.
@@ -786,6 +799,20 @@ fn read_pointer_table(
     let mask = mask.unwrap_or(0xffff_ffff_ffff_ffff);
     for _ in 0..size {
         table.push(f.read_u64::<BigEndian>()? & mask);
+    }
+    Ok(table)
+}
+
+// Read a refcount block from the file and returns a Vec containing the table.
+fn read_refcount_block(
+    f: &mut File,
+    offset: u64,
+    size: usize,
+) -> std::io::Result<Vec<u16>> {
+    let mut table = Vec::with_capacity(size as usize);
+    f.seek(SeekFrom::Start(offset))?;
+    for _ in 0..size {
+        table.push(f.read_u16::<BigEndian>()?);
     }
     Ok(table)
 }
