@@ -9,7 +9,7 @@ extern crate libc;
 extern crate test;
 
 mod l2_cache;
-use l2_cache::{Cacheable, L2Cache, L2Table};
+use l2_cache::{Cacheable, L2Cache, VecCache};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::EINVAL;
@@ -249,7 +249,7 @@ pub struct QcowFile {
     l1_table: Vec<u64>,
     ref_table: Vec<u64>,
     l2_entries: u64,
-    l2_cache: L2Cache<L2Table>,
+    l2_cache: L2Cache<VecCache<u64>>,
     cluster_size: u64,
     cluster_mask: u64,
     current_offset: u64,
@@ -436,14 +436,14 @@ impl QcowFile {
         address & self.cluster_mask
     }
 
-    fn read_l2_table(&mut self, address: u64) -> std::io::Result<L2Table> {
+    fn read_l2_table(&mut self, address: u64) -> std::io::Result<VecCache<u64>> {
         let addrs = read_pointer_table(
             &mut self.file,
             address,
             self.l2_entries as usize,
             Some(L2_TABLE_OFFSET_MASK),
             )?;
-        Ok(L2Table::from_vec(addrs))
+        Ok(VecCache::from_vec(addrs))
     }
 
     fn file_offset_read(&mut self, address: u64) -> std::io::Result<Option<u64>> {
@@ -490,7 +490,7 @@ impl QcowFile {
         if !self.l2_cache.contains(l1_index) {
             // Not in the cache.
             let table = if l2_addr_disk == 0 {
-                L2Table::new(self.l2_entries as usize)
+                VecCache::new(self.l2_entries as usize)
             } else {
                 self.read_l2_table(l2_addr_disk)?
             };
@@ -514,7 +514,7 @@ impl QcowFile {
         Ok(cluster_addr + self.cluster_offset(address))
     }
 
-    fn cache_l2_table(&mut self, l1_index: u64, table: L2Table) -> std::io::Result<()> {
+    fn cache_l2_table(&mut self, l1_index: u64, table: VecCache<u64>) -> std::io::Result<()> {
         // Read the table from the disk, add it to the cache, and write back a potentially evicted
         // block.
         if let Some((evicted_idx, evicted)) = self

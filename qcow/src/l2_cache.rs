@@ -10,38 +10,38 @@ pub trait Cacheable {
 }
 
 #[derive(Debug)]
-pub struct L2Table {
-    cluster_addrs: Vec<u64>,
+pub struct VecCache<T: 'static + Copy + Default> {
+    cluster_addrs: Vec<T>,
     dirty: bool,
 }
 
-impl L2Table {
-    pub fn new(count: usize) -> L2Table {
-        L2Table {
-            cluster_addrs: vec![0; count],
+impl<T: 'static + Copy + Default> VecCache<T> {
+    pub fn new(count: usize) -> VecCache<T> {
+        VecCache {
+            cluster_addrs: vec![Default::default(); count],
             dirty: false,
         }
     }
 
-    pub fn from_vec(addrs: Vec<u64>) -> L2Table {
-        L2Table {
+    pub fn from_vec(addrs: Vec<T>) -> VecCache<T> {
+        VecCache {
             cluster_addrs: addrs,
             dirty: false,
         }
     }
 
-    pub fn get(&self, index: usize) -> u64 {
-        *self.cluster_addrs.get(index).unwrap_or(&0)
+    pub fn get(&self, index: usize) -> T {
+        *self.cluster_addrs.get(index).unwrap_or(&Default::default())
     }
 
-    pub fn set(&mut self, index: usize, val: u64) {
+    pub fn set(&mut self, index: usize, val: T) {
         if index < self.cluster_addrs.len() {
             self.cluster_addrs[index] = val;
             self.dirty = true;
         }
     }
 
-    pub fn addrs(&self) -> &Vec<u64> {
+    pub fn addrs(&self) -> &Vec<T> {
         &self.cluster_addrs
     }
 
@@ -50,10 +50,15 @@ impl L2Table {
     }
 }
 
-impl Cacheable for L2Table {
+impl<T: 'static + Copy + Default> Cacheable for VecCache<T> {
     fn dirty(&self) -> bool {
         self.dirty
     }
+}
+
+struct RefCountBlock {
+    counts: Vec<u16>,
+    dirty: bool,
 }
 
 #[derive(Debug)]
