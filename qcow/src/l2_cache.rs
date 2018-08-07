@@ -19,7 +19,7 @@ impl<T: 'static + Copy + Default> VecCache<T> {
     pub fn new(count: usize) -> VecCache<T> {
         VecCache {
             cluster_addrs: vec![Default::default(); count],
-            dirty: false,
+            dirty: true,
         }
     }
 
@@ -54,11 +54,6 @@ impl<T: 'static + Copy + Default> Cacheable for VecCache<T> {
     fn dirty(&self) -> bool {
         self.dirty
     }
-}
-
-struct RefCountBlock {
-    counts: Vec<u16>,
-    dirty: bool,
 }
 
 #[derive(Debug)]
