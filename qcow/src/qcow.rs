@@ -15,6 +15,8 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::EINVAL;
 
 use std::cmp::min;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
@@ -249,7 +251,7 @@ pub struct QcowFile {
     l1_table: Vec<u64>,
     ref_table: Vec<u64>,
     l2_entries: u64,
-    l2_cache: L2Cache<VecCache<u64>>,
+    l2_cache: HashMap<usize, VecCache<u64>>,
     refblock_cache: L2Cache<VecCache<u16>>,
     cluster_size: u64,
     cluster_mask: u64,
@@ -333,7 +335,7 @@ impl QcowFile {
             l1_table,
             ref_table,
             l2_entries,
-            l2_cache: L2Cache::new(l2_entries as usize, 100),
+            l2_cache: HashMap::with_capacity(100),
             refblock_cache: L2Cache::new(refcount_clusters, 25),
             cluster_size,
             cluster_mask: cluster_size - 1,
@@ -451,6 +453,25 @@ impl QcowFile {
         Ok(VecCache::from_vec(addrs))
     }
 
+    fn check_l2_evict(&mut self, except: usize) -> std::io::Result<()> {
+        // TODO(dgreid) - smarted eviction strategy.
+        if self.l2_cache.len() == self.l2_cache.capacity() {
+            let mut to_evict = 0;
+            for k in self.l2_cache.keys() {
+                if *k != except { // Don't remove the one we just added.
+                    to_evict = *k;
+                    break;
+                }
+            }
+            if let Some(evicted) = self.l2_cache.remove(&to_evict) {
+                if evicted.dirty() {
+                    self.write_l2_cluster(to_evict, evicted.addrs())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn file_offset_read(&mut self, address: u64) -> std::io::Result<Option<u64>> {
         if address >= self.virtual_size() as u64 {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
@@ -462,18 +483,23 @@ impl QcowFile {
             .get(l1_index)
             .ok_or(std::io::Error::from_raw_os_error(EINVAL))?;
 
-        if !self.l2_cache.contains(l1_index) {
-            // Not in the cache.
-            if l2_addr_disk == 0 {
-                return Ok(None); // Reading from an unallocated cluster will return zeros.
-            }
-            let table = self.read_l2_table(l2_addr_disk)?;
-            self.cache_l2_table(l1_index as u64, table)?;
-        };
-        let l2_table = self.l2_cache.get_table(l1_index).unwrap(); // Just checked/inserted.
         let l2_index = self.l2_table_index(address) as usize;
 
-        let cluster_addr_from_table = l2_table.get(l2_index);
+        let cluster_addr_from_table = match self.l2_cache.entry(l1_index) {
+            Entry::Occupied(e) => e.get().get(l2_index),
+            Entry::Vacant(mut e) => {
+                // Not in the cache.
+                if l2_addr_disk == 0 {
+                    // Reading from an unallocated cluster will return zeros.
+                    return Ok(None);
+                }
+                let table = self.read_l2_table(l2_addr_disk)?;
+                e.insert(table).get(l2_index)
+            }
+        };
+
+        self.check_l2_evict(l1_index)?;
+
         let cluster_addr = match cluster_addr_from_table {
             0 => return Ok(None),
             a => a,
@@ -481,6 +507,7 @@ impl QcowFile {
         Ok(Some(cluster_addr + self.cluster_offset(address)))
     }
 
+    // TODO(next) - convert to use local hash map.
     fn file_offset_write(&mut self, address: u64) -> std::io::Result<u64> {
         if address >= self.virtual_size() as u64 {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
@@ -491,31 +518,32 @@ impl QcowFile {
             .l1_table
             .get(l1_index)
             .ok_or(std::io::Error::from_raw_os_error(EINVAL))?;
-
-        if !self.l2_cache.contains(l1_index) {
-            // Not in the cache.
-            let table = if l2_addr_disk == 0 {
-                // Allocate a new cluster to store the L2 table and update the L1 table to point to
-                // the new table.
-                let new_addr = self.get_new_cluster()?;
-                // The cluster refcount starts at one indicating it is used but doesn't need COW.
-                self.set_cluster_refcount(new_addr, 1)?;
-                self.l1_table[l1_index] = new_addr;
-                VecCache::new(self.l2_entries as usize)
-            } else {
-                self.read_l2_table(l2_addr_disk)?
-            };
-            self.cache_l2_table(l1_index as u64, table)?;
-        };
         let l2_index = self.l2_table_index(address) as usize;
-        let cluster_addr_from_table = self.l2_cache.get_table(l1_index)
-            .unwrap() // Just checked/inserted.
-            .get(l2_index);
+
+        let cluster_addr_from_table = match self.l2_cache.entry(l1_index) {
+            Entry::Occupied(e) => e.get().get(l2_index),
+            Entry::Vacant(mut e) => {
+                // Not in the cache.
+                let table = if l2_addr_disk == 0 {
+                    // Allocate a new cluster to store the L2 table and update the L1 table to point to
+                    // the new table.
+                    let new_addr = self.get_new_cluster()?;
+                    // The cluster refcount starts at one indicating it is used but doesn't need COW.
+                    self.set_cluster_refcount(new_addr, 1)?;
+                    self.l1_table[l1_index] = new_addr;
+                    VecCache::new(self.l2_entries as usize)
+                } else {
+                    self.read_l2_table(l2_addr_disk)?
+                };
+                e.insert(table).get(l2_index)
+            }
+        };
+
         let cluster_addr = match cluster_addr_from_table {
             0 => {
                 // Need to allocate a data cluster
                 let cluster_addr = self.append_data_cluster()?;
-                if !self.l2_cache.get_table(l1_index).unwrap().dirty() {
+                if !self.l2_cache.get(&l1_index).unwrap().dirty() {
                     // Free the previously used cluster if one exists. Modified tables are always
                     // witten to new clusters so the L1 table can be committed to disk after they
                     // are and L1 never points at an invalid table.
@@ -535,30 +563,17 @@ impl QcowFile {
                     self.l1_table[l1_index] = new_addr;
                     
                 }
-                self.l2_cache.get_table_mut(l1_index)
+                self.l2_cache.get_mut(&l1_index)
                     .unwrap() // Just checked/inserted.
                     .set(l2_index, cluster_addr);
                 cluster_addr
             }
             a => a,
         };
+
+        self.check_l2_evict(l1_index)?;
+
         Ok(cluster_addr + self.cluster_offset(address))
-    }
-
-    fn cache_l2_table(&mut self, l1_index: u64, table: VecCache<u64>) -> std::io::Result<()> {
-        // Read the table from the disk, add it to the cache, and write back a potentially evicted
-        // block.
-        if let Some((evicted_idx, evicted)) = self
-            .l2_cache
-            .insert(l1_index as usize, table)
-        {
-            if !evicted.dirty() {
-                return Ok(());
-            }
-
-            self.write_l2_cluster(evicted_idx, evicted.addrs())?;
-        }
-        Ok(())
     }
 
     fn cache_refcount_table(&mut self, table_index: u64, table: VecCache<u16>)
@@ -688,7 +703,8 @@ impl QcowFile {
 
     fn sync_caches(&mut self) -> std::io::Result<()> {
         // Write out all dirty L2 tables.
-        for (l1_index, l2_table) in self.l2_cache.dirty_iter_mut() {
+        for (l1_index, l2_table) in self.l2_cache.iter_mut().filter(|(_k, v)| v.dirty())
+        {
             // The index must be from valid when we insterted it.
             let addr = *self.l1_table.get(*l1_index).unwrap();
             if addr != 0 {

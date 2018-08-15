@@ -102,3 +102,20 @@ impl<T: Cacheable> L2Cache<T> {
             .filter_map(|(k, v)| if v.dirty() { Some((k, v)) } else { None })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::collections::hash_map::Entry;
+
+    #[test]
+    fn insert_match() {
+        let mut map: HashMap<usize, &str> = HashMap::new();
+        map.insert(2, "foo");
+        let t = match map.entry(2) {
+            Entry::Occupied(mut e) => e.get_mut().chars().nth(0).unwrap(),
+            Entry::Vacant(mut e) => e.insert("bar").chars().nth(0).unwrap(),
+        };
+        assert_eq!(t, 'f');
+    }
+}
