@@ -443,18 +443,20 @@ impl QcowFile {
         address & self.cluster_mask
     }
 
-    fn read_l2_table(&mut self, address: u64) -> std::io::Result<VecCache<u64>> {
+    fn read_l2_table(file: &mut File, l2_entries: u64, address: u64)
+        -> std::io::Result<VecCache<u64>>
+    {
         let addrs = read_pointer_table(
-            &mut self.file,
+            file,
             address,
-            self.l2_entries as usize,
+            l2_entries as usize,
             Some(L2_TABLE_OFFSET_MASK),
             )?;
         Ok(VecCache::from_vec(addrs))
     }
 
     fn check_l2_evict(&mut self, except: usize) -> std::io::Result<()> {
-        // TODO(dgreid) - smarted eviction strategy.
+        // TODO(dgreid) - smarter eviction strategy.
         if self.l2_cache.len() == self.l2_cache.capacity() {
             let mut to_evict = 0;
             for k in self.l2_cache.keys() {
@@ -493,7 +495,7 @@ impl QcowFile {
                     // Reading from an unallocated cluster will return zeros.
                     return Ok(None);
                 }
-                let table = self.read_l2_table(l2_addr_disk)?;
+                let table = Self::read_l2_table(&mut self.file, self.l2_entries, l2_addr_disk)?;
                 e.insert(table).get(l2_index)
             }
         };
@@ -527,13 +529,16 @@ impl QcowFile {
                 let table = if l2_addr_disk == 0 {
                     // Allocate a new cluster to store the L2 table and update the L1 table to point to
                     // the new table.
-                    let new_addr = self.get_new_cluster()?;
+                    let new_addr: u64 = Self::get_new_cluster(&mut self.file,
+                                                              &mut self.avail_clusters,
+                                                              self.cluster_size,
+                                                              self.cluster_mask)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need COW.
                     self.set_cluster_refcount(new_addr, 1)?;
                     self.l1_table[l1_index] = new_addr;
                     VecCache::new(self.l2_entries as usize)
                 } else {
-                    self.read_l2_table(l2_addr_disk)?
+                    Self::read_l2_table(&mut self.file, self.l2_entries, l2_addr_disk)?
                 };
                 e.insert(table).get(l2_index)
             }
@@ -556,7 +561,10 @@ impl QcowFile {
 
                     // Allocate a new cluster to store the L2 table and update the L1 table to point
                     // to the new table.
-                    let new_addr = self.get_new_cluster()?;
+                    let new_addr: u64 = Self::get_new_cluster(&mut self.file,
+                                                              &mut self.avail_clusters,
+                                                              self.cluster_size,
+                                                              self.cluster_mask)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need
                     // COW.
                     self.set_cluster_refcount(new_addr, 1)?;
@@ -615,17 +623,23 @@ impl QcowFile {
 
 
     // Allocate a new cluster at the end of the current file, return the address.
-    fn get_new_cluster(&mut self) -> std::io::Result<u64> {
+    fn get_new_cluster(
+        file: &mut File,
+        avail_clusters: &mut Vec<u64>,
+        cluster_size: u64,
+        cluster_mask: u64)
+        -> std::io::Result<u64>
+    {
         // First use a pre allocated cluster if one is available.
-        if let Some(free_cluster) = self.avail_clusters.pop() {
+        if let Some(free_cluster) = avail_clusters.pop() {
             return Ok(free_cluster);
         }
         // Determine where the new end of the file should be and set_len, which
         // translates to truncate(2).
-        let file_end: u64 = self.file.seek(SeekFrom::End(0))?;
-        let cluster_size: u64 = self.cluster_size;
-        let new_cluster_address: u64 = (file_end + cluster_size - 1) & !self.cluster_mask;
-        self.file.set_len(new_cluster_address + cluster_size)?;
+        let file_end: u64 = file.seek(SeekFrom::End(0))?;
+        let cluster_size: u64 = cluster_size;
+        let new_cluster_address: u64 = (file_end + cluster_size - 1) & !cluster_mask;
+        file.set_len(new_cluster_address + cluster_size)?;
 
         Ok(new_cluster_address)
     }
@@ -633,7 +647,10 @@ impl QcowFile {
     // Allocate and initialize a new data cluster. Returns the offset of the
     // cluster in to the file on success.
     fn append_data_cluster(&mut self) -> std::io::Result<u64> {
-        let new_addr: u64 = self.get_new_cluster()?;
+        let new_addr: u64 = Self::get_new_cluster(&mut self.file,
+                                                  &mut self.avail_clusters,
+                                                  self.cluster_size,
+                                                  self.cluster_mask)?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
         self.set_cluster_refcount(new_addr, 1)?;
         Ok(new_addr)
@@ -655,7 +672,10 @@ impl QcowFile {
         let mut old_cluster = None;
         if !self.refblock_cache.contains(table_index) {
             let table = if stored_addr == 0 {
-                let new_addr = self.get_new_cluster()?;
+                let new_addr: u64 = Self::get_new_cluster(&mut self.file,
+                                                          &mut self.avail_clusters,
+                                                          self.cluster_size,
+                                                          self.cluster_mask)?;
                 self.ref_table[table_index] = new_addr;
                 new_cluster = Some(new_addr);
                 VecCache::new(self.l2_entries as usize)
@@ -672,7 +692,10 @@ impl QcowFile {
                 self.unref_clusters.push(stored_addr);
                 old_cluster = Some(stored_addr);
             }
-            let new_addr = self.get_new_cluster()?;
+            let new_addr: u64 = Self::get_new_cluster(&mut self.file,
+                                                      &mut self.avail_clusters,
+                                                      self.cluster_size,
+                                                      self.cluster_mask)?;
             new_cluster = Some(new_addr);
             self.ref_table[table_index] = new_addr;
         }
