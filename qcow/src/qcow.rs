@@ -9,7 +9,10 @@ extern crate libc;
 extern crate test;
 
 mod l2_cache;
+mod qcow_raw_file;
+
 use l2_cache::{Cacheable, L2Cache, VecCache};
+use qcow_raw_file::QcowRawFile;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::EINVAL;
@@ -246,15 +249,13 @@ fn max_refcount_clusters(refcount_order: u32, cluster_size: u32, num_clusters: u
 /// ```
 #[derive(Debug)]
 pub struct QcowFile {
-    file: File,
+    raw_file: QcowRawFile,
     header: QcowHeader,
     l1_table: Vec<u64>,
     ref_table: Vec<u64>,
     l2_entries: u64,
     l2_cache: HashMap<usize, VecCache<u64>>,
     refblock_cache: L2Cache<VecCache<u16>>,
-    cluster_size: u64,
-    cluster_mask: u64,
     current_offset: u64,
     refcount_block_entries: u64,
     unref_clusters: Vec<u64>, // List of freshly unreferenced clusters.
@@ -306,10 +307,15 @@ impl QcowFile {
         offset_is_cluster_boundary(header.refcount_table_offset, header.cluster_bits)?;
         offset_is_cluster_boundary(header.snapshots_offset, header.cluster_bits)?;
 
-        let l1_table = read_pointer_table(
-            &mut file,
+        let mut raw_file = QcowRawFile {
+                file,
+                cluster_size,
+                cluster_mask: cluster_size - 1,
+        };
+
+        let l1_table = raw_file.read_pointer_table(
             header.l1_table_offset,
-            header.l1_size as usize,
+            header.l1_size as u64,
             Some(L1_TABLE_OFFSET_MASK),
         ).map_err(Error::ReadingHeader)?;
         if l1_table.iter().any(|entry| entry & COMPRESSED_FLAG != 0) {
@@ -320,25 +326,22 @@ impl QcowFile {
         let refcount_clusters = max_refcount_clusters(header.refcount_order,
                                                       cluster_size as u32,
                                                       num_clusters);
-        let ref_table = read_pointer_table(
-            &mut file,
+        let ref_table = raw_file.read_pointer_table(
             header.refcount_table_offset,
-            refcount_clusters,
+            refcount_clusters as u64,
             None,
         ).map_err(Error::ReadingHeader)?;
 
         let l2_entries = cluster_size / size_of::<u64>() as u64;
 
         let qcow = QcowFile {
-            file,
+            raw_file,
             header,
             l1_table,
             ref_table,
             l2_entries,
             l2_cache: HashMap::with_capacity(100),
             refblock_cache: L2Cache::new(refcount_clusters, 25),
-            cluster_size,
-            cluster_mask: cluster_size - 1,
             current_offset: 0,
             refcount_block_entries: cluster_size * size_of::<u64>() as u64 / refcount_bits,
             unref_clusters: Vec::new(),
@@ -352,7 +355,7 @@ impl QcowFile {
             .ok_or(Error::InvalidL1TableOffset)?;
         qcow.header
             .refcount_table_offset
-            .checked_add(u64::from(qcow.header.refcount_table_clusters) * qcow.cluster_size)
+            .checked_add(u64::from(qcow.header.refcount_table_clusters) * cluster_size)
             .ok_or(Error::InvalidRefcountTableOffset)?;
 
         println!(
@@ -388,7 +391,7 @@ impl QcowFile {
 
     /// Returns the first cluster in the file with a 0 refcount. Used for testing.
     pub fn first_zero_refcount(&mut self) -> Result<Option<u64>> {
-        let file_size = self.file.metadata().map_err(Error::GettingFileSize)?.len();
+        let file_size = self.raw_file.file.metadata().map_err(Error::GettingFileSize)?.len();
         let cluster_size = 0x01u64 << self.header.cluster_bits;
 
         let mut cluster_addr = 0;
@@ -412,8 +415,8 @@ impl QcowFile {
 
     // Limits the range so that it doesn't overflow the end of a cluster.
     fn limit_range_cluster(&self, address: u64, count: usize) -> usize {
-        let offset: u64 = address & self.cluster_mask;
-        let limit = self.cluster_size - offset;
+        let offset: u64 = address & self.raw_file.cluster_mask;
+        let limit = self.raw_file.cluster_size - offset;
         min(count as u64, limit) as usize
     }
 
@@ -430,29 +433,17 @@ impl QcowFile {
 
     // Gets the offset of `address` in the L1 table.
     fn l1_table_index(&self, address: u64) -> u64 {
-        (address / self.cluster_size) / self.l2_entries
+        (address / self.raw_file.cluster_size) / self.l2_entries
     }
 
     // Gets the offset of `address` in the L2 table.
     fn l2_table_index(&self, address: u64) -> u64 {
-        (address / self.cluster_size) % self.l2_entries
+        (address / self.raw_file.cluster_size) % self.l2_entries
     }
 
     // Returns the offset of address within a cluster.
     fn cluster_offset(&self, address: u64) -> u64 {
-        address & self.cluster_mask
-    }
-
-    fn read_l2_table(file: &mut File, l2_entries: u64, address: u64)
-        -> std::io::Result<VecCache<u64>>
-    {
-        let addrs = read_pointer_table(
-            file,
-            address,
-            l2_entries as usize,
-            Some(L2_TABLE_OFFSET_MASK),
-            )?;
-        Ok(VecCache::from_vec(addrs))
+        address & self.raw_file.cluster_mask
     }
 
     fn check_l2_evict(&mut self, except: usize) -> std::io::Result<()> {
@@ -495,7 +486,8 @@ impl QcowFile {
                     // Reading from an unallocated cluster will return zeros.
                     return Ok(None);
                 }
-                let table = Self::read_l2_table(&mut self.file, self.l2_entries, l2_addr_disk)?;
+                let table = VecCache::from_vec(
+                    self.raw_file.read_pointer_cluster(l2_addr_disk, Some(L2_TABLE_OFFSET_MASK))?);
                 e.insert(table).get(l2_index)
             }
         };
@@ -529,16 +521,16 @@ impl QcowFile {
                 let table = if l2_addr_disk == 0 {
                     // Allocate a new cluster to store the L2 table and update the L1 table to point to
                     // the new table.
-                    let new_addr: u64 = Self::get_new_cluster(&mut self.file,
-                                                              &mut self.avail_clusters,
-                                                              self.cluster_size,
-                                                              self.cluster_mask)?;
+                    let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
+                                                              &mut self.avail_clusters)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need COW.
                     self.set_cluster_refcount(new_addr, 1)?;
                     self.l1_table[l1_index] = new_addr;
                     VecCache::new(self.l2_entries as usize)
                 } else {
-                    Self::read_l2_table(&mut self.file, self.l2_entries, l2_addr_disk)?
+                    VecCache::from_vec(self.raw_file.read_pointer_cluster(
+                        l2_addr_disk,
+                        Some(L1_TABLE_OFFSET_MASK))?)
                 };
                 e.insert(table).get(l2_index)
             }
@@ -561,10 +553,8 @@ impl QcowFile {
 
                     // Allocate a new cluster to store the L2 table and update the L1 table to point
                     // to the new table.
-                    let new_addr: u64 = Self::get_new_cluster(&mut self.file,
-                                                              &mut self.avail_clusters,
-                                                              self.cluster_size,
-                                                              self.cluster_mask)?;
+                    let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
+                                                              &mut self.avail_clusters)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need
                     // COW.
                     self.set_cluster_refcount(new_addr, 1)?;
@@ -599,7 +589,7 @@ impl QcowFile {
 
             let addr = *self.ref_table.get(evicted_idx).unwrap();
             if addr != 0 {
-                write_refcount_block(&mut self.file, addr, &evicted)?;
+                self.raw_file.write_refcount_block(addr, evicted.addrs())?;
             }
         }
         Ok(())
@@ -615,7 +605,7 @@ impl QcowFile {
         // The index must be from valid when we insterted it.
         let addr = *self.l1_table.get(l1_index).unwrap();
         if addr != 0 {
-            write_pointer_table(&mut self.file, addr, cluster, CLUSTER_USED_FLAG)
+            self.raw_file.write_pointer_table(addr, cluster, CLUSTER_USED_FLAG)
         } else {
             Err(std::io::Error::from_raw_os_error(EINVAL))
         }
@@ -624,10 +614,8 @@ impl QcowFile {
 
     // Allocate a new cluster at the end of the current file, return the address.
     fn get_new_cluster(
-        file: &mut File,
-        avail_clusters: &mut Vec<u64>,
-        cluster_size: u64,
-        cluster_mask: u64)
+        raw_file: &mut QcowRawFile,
+        avail_clusters: &mut Vec<u64>)
         -> std::io::Result<u64>
     {
         // First use a pre allocated cluster if one is available.
@@ -635,16 +623,14 @@ impl QcowFile {
             return Ok(free_cluster);
         }
 
-        self.raw_file.add_cluster_end()
+        raw_file.add_cluster_end()
     }
 
     // Allocate and initialize a new data cluster. Returns the offset of the
     // cluster in to the file on success.
     fn append_data_cluster(&mut self) -> std::io::Result<u64> {
-        let new_addr: u64 = Self::get_new_cluster(&mut self.file,
-                                                  &mut self.avail_clusters,
-                                                  self.cluster_size,
-                                                  self.cluster_mask)?;
+        let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
+                                                  &mut self.avail_clusters)?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
         self.set_cluster_refcount(new_addr, 1)?;
         Ok(new_addr)
@@ -652,7 +638,7 @@ impl QcowFile {
 
     // Gets the address of the refcount block and the index into the block for the given address.
     fn get_refcount_index(&self, address: u64) -> std::io::Result<(usize, usize)> {
-        let cluster_size: u64 = self.cluster_size;
+        let cluster_size: u64 = self.raw_file.cluster_size;
         let block_index = (address / cluster_size) % self.refcount_block_entries;
         let refcount_table_index = (address / cluster_size) / self.refcount_block_entries;
         Ok((refcount_table_index as usize, block_index as usize))
@@ -666,16 +652,13 @@ impl QcowFile {
         let mut old_cluster = None;
         if !self.refblock_cache.contains(table_index) {
             let table = if stored_addr == 0 {
-                let new_addr: u64 = Self::get_new_cluster(&mut self.file,
-                                                          &mut self.avail_clusters,
-                                                          self.cluster_size,
-                                                          self.cluster_mask)?;
+                let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
+                                                          &mut self.avail_clusters)?;
                 self.ref_table[table_index] = new_addr;
                 new_cluster = Some(new_addr);
                 VecCache::new(self.l2_entries as usize)
             } else {
-                read_refcount_block(&mut self.file, stored_addr,
-                                    self.refcount_block_entries as usize)?
+                VecCache::from_vec(self.raw_file.read_refcount_block(stored_addr)?)
             };
             self.cache_refcount_table(table_index as u64, table)?;
         }
@@ -686,10 +669,8 @@ impl QcowFile {
                 self.unref_clusters.push(stored_addr);
                 old_cluster = Some(stored_addr);
             }
-            let new_addr: u64 = Self::get_new_cluster(&mut self.file,
-                                                      &mut self.avail_clusters,
-                                                      self.cluster_size,
-                                                      self.cluster_mask)?;
+            let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
+                                                      &mut self.avail_clusters)?;
             new_cluster = Some(new_addr);
             self.ref_table[table_index] = new_addr;
         }
@@ -711,8 +692,7 @@ impl QcowFile {
             return Ok(0);
         }
         if !self.refblock_cache.contains(table_index) {
-            let table = read_refcount_block(&mut self.file, stored_addr,
-                                    self.refcount_block_entries as usize)?;
+            let table = VecCache::from_vec(self.raw_file.read_refcount_block(stored_addr)?);
             self.cache_refcount_table(table_index as u64, table)?;
         }
         Ok(self.refblock_cache.get_table(table_index).unwrap().get(block_index))
@@ -725,7 +705,7 @@ impl QcowFile {
             // The index must be from valid when we insterted it.
             let addr = *self.l1_table.get(*l1_index).unwrap();
             if addr != 0 {
-                write_pointer_table(&mut self.file, addr, l2_table.addrs(), CLUSTER_USED_FLAG)?;
+                self.raw_file.write_pointer_table(addr, l2_table.addrs(), CLUSTER_USED_FLAG)?;
             } else {
                 return Err(std::io::Error::from_raw_os_error(EINVAL));
             }
@@ -736,29 +716,27 @@ impl QcowFile {
             // The index must be from valid when we insterted it.
             let addr = self.ref_table[*ref_index];
             if addr != 0 {
-                write_refcount_block(&mut self.file, addr, &ref_table)?;
+                self.raw_file.write_refcount_block(addr, ref_table.addrs())?;
             } else {
                 return Err(std::io::Error::from_raw_os_error(EINVAL));
             }
             ref_table.mark_clean();
         }
-        self.file.sync_all()?; // Make sure metadata(file len) and all data clusters are written.
+        self.raw_file.file.sync_all()?; // Make sure metadata(file len) and all data clusters are written.
 
         // Push L1 table and refcount table last as all the clusters they point to are now
         // guaranteed to be valid.
-        write_pointer_table(
-            &mut self.file,
+        self.raw_file.write_pointer_table(
             self.header.l1_table_offset,
             &self.l1_table,
             0,
         )?;
-        write_pointer_table(
-            &mut self.file,
+        self.raw_file.write_pointer_table(
             self.header.refcount_table_offset,
             &self.ref_table,
             0,
         )?;
-        self.file.sync_data()?;
+        self.raw_file.file.sync_data()?;
         Ok(())
     }
 }
@@ -771,7 +749,7 @@ impl Drop for QcowFile {
 
 impl AsRawFd for QcowFile {
     fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
+        self.raw_file.file.as_raw_fd()
     }
 }
 
@@ -787,8 +765,8 @@ impl Read for QcowFile {
             let count = self.limit_range_cluster(curr_addr, read_count - nread);
 
             if let Some(offset) = file_offset {
-                self.file.seek(SeekFrom::Start(offset))?;
-                self.file.read_exact(&mut buf[nread..(nread + count)])?;
+                self.raw_file.file.seek(SeekFrom::Start(offset))?;
+                self.raw_file.file.read_exact(&mut buf[nread..(nread + count)])?;
             } else {
                 // Previously unwritten region, return zeros
                 for b in (&mut buf[nread..(nread + count)]).iter_mut() {
@@ -848,10 +826,10 @@ impl Write for QcowFile {
             let offset = self.file_offset_write(curr_addr)?;
             let count = self.limit_range_cluster(curr_addr, write_count - nwritten);
 
-            if let Err(e) = self.file.seek(SeekFrom::Start(offset)) {
+            if let Err(e) = self.raw_file.file.seek(SeekFrom::Start(offset)) {
                 return Err(e);
             }
-            if let Err(e) = self.file.write(&buf[nwritten..(nwritten + count)]) {
+            if let Err(e) = self.raw_file.file.write(&buf[nwritten..(nwritten + count)]) {
                 return Err(e);
             }
 
