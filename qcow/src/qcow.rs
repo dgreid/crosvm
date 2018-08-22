@@ -10,6 +10,7 @@ extern crate test;
 
 mod l2_cache;
 mod qcow_raw_file;
+mod refcount;
 
 use l2_cache::{Cacheable, L2Cache, VecCache};
 use qcow_raw_file::QcowRawFile;

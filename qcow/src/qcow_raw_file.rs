@@ -110,4 +110,9 @@ impl QcowRawFile {
 
         Ok(new_cluster_address)
     }
+
+    /// Returns the cluster size used by the qcow file.
+    pub fn cluster_size(&self) -> u64 {
+        self.cluster_size
+    }
 }
