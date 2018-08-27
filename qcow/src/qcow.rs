@@ -8,11 +8,11 @@ extern crate byteorder;
 extern crate libc;
 extern crate test;
 
-mod l2_cache;
+mod vec_cache;
 mod qcow_raw_file;
 mod refcount;
 
-use l2_cache::{Cacheable, VecCache};
+use vec_cache::{Cacheable, VecCache};
 use qcow_raw_file::QcowRawFile;
 use refcount::RefCount;
 

@@ -9,7 +9,7 @@ use std::io;
 
 use libc::EINVAL;
 
-use l2_cache::{Cacheable, VecCache};
+use vec_cache::{Cacheable, VecCache};
 use qcow_raw_file::QcowRawFile;
 
 #[derive(Debug)]
