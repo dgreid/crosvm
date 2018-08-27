@@ -84,13 +84,6 @@ impl RefCount {
         Ok(())
     }
 
-    // Gets the address of the refcount block and the index into the block for the given address.
-    fn get_refcount_index(&self, address: u64) -> (usize, usize) {
-        let block_index = (address / self.cluster_size) % self.refcount_block_entries;
-        let refcount_table_index = (address / self.cluster_size) / self.refcount_block_entries;
-        (refcount_table_index as usize, block_index as usize)
-    }
-
     /// Returns `NewClusterNeeded` if a new cluster needs to be allocated for refcounts. The Caller
     /// should allocate a cluster and call this function again with the cluster.
     /// On success, an optional address of a dropped cluster is returned. The dropped cluster can be
@@ -141,6 +134,8 @@ impl RefCount {
         Ok(dropped_cluster)
     }
 
+    /// Flush the dirty refcount blocks. This must be done before flushing the table that points to
+    /// the blocks.
     pub fn flush_blocks(&mut self, file: &mut QcowRawFile) -> io::Result<()> {
         // Write out all dirty L2 tables.
         for (table_index, block) in self.refblock_cache.iter_mut().filter(|(_k, v)| v.dirty()) {
@@ -156,11 +151,12 @@ impl RefCount {
         Ok(())
     }
 
+    /// Flush the refcount table that keeps the address of the refcounts blocks.
     pub fn flush_table(&mut self, file: &mut QcowRawFile) -> io::Result<()> {
         file.write_pointer_table(self.refcount_table_offset, &self.ref_table, 0)
     }
 
-    // Gets the refcount for a cluster with the given address.
+    /// Gets the refcount for a cluster with the given address.
     pub fn get_cluster_refcount(
         &mut self,
         file: &mut QcowRawFile,
@@ -183,5 +179,12 @@ impl RefCount {
         };
         self.check_evict(file, table_index).map_err(Error::EvictingRefCounts)?;
         Ok(refcount)
+    }
+
+    // Gets the address of the refcount block and the index into the block for the given address.
+    fn get_refcount_index(&self, address: u64) -> (usize, usize) {
+        let block_index = (address / self.cluster_size) % self.refcount_block_entries;
+        let refcount_table_index = (address / self.cluster_size) / self.refcount_block_entries;
+        (refcount_table_index as usize, block_index as usize)
     }
 }

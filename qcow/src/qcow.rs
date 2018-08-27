@@ -381,7 +381,7 @@ impl QcowFile {
         let mut cluster_addr = 0;
         while cluster_addr < end_cluster_addr {
             let mut unref_clusters =
-                QcowFile::set_cluster_refcount(&mut qcow.refcounts, &mut qcow.raw_file, &mut qcow.avail_clusters, cluster_addr, 1)
+                qcow.set_cluster_refcount(cluster_addr, 1)
                     .map_err(Error::SettingRefcountRefcount)?;
             qcow.unref_clusters.append(&mut unref_clusters);
             cluster_addr += cluster_size;
@@ -517,6 +517,8 @@ impl QcowFile {
             .ok_or(std::io::Error::from_raw_os_error(EINVAL))?;
         let l2_index = self.l2_table_index(address) as usize;
 
+        let mut set_refcounts = Vec::new();
+
         let cluster_addr_from_table = match self.l2_cache.entry(l1_index) {
             Entry::Occupied(e) => e.get().get(l2_index),
             Entry::Vacant(mut e) => {
@@ -527,7 +529,7 @@ impl QcowFile {
                     let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
                                                               &mut self.avail_clusters)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need COW.
-                    self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, new_addr, 1)?);
+                    set_refcounts.push((new_addr, 1));
                     self.l1_table[l1_index] = new_addr;
                     VecCache::new(self.l2_entries as usize)
                 } else {
@@ -551,7 +553,7 @@ impl QcowFile {
                     let addr = *self.l1_table.get(l1_index).unwrap_or(&0);
                     if addr != 0 {
                         self.unref_clusters.push(addr);
-                        self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, addr, 0)?);
+                        set_refcounts.push((addr, 0));
                     }
 
                     // Allocate a new cluster to store the L2 table and update the L1 table to point
@@ -560,7 +562,7 @@ impl QcowFile {
                                                               &mut self.avail_clusters)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need
                     // COW.
-                    self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, new_addr, 1)?);
+                    set_refcounts.push((new_addr, 1));
                     self.l1_table[l1_index] = new_addr;
                     
                 }
@@ -573,6 +575,11 @@ impl QcowFile {
         };
 
         self.check_l2_evict(l1_index)?;
+
+        for (addr, count) in set_refcounts {
+            let newly_unref = &mut self.set_cluster_refcount(addr, count)?;
+            self.unref_clusters.append(newly_unref);
+        }
 
         Ok(cluster_addr + self.cluster_offset(address))
     }
@@ -614,19 +621,23 @@ impl QcowFile {
         let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
                                                   &mut self.avail_clusters)?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
-        self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, new_addr, 1)?);
+        let newly_unref = &mut self.set_cluster_refcount(new_addr, 1)?;
+        self.unref_clusters.append(newly_unref);
         Ok(new_addr)
     }
 
     // Set the refcount for a cluster with the given address.
-    fn set_cluster_refcount(refcounts: &mut RefCount, raw_file: &mut QcowRawFile, avail_clusters: &mut Vec<u64>, address: u64, refcount: u16) -> std::io::Result<Vec<u64>> {
+    fn set_cluster_refcount(&mut self, address: u64, refcount: u16) -> std::io::Result<Vec<u64>> {
+        let mut added_clusters = Vec::new();
         let mut unref_clusters = Vec::new();
         let mut refcount_set = false;
         let mut new_cluster = None;
 
         while !refcount_set {
-            match refcounts.set_cluster_refcount(address, refcount, new_cluster.take()) {
-                Ok(None) => (),
+            match self.refcounts.set_cluster_refcount(address, refcount, new_cluster.take()) {
+                Ok(None) => {
+                    refcount_set = true;
+                },
                 Ok(Some(freed_cluster)) => {
                     unref_clusters.push(freed_cluster);
                     refcount_set = true;
@@ -640,17 +651,22 @@ impl QcowFile {
                 Err(refcount::Error::NeedNewCluster(addr)) => {
                     // Allocate or read the address and call set_cluster_refcount again.
                     new_cluster = if addr == 0 {
-                        Some((Self::get_new_cluster(raw_file, avail_clusters)?,
-                              VecCache::new(refcounts.refcounts_per_block() as usize)))
+                        let addr = Self::get_new_cluster(&mut self.raw_file, &mut self.avail_clusters)?; 
+                        added_clusters.push(addr);
+                        Some((addr, VecCache::new(self.refcounts.refcounts_per_block() as usize)))
                     } else {
                         Some((addr,
-                              VecCache::from_vec(raw_file.read_refcount_block(addr)?)))
+                              VecCache::from_vec(self.raw_file.read_refcount_block(addr)?)))
                     };
                 }
                 Err(refcount::Error::ReadingRefCounts(e)) => {
                     return Err(e);
                 }
             }
+        }
+
+        for addr in added_clusters {
+            self.set_cluster_refcount(addr, 1)?;
         }
         Ok(unref_clusters)
     }
