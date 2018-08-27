@@ -3,24 +3,33 @@
 // found in the LICENSE file.
 
 use std;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::io;
+
+use libc::EINVAL;
 
 use l2_cache::{Cacheable, VecCache};
 use qcow_raw_file::QcowRawFile;
 
+#[derive(Debug)]
 pub enum Error {
+    /// `EvictingCache` - Error writing a refblock from the cache to disk.
+    EvictingRefCounts(io::Error),
     /// `InvalidIndex` - Address requested isn't within the range of the disk.
     InvalidIndex,
     /// `NeedNewCluster` - Handle this error by allocating a cluster and calling the function again.
     NeedNewCluster(u64),
+    /// `ReadingRefCounts` - Error reading the file in to the refcount cache.
+    ReadingRefCounts(io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug)]
 pub struct RefCount {
     ref_table: Vec<u64>,
+    refcount_table_offset: u64,
     refblock_cache: HashMap<usize, VecCache<u16>>,
     refcount_block_entries: u64, // number of refcounts in a cluster.
     cluster_size: u64,
@@ -42,10 +51,16 @@ impl RefCount {
             raw_file.read_pointer_table(refcount_table_offset, refcount_table_entries, None)?;
         Ok(RefCount {
             ref_table,
+            refcount_table_offset,
             refblock_cache: HashMap::with_capacity(50),
             refcount_block_entries,
             cluster_size,
         })
+    }
+
+    /// Returns the number of refcounts per block.
+    pub fn refcounts_per_block(&self) -> u64 {
+        self.refcount_block_entries
     }
 
     // Check if the refblock cache is full and we need to evict.
@@ -70,14 +85,9 @@ impl RefCount {
     }
 
     // Gets the address of the refcount block and the index into the block for the given address.
-    fn get_refcount_index(
-        &self,
-        address: u64,
-        cluster_size: u64,
-    ) -> (usize, usize) {
-        let cluster_size: u64 = cluster_size;
-        let block_index = (address / cluster_size) % self.refcount_block_entries;
-        let refcount_table_index = (address / cluster_size) / self.refcount_block_entries;
+    fn get_refcount_index(&self, address: u64) -> (usize, usize) {
+        let block_index = (address / self.cluster_size) % self.refcount_block_entries;
+        let refcount_table_index = (address / self.cluster_size) / self.refcount_block_entries;
         (refcount_table_index as usize, block_index as usize)
     }
 
@@ -91,13 +101,9 @@ impl RefCount {
         refcount: u16,
         mut new_cluster: Option<(u64, VecCache<u16>)>,
     ) -> Result<Option<u64>> {
-        let (table_index, block_index) = self.get_refcount_index(cluster_address,
-                                                                 self.cluster_size);
+        let (table_index, block_index) = self.get_refcount_index(cluster_address);
 
-        let block_addr_disk = *self
-            .ref_table
-            .get(table_index)
-            .ok_or(Error::InvalidIndex)?;
+        let block_addr_disk = *self.ref_table.get(table_index).ok_or(Error::InvalidIndex)?;
 
         match self.refblock_cache.entry(table_index) {
             Entry::Occupied(_) => (),
@@ -135,21 +141,47 @@ impl RefCount {
         Ok(dropped_cluster)
     }
 
+    pub fn flush_blocks(&mut self, file: &mut QcowRawFile) -> io::Result<()> {
+        // Write out all dirty L2 tables.
+        for (table_index, block) in self.refblock_cache.iter_mut().filter(|(_k, v)| v.dirty()) {
+            // The index must be from valid when we insterted it.
+            let addr = self.ref_table[*table_index];
+            if addr != 0 {
+                file.write_refcount_block(addr, block.addrs())?;
+            } else {
+                return Err(std::io::Error::from_raw_os_error(EINVAL));
+            }
+            block.mark_clean();
+        }
+        Ok(())
+    }
+
+    pub fn flush_table(&mut self, file: &mut QcowRawFile) -> io::Result<()> {
+        file.write_pointer_table(self.refcount_table_offset, &self.ref_table, 0)
+    }
+
     // Gets the refcount for a cluster with the given address.
-/*    fn get_cluster_refcount(&mut self, address: u64) -> std::io::Result<u16> {
-        let (table_index, block_index) = self.get_refcount_index(address)?;
-        let stored_addr = self.ref_table[table_index];
-        if stored_addr == 0 {
+    pub fn get_cluster_refcount(
+        &mut self,
+        file: &mut QcowRawFile,
+        address: u64,
+    ) -> Result<u16> {
+        let (table_index, block_index) = self.get_refcount_index(address);
+        let block_addr_disk = *self.ref_table.get(table_index).ok_or(Error::InvalidIndex)?;
+        if block_addr_disk == 0 {
             return Ok(0);
         }
-        if !self.refblock_cache.contains(table_index) {
-            let table = VecCache::from_vec(self.raw_file.read_refcount_block(stored_addr)?);
-            self.cache_refcount_table(table_index as u64, table)?;
-        }
-        Ok(self
-            .refblock_cache
-            .get_table(table_index)
-            .unwrap()
-            .get(block_index))
-    }*/
+        let refcount = match self.refblock_cache.entry(table_index) {
+            Entry::Vacant(e) => {
+                let table = VecCache::from_vec(
+                    file.read_refcount_block(block_addr_disk)
+                        .map_err(Error::ReadingRefCounts)?,
+                );
+                e.insert(table).get(block_index)
+            }
+            Entry::Occupied(e) => e.get().get(block_index),
+        };
+        self.check_evict(file, table_index).map_err(Error::EvictingRefCounts)?;
+        Ok(refcount)
+    }
 }

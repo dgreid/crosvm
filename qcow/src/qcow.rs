@@ -12,8 +12,9 @@ mod l2_cache;
 mod qcow_raw_file;
 mod refcount;
 
-use l2_cache::{Cacheable, L2Cache, VecCache};
+use l2_cache::{Cacheable, VecCache};
 use qcow_raw_file::QcowRawFile;
+use refcount::RefCount;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use libc::EINVAL;
@@ -31,7 +32,7 @@ pub enum Error {
     BackingFilesNotSupported,
     CompressedBlocksNotSupported,
     GettingFileSize(io::Error),
-    GettingRefcount(io::Error),
+    GettingRefcount(refcount::Error),
     InvalidClusterSize,
     InvalidL1TableOffset,
     InvalidMagic,
@@ -40,6 +41,7 @@ pub enum Error {
     NoRefcountClusters,
     OpeningFile(io::Error),
     ReadingHeader(io::Error),
+    ReadingRefCounts(io::Error),
     SeekingFile(io::Error),
     SettingRefcountRefcount(io::Error),
     SizeTooSmallForNumberOfClusters,
@@ -253,12 +255,10 @@ pub struct QcowFile {
     raw_file: QcowRawFile,
     header: QcowHeader,
     l1_table: Vec<u64>,
-    ref_table: Vec<u64>,
     l2_entries: u64,
     l2_cache: HashMap<usize, VecCache<u64>>,
-    refblock_cache: L2Cache<VecCache<u16>>,
+    refcounts: RefCount,
     current_offset: u64,
-    refcount_block_entries: u64,
     unref_clusters: Vec<u64>, // List of freshly unreferenced clusters.
     // List of unreferenced clusters available to be used. unref clusters become available once the
     // removal of references to them have been synced to disk.
@@ -308,11 +308,11 @@ impl QcowFile {
         offset_is_cluster_boundary(header.refcount_table_offset, header.cluster_bits)?;
         offset_is_cluster_boundary(header.snapshots_offset, header.cluster_bits)?;
 
-        let mut raw_file = QcowRawFile {
+        let mut raw_file = QcowRawFile::from(
                 file,
                 cluster_size,
-                cluster_mask: cluster_size - 1,
-        };
+                cluster_size - 1,
+        );
 
         let l1_table = raw_file.read_pointer_table(
             header.l1_table_offset,
@@ -326,12 +326,11 @@ impl QcowFile {
         let num_clusters = div_round_up_u64(header.size, u64::from(cluster_size)) as u32;
         let refcount_clusters = max_refcount_clusters(header.refcount_order,
                                                       cluster_size as u32,
-                                                      num_clusters);
-        let ref_table = raw_file.read_pointer_table(
-            header.refcount_table_offset,
-            refcount_clusters as u64,
-            None,
-        ).map_err(Error::ReadingHeader)?;
+                                                      num_clusters) as u64;
+        let refcount_block_entries = cluster_size * size_of::<u64>() as u64 / refcount_bits;
+        let refcounts = RefCount::new(&mut raw_file, header.refcount_table_offset, 
+                                      refcount_clusters, refcount_block_entries, cluster_size)
+            .map_err(Error::ReadingRefCounts)?;
 
         let l2_entries = cluster_size / size_of::<u64>() as u64;
 
@@ -339,12 +338,10 @@ impl QcowFile {
             raw_file,
             header,
             l1_table,
-            ref_table,
             l2_entries,
             l2_cache: HashMap::with_capacity(100),
-            refblock_cache: L2Cache::new(refcount_clusters, 25),
+            refcounts,
             current_offset: 0,
-            refcount_block_entries: cluster_size * size_of::<u64>() as u64 / refcount_bits,
             unref_clusters: Vec::new(),
             avail_clusters: Vec::new(),
         };
@@ -383,7 +380,10 @@ impl QcowFile {
 
         let mut cluster_addr = 0;
         while cluster_addr < end_cluster_addr {
-            qcow.set_cluster_refcount(cluster_addr, 1).map_err(Error::SettingRefcountRefcount)?;
+            let mut unref_clusters =
+                QcowFile::set_cluster_refcount(&mut qcow.refcounts, &mut qcow.raw_file, &mut qcow.avail_clusters, cluster_addr, 1)
+                    .map_err(Error::SettingRefcountRefcount)?;
+            qcow.unref_clusters.append(&mut unref_clusters);
             cluster_addr += cluster_size;
         }
 
@@ -397,7 +397,9 @@ impl QcowFile {
 
         let mut cluster_addr = 0;
         while cluster_addr < file_size {
-            match self.get_cluster_refcount(cluster_addr).map_err(Error::GettingRefcount)? {
+            match self.refcounts
+                    .get_cluster_refcount(&mut self.raw_file, cluster_addr)
+                    .map_err(Error::GettingRefcount)? {
                 0 => return Ok(Some(cluster_addr)),
                 _ => (),
             }
@@ -525,7 +527,7 @@ impl QcowFile {
                     let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
                                                               &mut self.avail_clusters)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need COW.
-                    self.set_cluster_refcount(new_addr, 1)?;
+                    self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, new_addr, 1)?);
                     self.l1_table[l1_index] = new_addr;
                     VecCache::new(self.l2_entries as usize)
                 } else {
@@ -549,7 +551,7 @@ impl QcowFile {
                     let addr = *self.l1_table.get(l1_index).unwrap_or(&0);
                     if addr != 0 {
                         self.unref_clusters.push(addr);
-                        self.set_cluster_refcount(addr, 0)?;
+                        self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, addr, 0)?);
                     }
 
                     // Allocate a new cluster to store the L2 table and update the L1 table to point
@@ -558,7 +560,7 @@ impl QcowFile {
                                                               &mut self.avail_clusters)?;
                     // The cluster refcount starts at one indicating it is used but doesn't need
                     // COW.
-                    self.set_cluster_refcount(new_addr, 1)?;
+                    self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, new_addr, 1)?);
                     self.l1_table[l1_index] = new_addr;
                     
                 }
@@ -573,27 +575,6 @@ impl QcowFile {
         self.check_l2_evict(l1_index)?;
 
         Ok(cluster_addr + self.cluster_offset(address))
-    }
-
-    fn cache_refcount_table(&mut self, table_index: u64, table: VecCache<u16>)
-        -> std::io::Result<()>
-    {
-        // Read the table from the disk, add it to the cache, and write back a potentially evicted
-        // block.
-        if let Some((evicted_idx, evicted)) = self
-            .refblock_cache
-            .insert(table_index as usize, table)
-        {
-            if !evicted.dirty() {
-                return Ok(());
-            }
-
-            let addr = *self.ref_table.get(evicted_idx).unwrap();
-            if addr != 0 {
-                self.raw_file.write_refcount_block(addr, evicted.addrs())?;
-            }
-        }
-        Ok(())
     }
 
     // Writes an L2 cluster out to disk.
@@ -633,70 +614,45 @@ impl QcowFile {
         let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
                                                   &mut self.avail_clusters)?;
         // The cluster refcount starts at one indicating it is used but doesn't need COW.
-        self.set_cluster_refcount(new_addr, 1)?;
+        self.unref_clusters.append(&mut Self::set_cluster_refcount(&mut self.refcounts, &mut self.raw_file, &mut self.avail_clusters, new_addr, 1)?);
         Ok(new_addr)
     }
 
-    // Gets the address of the refcount block and the index into the block for the given address.
-    fn get_refcount_index(&self, address: u64) -> std::io::Result<(usize, usize)> {
-        let cluster_size: u64 = self.raw_file.cluster_size;
-        let block_index = (address / cluster_size) % self.refcount_block_entries;
-        let refcount_table_index = (address / cluster_size) / self.refcount_block_entries;
-        Ok((refcount_table_index as usize, block_index as usize))
-    }
-
     // Set the refcount for a cluster with the given address.
-    fn set_cluster_refcount(&mut self, address: u64, refcount: u16) -> std::io::Result<()> {
-        let (table_index, block_index) = self.get_refcount_index(address)?;
-        let stored_addr = self.ref_table[table_index];
+    fn set_cluster_refcount(refcounts: &mut RefCount, raw_file: &mut QcowRawFile, avail_clusters: &mut Vec<u64>, address: u64, refcount: u16) -> std::io::Result<Vec<u64>> {
+        let mut unref_clusters = Vec::new();
+        let mut refcount_set = false;
         let mut new_cluster = None;
-        let mut old_cluster = None;
-        if !self.refblock_cache.contains(table_index) {
-            let table = if stored_addr == 0 {
-                let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
-                                                          &mut self.avail_clusters)?;
-                self.ref_table[table_index] = new_addr;
-                new_cluster = Some(new_addr);
-                VecCache::new(self.l2_entries as usize)
-            } else {
-                VecCache::from_vec(self.raw_file.read_refcount_block(stored_addr)?)
-            };
-            self.cache_refcount_table(table_index as u64, table)?;
-        }
-        if !self.refblock_cache.get_table(table_index).unwrap().dirty() {
-            // Free the previously used block and use a new one. Writing modified counts to new
-            // blocks keeps the on-disk state consistent even if it's out of date.
-            if stored_addr != 0 {
-                self.unref_clusters.push(stored_addr);
-                old_cluster = Some(stored_addr);
-            }
-            let new_addr: u64 = Self::get_new_cluster(&mut self.raw_file,
-                                                      &mut self.avail_clusters)?;
-            new_cluster = Some(new_addr);
-            self.ref_table[table_index] = new_addr;
-        }
-        self.refblock_cache.get_table_mut(table_index).unwrap().set(block_index, refcount);
-        if let Some(old_addr) = old_cluster {
-            self.set_cluster_refcount(old_addr, 0)?;
-        }
-        if let Some(new_addr) = new_cluster {
-            self.set_cluster_refcount(new_addr, 1)?;
-        }
-        Ok(())
-    }
 
-    // Gets the refcount for a cluster with the given address.
-    fn get_cluster_refcount(&mut self, address: u64) -> std::io::Result<u16> {
-        let (table_index, block_index) = self.get_refcount_index(address)?;
-        let stored_addr = self.ref_table[table_index];
-        if stored_addr == 0 {
-            return Ok(0);
+        while !refcount_set {
+            match refcounts.set_cluster_refcount(address, refcount, new_cluster.take()) {
+                Ok(None) => (),
+                Ok(Some(freed_cluster)) => {
+                    unref_clusters.push(freed_cluster);
+                    refcount_set = true;
+                }
+                Err(refcount::Error::EvictingRefCounts(e)) => {
+                    return Err(e);
+                }
+                Err(refcount::Error::InvalidIndex) => {
+                    return Err(std::io::Error::from_raw_os_error(EINVAL));
+                }
+                Err(refcount::Error::NeedNewCluster(addr)) => {
+                    // Allocate or read the address and call set_cluster_refcount again.
+                    new_cluster = if addr == 0 {
+                        Some((Self::get_new_cluster(raw_file, avail_clusters)?,
+                              VecCache::new(refcounts.refcounts_per_block() as usize)))
+                    } else {
+                        Some((addr,
+                              VecCache::from_vec(raw_file.read_refcount_block(addr)?)))
+                    };
+                }
+                Err(refcount::Error::ReadingRefCounts(e)) => {
+                    return Err(e);
+                }
+            }
         }
-        if !self.refblock_cache.contains(table_index) {
-            let table = VecCache::from_vec(self.raw_file.read_refcount_block(stored_addr)?);
-            self.cache_refcount_table(table_index as u64, table)?;
-        }
-        Ok(self.refblock_cache.get_table(table_index).unwrap().get(block_index))
+        Ok(unref_clusters)
     }
 
     fn sync_caches(&mut self) -> std::io::Result<()> {
@@ -713,16 +669,7 @@ impl QcowFile {
             l2_table.mark_clean();
         }
         // Write the modified refcount blocks.
-        for (ref_index, ref_table) in self.refblock_cache.dirty_iter_mut() {
-            // The index must be from valid when we insterted it.
-            let addr = self.ref_table[*ref_index];
-            if addr != 0 {
-                self.raw_file.write_refcount_block(addr, ref_table.addrs())?;
-            } else {
-                return Err(std::io::Error::from_raw_os_error(EINVAL));
-            }
-            ref_table.mark_clean();
-        }
+        self.refcounts.flush_blocks(&mut self.raw_file)?;
         self.raw_file.file.sync_all()?; // Make sure metadata(file len) and all data clusters are written.
 
         // Push L1 table and refcount table last as all the clusters they point to are now
@@ -732,11 +679,7 @@ impl QcowFile {
             &self.l1_table,
             0,
         )?;
-        self.raw_file.write_pointer_table(
-            self.header.refcount_table_offset,
-            &self.ref_table,
-            0,
-        )?;
+        self.refcounts.flush_table(&mut self.raw_file)?;
         self.raw_file.file.sync_data()?;
         Ok(())
     }
