@@ -468,6 +468,8 @@ impl QcowFile {
         Ok(())
     }
 
+    // Gets the offset of the given guest address in the host file. If L1, L2, or data clusters have
+    // yet to be allocated, return None.
     fn file_offset_read(&mut self, address: u64) -> std::io::Result<Option<u64>> {
         if address >= self.virtual_size() as u64 {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
@@ -504,7 +506,8 @@ impl QcowFile {
         Ok(Some(cluster_addr + self.cluster_offset(address)))
     }
 
-    // TODO(next) - convert to use local hash map.
+    // Gets the offset of the given guest address in the host file. If L1, L2, or data clusters need
+    // to be allocated, they will be.
     fn file_offset_write(&mut self, address: u64) -> std::io::Result<u64> {
         if address >= self.virtual_size() as u64 {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
