@@ -30,7 +30,9 @@ pub enum Error {
     CompressedBlocksNotSupported,
     GettingFileSize(io::Error),
     GettingRefcount(refcount::Error),
+    EvictingCache(io::Error),
     InvalidClusterSize,
+    InvalidIndex,
     InvalidL1TableOffset,
     InvalidMagic,
     InvalidOffset(u64),
@@ -38,7 +40,9 @@ pub enum Error {
     NoRefcountClusters,
     OpeningFile(io::Error),
     ReadingHeader(io::Error),
+    ReadingPointers(io::Error),
     ReadingRefCounts(io::Error),
+    ReadingRefCountBlock(refcount::Error),
     SeekingFile(io::Error),
     SettingRefcountRefcount(io::Error),
     SizeTooSmallForNumberOfClusters,
@@ -381,6 +385,52 @@ impl QcowFile {
         }
 
         Ok(qcow)
+    }
+
+    /// Returns the `QcowHeader` for this file.
+    pub fn header(&self) -> &QcowHeader {
+        &self.header
+    }
+
+    /// Returns the L1 lookup table for this file. This is only useful for debugging.
+    pub fn l1_table(&self) -> &[u64] {
+        &self.l1_table
+    }
+
+    /// Returns an L2_table of cluster addresses, only used for debugging.
+    pub fn l2_table(&mut self, l1_index: usize) -> Result<Option<&[u64]>> {
+        let l2_addr_disk = *self
+            .l1_table
+            .get(l1_index)
+            .ok_or(Error::InvalidIndex)?;
+
+        if let Entry::Vacant(e) = self.l2_cache.entry(l1_index) {
+            // Not in the cache.
+            if l2_addr_disk == 0 {
+                // Reading from an unallocated cluster will return zeros.
+                return Ok(None);
+            }
+            let table = VecCache::from_vec(
+                self.raw_file.read_pointer_cluster(l2_addr_disk, Some(L2_TABLE_OFFSET_MASK))
+                .map_err(Error::ReadingPointers)?);
+            e.insert(table);
+        }
+
+        self.check_l2_evict(l1_index).map_err(Error::EvictingCache)?;
+
+        // The index must exist as it was just inserted if it didn't already.
+        Ok(Some(self.l2_cache.get(&l1_index).unwrap().get_vec()))
+    }
+
+    /// Returns the refcount table for this file. This is only useful for debugging.
+    pub fn ref_table(&self) -> &[u64] {
+        &self.refcounts.ref_table()
+    }
+
+    /// Returns the `index`th refcount block from the file.
+    pub fn refcount_block(&mut self, index: usize) -> Result<Option<&[u16]>> {
+        self.refcounts.refcount_block(&mut self.raw_file, index)
+            .map_err(Error::ReadingRefCountBlock)
     }
 
     /// Returns the first cluster in the file with a 0 refcount. Used for testing.
