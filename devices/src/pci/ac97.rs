@@ -233,7 +233,7 @@ enum Ac97Function {
 }
 
 // Audio driver controlled by the above registers.
-struct Ac97 {
+pub struct Ac97 {
     // Bus Master registers
     pi_regs: Ac97FunctionRegs, // Input
     po_regs: Ac97FunctionRegs, // Output
@@ -338,7 +338,7 @@ impl Ac97 {
     }
 
     fn set_bdbar(&mut self, func: Ac97Function, val: u32) {
-        self.bm_regs_mut(&func).bdbar = val & !0x03;
+        self.bm_regs_mut(&func).bdbar = val & !0x07;
     }
 
     fn set_lvi(&mut self, func: Ac97Function, val: u8) {
