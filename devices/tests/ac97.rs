@@ -8,7 +8,7 @@ extern crate sys_util;
 use devices::Ac97;
 
 #[test]
-fn test_bdbar() {
+fn bm_bdbar() {
     let mut ac97 = Ac97::new();
 
     let bdbars = [0x00u64, 0x10, 0x20];
@@ -21,3 +21,15 @@ fn test_bdbar() {
     }
 }
 
+#[test]
+fn bm_status_reg() {
+    let mut ac97 = Ac97::new();
+
+    let sr_addrs = [0x06u64, 0x16, 0x26];
+
+    for sr in &sr_addrs {
+        assert_eq!(ac97.bm_readw(*sr), 0x0001);
+        ac97.bm_writew(*sr, 0xffff);
+        assert_eq!(ac97.bm_readw(*sr), 0x0001);
+    }
+}
