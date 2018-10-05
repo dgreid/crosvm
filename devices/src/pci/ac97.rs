@@ -415,6 +415,7 @@ impl Ac97 {
 
     fn set_glob_cnt(&mut self, new_glob_cnt: u32) {
         const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
+        const GLOB_CNT_WARM_RESET: u32 = 0x0000_0004;
         const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
         // TODO(dgreid) handle other bits.
         if new_glob_cnt & GLOB_CNT_COLD_RESET == 0 {
@@ -424,6 +425,12 @@ impl Ac97 {
 
             *self = Ac97::new();
             self.glob_cnt =  new_glob_cnt & GLOB_CNT_STABLE_BITS;
+            return;
+        }
+        if new_glob_cnt & GLOB_CNT_WARM_RESET != 0 {
+            // TODO(dgreid) - check if running and if so, ignore.
+            self.glob_cnt = new_glob_cnt & !GLOB_CNT_WARM_RESET; // Auto-cleared reset bit.
+            return;
         }
         self.glob_cnt = new_glob_cnt;
     }
