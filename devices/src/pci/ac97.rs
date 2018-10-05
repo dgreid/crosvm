@@ -291,6 +291,8 @@ const VOL_REG_MASK: u16 = 0x003f;
 const PD_REG_STATUS_MASK: u16 = 0x000f;
 const PD_REG_OUTPUT_MUTE_MASK: u16 = 0xb200;
 const PD_REG_INPUT_MUTE_MASK: u16 = 0x0d00;
+// Global status
+const GLOB_STA_RESET_VAL: u32 = 0x0000_0300; // primary and secondary codec ready set.
 
 impl Ac97 {
     pub fn new() -> Self {
@@ -299,7 +301,7 @@ impl Ac97 {
             po_regs: Ac97FunctionRegs::new(),
             mc_regs: Ac97FunctionRegs::new(),
             glob_cnt: 0,
-            glob_sta: 0x0000_0300, // primary and secondary codec ready set.
+            glob_sta: GLOB_STA_RESET_VAL, 
             acc_sema: 0,
 
             master_volume_l: 0,
@@ -364,8 +366,7 @@ impl Ac97 {
         let regs = self.bm_regs_mut(&func);
         if val & CR_RR != 0 {
             regs.do_reset();
-
-        // TODO(dgreid) stop audio
+            // TODO(dgreid) stop audio
         } else {
             regs.cr = val & CR_VALID_MASK;
             if regs.cr & CR_RPBM == 0 {
@@ -410,6 +411,21 @@ impl Ac97 {
             self.glob_sta &= !int_mask;
             //pci_irq_deassert(&s->dev);
         }
+    }
+
+    fn set_glob_cnt(&mut self, new_glob_cnt: u32) {
+        const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
+        const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
+        // TODO(dgreid) handle other bits.
+        if new_glob_cnt & GLOB_CNT_COLD_RESET == 0 {
+            self.pi_regs.do_reset();
+            self.po_regs.do_reset();
+            self.mc_regs.do_reset();
+
+            *self = Ac97::new();
+            self.glob_cnt =  new_glob_cnt & GLOB_CNT_STABLE_BITS;
+        }
+        self.glob_cnt = new_glob_cnt;
     }
 
     pub fn bm_readb(&mut self, offset: u64) -> u8 {
@@ -493,7 +509,7 @@ impl Ac97 {
             0x00 => self.set_bdbar(Ac97Function::Input, val),
             0x10 => self.set_bdbar(Ac97Function::Output, val),
             0x20 => self.set_bdbar(Ac97Function::Microphone, val),
-            0x2c => self.glob_cnt = val,
+            0x2c => self.set_glob_cnt(val),
             0x30 => (), // RO
             o => println!("wtf write long to 0x{:x}", o),
         }
