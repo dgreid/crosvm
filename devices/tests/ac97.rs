@@ -42,13 +42,21 @@ fn bm_global_control() {
 
     assert_eq!(ac97.bm_readl(glob_cnt), 0x0000_0000);
 
-    // Check interrupt enable bits are writable.
-    ac97.bm_writel(glob_cnt, 0x0000_0076);
-    assert_eq!(ac97.bm_readl(glob_cnt), 0x0000_0076);
+    // Relesase cold reset.
+    ac97.bm_writel(glob_cnt, 0x0000_0002);
 
-    // Check that a soft reset works, but setting bdbar and checking it is zeroed.
+    // Check interrupt enable bits are writable.
+    ac97.bm_writel(glob_cnt, 0x0000_0072);
+    assert_eq!(ac97.bm_readl(glob_cnt), 0x0000_0072);
+
+    // A Warm reset should doesn't affect register state and is auto cleared.
+    ac97.bm_writel(0x00, 0x5555_5558);
+    ac97.bm_writel(glob_cnt, 0x0000_0076);
+    assert_eq!(ac97.bm_readl(glob_cnt), 0x0000_0072);
+    assert_eq!(ac97.bm_readl(0x00), 0x5555_5558);
+    // Check that a cold reset works, but setting bdbar and checking it is zeroed.
     ac97.bm_writel(0x00, 0x5555_555f);
-    ac97.bm_writel(glob_cnt, 0x000_0074);
-    assert_eq!(ac97.bm_readl(glob_cnt), 0x0000_0074);
+    ac97.bm_writel(glob_cnt, 0x000_0070);
+    assert_eq!(ac97.bm_readl(glob_cnt), 0x0000_0070);
     assert_eq!(ac97.bm_readl(0x00), 0x0000_0000);
 }
