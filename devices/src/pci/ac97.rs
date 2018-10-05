@@ -291,6 +291,10 @@ const VOL_REG_MASK: u16 = 0x003f;
 const PD_REG_STATUS_MASK: u16 = 0x000f;
 const PD_REG_OUTPUT_MUTE_MASK: u16 = 0xb200;
 const PD_REG_INPUT_MUTE_MASK: u16 = 0x0d00;
+// Global Control
+const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
+const GLOB_CNT_WARM_RESET: u32 = 0x0000_0004;
+const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
 // Global status
 const GLOB_STA_RESET_VAL: u32 = 0x0000_0300; // primary and secondary codec ready set.
 
@@ -414,9 +418,6 @@ impl Ac97 {
     }
 
     fn set_glob_cnt(&mut self, new_glob_cnt: u32) {
-        const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
-        const GLOB_CNT_WARM_RESET: u32 = 0x0000_0004;
-        const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
         // TODO(dgreid) handle other bits.
         if new_glob_cnt & GLOB_CNT_COLD_RESET == 0 {
             self.pi_regs.do_reset();
@@ -433,6 +434,10 @@ impl Ac97 {
             return;
         }
         self.glob_cnt = new_glob_cnt;
+    }
+
+    fn is_cold_reset(&self) -> bool {
+        self.glob_cnt & GLOB_CNT_COLD_RESET == 0
     }
 
     pub fn bm_readb(&mut self, offset: u64) -> u8 {
@@ -481,6 +486,11 @@ impl Ac97 {
     }
 
     pub fn bm_writeb(&mut self, offset: u64, val: u8) {
+        // Only process writes to the control register when cold reset is set.
+        if self.is_cold_reset() {
+            return;
+        }
+
         match offset {
             0x04 => (), // RO
             0x05 => self.set_lvi(Ac97Function::Input, val),
@@ -500,6 +510,10 @@ impl Ac97 {
     }
 
     pub fn bm_writew(&mut self, offset: u64, val: u16) {
+        // Only process writes to the control register when cold reset is set.
+        if self.is_cold_reset() {
+            return;
+        }
         match offset {
             0x06 => self.set_sr(Ac97Function::Input, val),
             0x08 => (), // RO
@@ -512,6 +526,12 @@ impl Ac97 {
     }
 
     pub fn bm_writel(&mut self, offset: u64, val: u32) {
+        // Only process writes to the control register when cold reset is set.
+        if self.is_cold_reset() {
+            if offset != 0x2c {
+                return;
+            }
+        }
         match offset {
             0x00 => self.set_bdbar(Ac97Function::Input, val),
             0x10 => self.set_bdbar(Ac97Function::Output, val),
