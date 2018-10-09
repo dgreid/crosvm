@@ -20,6 +20,10 @@ const PCI_DEVICE_ID_INTEL_82801AA_5: u16 = 0x2415;
 const MIXER_REGS_SIZE: u64 = 0x100;
 const MASTER_REGS_SIZE: u64 = 0x400;
 
+// AC97 Vendor ID
+const AC97_VENDOR_ID1: u16 = 0x8086;
+const AC97_VENDOR_ID2: u16 = 0x8086;
+
 /// AC97 audio device emulation.
 pub struct Ac97Dev {
     config_regs: PciConfiguration,
@@ -547,6 +551,8 @@ impl Ac97 {
             0x02 => self.get_master_reg(),
             0x1c => self.get_record_gain_reg(),
             0x26 => self.power_down_control,
+            0x7c => AC97_VENDOR_ID1,
+            0x7e => AC97_VENDOR_ID1,
             _ => 0,
         }
     }
