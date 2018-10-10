@@ -67,3 +67,23 @@ fn bm_global_control() {
     assert_eq!(ac97.bm_readl(GLOB_CNT), 0x0000_0070);
     assert_eq!(ac97.bm_readl(0x00), 0x0000_0000);
 }
+
+#[test]
+fn test_measure_clock() {
+    const LVI_MASK: u32 = 0x1f; // Five bits for 32 total entries.
+    const IOC_MASK: u32 = 0x8000_0000; // Interrupt on completion.
+    let num_buffers = LVI_MASK as usize + 1;
+    let mut bdbar: Vec<u32> = vec![0; num_buffers * 2]; // Each entry is a pointer and a length.
+    const buffer_size: usize = 1024 * 2;
+    // Setup ping-pong buffers. A and B repeating for every possible index.
+    let buffer: Vec<i16> = vec![0; buffer_size];
+    let (buffer_a, buffer_b) = buffer.split_at(buffer_size/2);
+    for i in 0..num_buffers {
+        bdbar[i*2] = if i % 2 == 0 {
+            &buffer_a[0] as * const i16 as u32
+        } else {
+            &buffer_b[0] as * const i16 as u32
+        };
+        bdbar[i*2 + 1] = IOC_MASK | (buffer_size as u32 / 2);
+    }
+}
