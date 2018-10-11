@@ -8,12 +8,13 @@ extern crate sys_util;
 use std::time;
 
 use devices::Ac97;
+use sys_util::{GuestAddress, GuestMemory};
 
 const GLOB_CNT: u64 = 0x2c;
 
 #[test]
 fn bm_bdbar() {
-    let mut ac97 = Ac97::new();
+    let mut ac97 = Ac97::new(GuestMemory::new(&[]).unwrap());
 
     let bdbars = [0x00u64, 0x10, 0x20];
 
@@ -34,7 +35,7 @@ fn bm_bdbar() {
 
 #[test]
 fn bm_status_reg() {
-    let mut ac97 = Ac97::new();
+    let mut ac97 = Ac97::new(GuestMemory::new(&[]).unwrap());
 
     let sr_addrs = [0x06u64, 0x16, 0x26];
 
@@ -47,7 +48,7 @@ fn bm_status_reg() {
 
 #[test]
 fn bm_global_control() {
-    let mut ac97 = Ac97::new();
+    let mut ac97 = Ac97::new(GuestMemory::new(&[]).unwrap());
 
     assert_eq!(ac97.bm_readl(GLOB_CNT), 0x0000_0000);
 
@@ -71,12 +72,11 @@ fn bm_global_control() {
 }
 
 #[test]
-fn test_measure_clock() {
+fn test_start_playback() {
     const LVI_MASK: u8 = 0x1f; // Five bits for 32 total entries.
     const IOC_MASK: u32 = 0x8000_0000; // Interrupt on completion.
     let num_buffers = LVI_MASK as usize + 1;
-    let mut bdbar: Vec<u32> = vec![0; num_buffers * 2]; // Each entry is a pointer and a length.
-    const buffer_size: usize = 1024 * 2;
+    const BUFFER_SIZE: usize = 1024 * 2;
 
     // Initialize PO registers.
     const PO_BASE: u64 = 0x10;
@@ -89,25 +89,26 @@ fn test_measure_clock() {
     const PO_CR: u64 = PO_BASE + 0xb;
     const CR_RPBM: u8 = 0x01;
 
-    let mut ac97 = Ac97::new();
+    const GUEST_ADDR_BASE: u32 = 0x100_0000;
+    let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024*1024*1024)]).unwrap();
+    let mut ac97 = Ac97::new(mem.clone());
 
     // Release cold reset.
     ac97.bm_writel(GLOB_CNT, 0x0000_0002);
 
     // Setup ping-pong buffers. A and B repeating for every possible index.
-    let buffer: Vec<i16> = vec![0; buffer_size];
-    ac97.bm_writel(PO_BDBAR, &buffer[0] as * const i16 as u32);
-    let (buffer_a, buffer_b) = buffer.split_at(buffer_size/2);
+    ac97.bm_writel(PO_BDBAR, GUEST_ADDR_BASE);
     for i in 0..num_buffers {
-        bdbar[i*2] = if i % 2 == 0 {
-            &buffer_a[0] as * const i16 as u32
+        let pointer_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8);
+        let control_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8 + 4);
+        if i % 2 == 0 {
+            mem.write_obj_at_addr(GUEST_ADDR_BASE, pointer_addr);
         } else {
-            &buffer_b[0] as * const i16 as u32
+            mem.write_obj_at_addr(GUEST_ADDR_BASE + BUFFER_SIZE as u32 / 2, pointer_addr);
         };
-        bdbar[i*2 + 1] = IOC_MASK | (buffer_size as u32 / 2);
+        mem.write_obj_at_addr(IOC_MASK | (BUFFER_SIZE as u32 / 2), control_addr);
     }
 
-    ac97.bm_writeb(PO_CIV, 0);
     ac97.bm_writeb(PO_LVI, LVI_MASK);
 
     // TODO(dgreid) - clear interrupts.
@@ -117,8 +118,12 @@ fn test_measure_clock() {
 
     std::thread::sleep(time::Duration::from_millis(10));
 
+    let mut pb_buf = vec![0u16; BUFFER_SIZE];
+
+    assert_eq!(ac97.play_buffer(&mut pb_buf), pb_buf.len());
+
     assert_ne!(0, ac97.bm_readw(PO_PICB));
-    assert_ne!(0, ac97.bm_readw(PO_CIV));
+    assert_ne!(0, ac97.bm_readb(PO_CIV));
  
     // Stop.
     ac97.bm_writeb(PO_CR, 0);
