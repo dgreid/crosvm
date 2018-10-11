@@ -5,13 +5,14 @@
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
+use data_model::VolatileMemory;
 use pci::pci_configuration::{
     PciClassCode, PciConfiguration, PciHeaderType, PciMultimediaSubclass,
 };
 use pci::pci_device::{self, PciDevice, Result};
 use pci::PciInterruptPin;
 use resources::SystemAllocator;
-use sys_util::EventFd;
+use sys_util::{EventFd, GuestAddress, GuestMemory};
 
 // Use 82801AA because it's what qemu does.
 const PCI_DEVICE_ID_INTEL_82801AA_5: u16 = 0x2415;
@@ -31,8 +32,8 @@ pub struct Ac97Dev {
 }
 
 impl Ac97Dev {
-    pub fn new() -> Self {
-        let mut config_regs = PciConfiguration::new(
+    pub fn new(mem: GuestMemory) -> Self {
+        let config_regs = PciConfiguration::new(
             0x8086,
             PCI_DEVICE_ID_INTEL_82801AA_5,
             PciClassCode::MultimediaController,
@@ -45,7 +46,7 @@ impl Ac97Dev {
 
         Ac97Dev {
             config_regs,
-            ac97: Ac97::new(),
+            ac97: Ac97::new(mem),
         }
     }
 }
@@ -238,6 +239,8 @@ enum Ac97Function {
 
 // Audio driver controlled by the above registers.
 pub struct Ac97 {
+    mem: GuestMemory, // For playback and record buffers.
+
     // Bus Master registers
     pi_regs: Ac97FunctionRegs, // Input
     po_regs: Ac97FunctionRegs, // Output
@@ -302,9 +305,14 @@ const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
 // Global status
 const GLOB_STA_RESET_VAL: u32 = 0x0000_0300; // primary and secondary codec ready set.
 
+// Buffer descriptors
+const DESCRIPTOR_LENGTH: usize = 8;
+
 impl Ac97 {
-    pub fn new() -> Self {
+    pub fn new(mem: GuestMemory) -> Self {
         Ac97 {
+            mem,
+
             pi_regs: Ac97FunctionRegs::new(),
             po_regs: Ac97FunctionRegs::new(),
             mc_regs: Ac97FunctionRegs::new(),
@@ -328,6 +336,42 @@ impl Ac97 {
 
     pub fn input_muted(&self) -> bool {
         self.record_gain_mute | (self.power_down_control & PD_REG_INPUT_MUTE_MASK != 0)
+    }
+
+    /// Return the number of sample sent ts the buffer.
+    pub fn play_buffer(&mut self, out_buffer: &mut [u16]) -> usize {
+        let mut regs = &mut self.po_regs;
+        // walk the valid buffers fill from each, update civ an picb as we go.
+
+        let mut written = 0;
+
+        while written < out_buffer.len() {
+            let descriptor_addr = regs.bdbar + regs.civ as u32 * DESCRIPTOR_LENGTH as u32;
+            let buffer_addr: u32 = self.mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
+            let control_reg: u32 = self.mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
+            let buffer_len: u32 = control_reg & 0x0000_ffff;
+
+            let nread = std::cmp::min(out_buffer.len() - written, regs.picb as usize);
+            let read_pos = (buffer_addr + (buffer_len - regs.picb as u32)) as u64;
+            self.mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer[..nread]);
+            regs.picb -= nread as u16;
+            written += nread;
+
+            // Check if this buffer is finished.
+            if regs.picb == 0 {
+                Self::next_buffer_descriptor(&mut regs, &self.mem);
+            }
+        }
+        written
+    }
+
+    fn next_buffer_descriptor(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
+        regs.civ = (regs.civ + 1) % 32;
+        regs.piv = regs.civ;
+        // TODO - handle civ hitting lvi.
+        let descriptor_addr = regs.bdbar + regs.civ as u32 * DESCRIPTOR_LENGTH as u32;
+        let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
+        regs.picb = control_reg as u16; // truncating droping control bits.
     }
 
     // Bus master handling
@@ -371,24 +415,29 @@ impl Ac97 {
     }
 
     fn set_cr(&mut self, func: Ac97Function, val: u8) {
-        let regs = self.bm_regs_mut(&func);
+        let mut regs = match func {
+            Ac97Function::Input => &mut self.pi_regs,
+            Ac97Function::Output => &mut self.po_regs,
+            Ac97Function::Microphone => &mut self.mc_regs,
+        };
         if val & CR_RR != 0 {
             regs.do_reset();
             // TODO(dgreid) stop audio
         } else {
-            regs.cr = val & CR_VALID_MASK;
-            if regs.cr & CR_RPBM == 0 {
+            if val & CR_RPBM == 0 {
                 // Run/Pause set to pause.
                 // TODO(dgreid) disable audio.
                 regs.sr |= SR_DCH;
-            } else {
+            } else if regs.cr & CR_RPBM != 0 { // Not already running.
                 // Run/Pause set to run.
+                regs.piv = 0x1f; // Set to last buffer.
                 regs.civ = regs.piv;
-                regs.piv = (regs.piv + 1) % 32;
                 //fetch_bd (s, r);
                 regs.sr &= !SR_DCH;
-                // TODO(dgreid) activate audio.
+                // TODO(dgreid) start audio.
+                Self::next_buffer_descriptor(&mut regs, &self.mem);
             }
+            regs.cr = val & CR_VALID_MASK;
         }
     }
 
@@ -428,7 +477,7 @@ impl Ac97 {
             self.po_regs.do_reset();
             self.mc_regs.do_reset();
 
-            *self = Ac97::new();
+            *self = Ac97::new(self.mem.clone());
             self.glob_cnt =  new_glob_cnt & GLOB_CNT_STABLE_BITS;
             return;
         }
