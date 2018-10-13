@@ -304,7 +304,7 @@ const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
 const GLOB_CNT_WARM_RESET: u32 = 0x0000_0004;
 const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
 // Global status
-const GLOB_STA_RESET_VAL: u32 = 0x0000_0300; // primary and secondary codec ready set.
+const GLOB_STA_RESET_VAL: u32 = 0x0000_0100; // primary codec ready set.
 
 // Buffer descriptors
 const DESCRIPTOR_LENGTH: usize = 8;
@@ -654,7 +654,8 @@ impl Ac97 {
 
     // Handles writes to the powerdown ctrl/status register (0x26).
     fn set_power_down_reg(&mut self, val: u16) {
-        self.power_down_control = val;
+        self.power_down_control = (val & !PD_REG_STATUS_MASK) |
+                                  (self.power_down_control & PD_REG_STATUS_MASK);
         // TODO(dgreid) handle mute state changes
     }
 

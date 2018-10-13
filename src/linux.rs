@@ -627,7 +627,7 @@ fn create_virtio_devs(
         pci_devices.push((pci_dev, stub.jail));
     }
 
-    let ac97_dev = Box::new(devices::Ac97Dev::new()); // TODO unwrap
+    let ac97_dev = Box::new(devices::Ac97Dev::new((*mem).clone())); // TODO unwrap
     pci_devices.push((ac97_dev, None)); // TODO add jail
 
     Ok(pci_devices)
