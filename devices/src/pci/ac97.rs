@@ -238,28 +238,6 @@ enum Ac97Function {
     Microphone,
 }
 
-// Audio driver controlled by the above registers.
-pub struct Ac97 {
-    mem: GuestMemory, // For playback and record buffers.
-
-    // Bus Master registers
-    pi_regs: Ac97FunctionRegs, // Input
-    po_regs: Ac97FunctionRegs, // Output
-    mc_regs: Ac97FunctionRegs, // Microphone
-    glob_cnt: u32,
-    glob_sta: u32,
-    acc_sema: u8,
-
-    // Mixer Registers
-    master_volume_l: u8,
-    master_volume_r: u8,
-    master_mute: bool,
-    record_gain_l: u8,
-    record_gain_r: u8,
-    record_gain_mute: bool,
-    power_down_control: u16,
-}
-
 // glob_sta bits
 const GS_MD3: u32 = 1 << 17;
 const GS_AD3: u32 = 1 << 16;
@@ -295,6 +273,9 @@ const GS_WCLEAR_MASK: u32 = GS_RCS | GS_S1R1 | GS_S0R1 | GS_GSCI;
 // Mixer register bits
 const MUTE_REG_BIT: u16 = 0x8000;
 const VOL_REG_MASK: u16 = 0x003f;
+const MIXER_VOL_MASK: u16 = 0x001f;
+const MIXER_VOL_LEFT_SHIFT: usize = 8;
+const MIXER_MIC_20DB: u16 = 0x0040;
 // Powerdown reg
 const PD_REG_STATUS_MASK: u16 = 0x000f;
 const PD_REG_OUTPUT_MUTE_MASK: u16 = 0xb200;
@@ -308,6 +289,34 @@ const GLOB_STA_RESET_VAL: u32 = 0x0000_0100; // primary codec ready set.
 
 // Buffer descriptors
 const DESCRIPTOR_LENGTH: usize = 8;
+
+// Audio driver controlled by the above registers.
+pub struct Ac97 {
+    mem: GuestMemory, // For playback and record buffers.
+
+    // Bus Master registers
+    pi_regs: Ac97FunctionRegs, // Input
+    po_regs: Ac97FunctionRegs, // Output
+    mc_regs: Ac97FunctionRegs, // Microphone
+    glob_cnt: u32,
+    glob_sta: u32,
+    acc_sema: u8,
+
+    // Mixer Registers
+    master_volume_l: u8,
+    master_volume_r: u8,
+    master_mute: bool,
+    mic_muted: bool,
+    mic_20dB: bool,
+    mic_volume: u8,
+    record_gain_l: u8,
+    record_gain_r: u8,
+    record_gain_mute: bool,
+    pcm_out_vol_l: u16,
+    pcm_out_vol_r: u16,
+    pcm_out_mute: bool,
+    power_down_control: u16,
+}
 
 impl Ac97 {
     pub fn new(mem: GuestMemory) -> Self {
@@ -324,9 +333,15 @@ impl Ac97 {
             master_volume_l: 0,
             master_volume_r: 0,
             master_mute: true,
+            mic_muted: true,
+            mic_20dB: false,
+            mic_volume: 0x8,
             record_gain_l: 0,
             record_gain_r: 0,
             record_gain_mute: true,
+            pcm_out_vol_l: 0x8,
+            pcm_out_vol_r: 0x8,
+            pcm_out_mute: true,
             power_down_control: PD_REG_STATUS_MASK, // Report everything is ready.
         }
     }
@@ -599,7 +614,9 @@ impl Ac97 {
     pub fn mix_readw(&self, offset: u64) -> u16 {
         match offset {
             0x02 => self.get_master_reg(),
-            0x1c => self.get_record_gain_reg(),
+            0x0e => self.get_mixer_mic_volume(),
+            0x1c => self.get_mixer_record_gain_reg(),
+            0x18 => self.get_mixer_pcm_out_volume(),
             0x26 => self.power_down_control,
             0x7c => AC97_VENDOR_ID1,
             0x7e => AC97_VENDOR_ID1,
@@ -610,7 +627,9 @@ impl Ac97 {
     pub fn mix_writew(&mut self, offset: u64, val: u16) {
         match offset {
             0x02 => self.set_master_reg(val),
-            0x1c => self.set_record_gain_reg(val),
+            0x0e => self.set_mixer_mic_volume(val),
+            0x1c => self.set_mixer_record_gain_reg(val),
+            0x18 => self.set_mixer_pcm_out_volume(val),
             0x26 => self.set_power_down_reg(val),
             _ => (),
         }
@@ -634,8 +653,44 @@ impl Ac97 {
         self.master_volume_l = (val >> 8 & VOL_REG_MASK) as u8;
     }
 
+    // Returns the value read in the Mic volume register.
+    fn get_mixer_mic_volume(&self) -> u16 {
+        let mut reg = self.mic_volume as u16;
+        if (self.mic_muted) {
+            reg |= MUTE_REG_BIT;
+        }
+        if (self.mic_20dB) {
+            reg |= MIXER_MIC_20DB;
+        }
+        reg
+    }
+
+    // Sets the mic input mute, boost, and volume settings.
+    fn set_mixer_mic_volume(&mut self, val: u16) {
+        self.mic_volume = (val & MIXER_VOL_MASK) as u8;
+        self.mic_muted = val & MUTE_REG_BIT != 0;
+        self.mic_20dB = val & MIXER_MIC_20DB != 0;
+    }
+
+    // Returns the value read in the Mic volume register.
+    fn get_mixer_pcm_out_volume(&self) -> u16 {
+        let reg = (self.pcm_out_vol_l as u16) << 8 | self.pcm_out_vol_r as u16;
+        if self.pcm_out_mute {
+            reg | MUTE_REG_BIT
+        } else {
+            reg
+        }
+    }
+
+    // Sets the pcm output mute and volume states.
+    fn set_mixer_pcm_out_volume(&mut self, val: u16) {
+        self.pcm_out_vol_r = val & MIXER_VOL_MASK;
+        self.pcm_out_vol_l = (val >> MIXER_VOL_LEFT_SHIFT) & MIXER_VOL_MASK;
+        self.pcm_out_mute = val & MUTE_REG_BIT != 0;
+    }
+
     // Returns the record gain register (0x01c).
-    fn get_record_gain_reg(&self) -> u16 {
+    fn get_mixer_record_gain_reg(&self) -> u16 {
         let reg = (self.record_gain_l as u16) << 8 | self.record_gain_r as u16;
         if self.record_gain_mute {
             reg | MUTE_REG_BIT
@@ -645,7 +700,7 @@ impl Ac97 {
     }
 
     // Handles writes to the record_gain register (0x1c).
-    fn set_record_gain_reg(&mut self, val: u16) {
+    fn set_mixer_record_gain_reg(&mut self, val: u16) {
         // TODO(dgreid) set mute right away on the stream.
         self.record_gain_mute = val & MUTE_REG_BIT != 0;
         self.record_gain_r = (val & VOL_REG_MASK) as u8;
