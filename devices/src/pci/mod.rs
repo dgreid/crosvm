@@ -5,6 +5,7 @@
 //! Implements pci devices and busses.
 
 mod ac97;
+mod ac97_mixer;
 mod pci_configuration;
 mod pci_device;
 mod pci_root;
