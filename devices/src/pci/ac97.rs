@@ -5,6 +5,7 @@
 use std;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use data_model::VolatileMemory;
 use pci::ac97_mixer::Ac97Mixer;
@@ -180,14 +181,15 @@ impl Ac97BusDevice {
 }
 
 // Registers for individual audio functions.
-#[derive(Default)]
+// Some are atomic as they need to be updated from the audio thread.
+#[derive(Clone, Default)]
 struct Ac97FunctionRegs {
     bdbar: u32,
-    civ: u8,
+    civ: Arc<AtomicUsize>, // Actually u8
     lvi: u8,
     sr: u16,
-    picb: u16,
-    piv: u8,
+    picb: Arc<AtomicUsize>, // Actually u16
+    piv: Arc<AtomicUsize>, // Actually u8
     cr: u8,
 }
 
@@ -221,18 +223,18 @@ impl Ac97FunctionRegs {
 
     pub fn do_reset(&mut self) {
         self.bdbar = 0;
-        self.civ = 0;
+        self.civ.store(0, Ordering::Relaxed);
         self.lvi = 0;
         self.sr = SR_DCH;
-        self.picb = 0;
-        self.piv = 0;
+        self.picb.store(0, Ordering::Relaxed);
+        self.piv.store(0, Ordering::Relaxed);
         self.cr = self.cr & CR_DONT_CLEAR_MASK;
     }
 
     /// Read register 4, 5, and 6 as one 32 bit word.
     /// According to the ICH spec, reading these three with one 32 bit access is allowed.
     pub fn atomic_status_regs(&self) -> u32 {
-        self.civ as u32 | (self.lvi as u32) << 8 | (self.sr as u32) << 16
+        self.civ.load(Ordering::Relaxed) as u32 | (self.lvi as u32) << 8 | (self.sr as u32) << 16
     }
 }
 
@@ -316,19 +318,22 @@ impl Ac97 {
         let mut written = 0;
 
         while written < out_buffer.len() {
-            let descriptor_addr = regs.bdbar + regs.civ as u32 * DESCRIPTOR_LENGTH as u32;
+            let civ = regs.civ.load(Ordering::Relaxed) as u8;
+            let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
             let buffer_addr: u32 = self.mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
             let control_reg: u32 = self.mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
             let buffer_len: u32 = control_reg & 0x0000_ffff;
 
-            let nread = std::cmp::min(out_buffer.len() - written, regs.picb as usize);
-            let read_pos = (buffer_addr + (buffer_len - regs.picb as u32)) as u64;
+            let mut picb = regs.picb.load(Ordering::Relaxed) as u16;
+            let nread = std::cmp::min(out_buffer.len() - written, picb as usize);
+            let read_pos = (buffer_addr + (buffer_len - picb as u32)) as u64;
             self.mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer[..nread]);
-            regs.picb -= nread as u16;
+            picb -= nread as u16;
+            regs.picb.store(picb as usize, Ordering::Relaxed);
             written += nread;
 
             // Check if this buffer is finished.
-            if regs.picb == 0 {
+            if picb == 0 {
                 Self::next_buffer_descriptor(&mut regs, &self.mem);
             }
         }
@@ -336,12 +341,16 @@ impl Ac97 {
     }
 
     fn next_buffer_descriptor(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
-        regs.civ = (regs.civ + 1) % 32;
-        regs.piv = regs.civ;
+        let mut civ = regs.civ.load(Ordering::Relaxed) as u8;
+
+        civ = (civ + 1) % 32;
         // TODO - handle civ hitting lvi.
-        let descriptor_addr = regs.bdbar + regs.civ as u32 * DESCRIPTOR_LENGTH as u32;
+        let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
         let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
-        regs.picb = control_reg as u16; // truncating droping control bits.
+        let picb = control_reg as u16; // Truncate droping control bits, leaving buffer length.
+        regs.civ.store(civ as usize, Ordering::Relaxed);
+        regs.piv.store(civ as usize, Ordering::Relaxed);
+        regs.picb.store(picb as usize, Ordering::Relaxed);
     }
 
     // Bus master handling
@@ -400,8 +409,8 @@ impl Ac97 {
                 regs.sr |= SR_DCH;
             } else if regs.cr & CR_RPBM != 0 { // Not already running.
                 // Run/Pause set to run.
-                regs.piv = 0x1f; // Set to last buffer.
-                regs.civ = regs.piv;
+                regs.piv.store(0x1f, Ordering::Relaxed); // Set to last buffer.
+                regs.civ.store(0x1f, Ordering::Relaxed);
                 //fetch_bd (s, r);
                 regs.sr &= !SR_DCH;
                 // TODO(dgreid) start audio.
@@ -465,17 +474,17 @@ impl Ac97 {
 
     pub fn bm_readb(&mut self, offset: u64) -> u8 {
         match offset {
-            0x04 => self.pi_regs.civ,
+            0x04 => self.pi_regs.civ.load(Ordering::Relaxed) as u8,
             0x05 => self.pi_regs.lvi,
-            0x0a => self.pi_regs.piv,
+            0x0a => self.pi_regs.piv.load(Ordering::Relaxed) as u8,
             0x0b => self.pi_regs.cr,
-            0x14 => self.po_regs.civ,
+            0x14 => self.po_regs.civ.load(Ordering::Relaxed) as u8,
             0x15 => self.po_regs.lvi,
-            0x1a => self.po_regs.piv,
+            0x1a => self.po_regs.piv.load(Ordering::Relaxed) as u8,
             0x1b => self.po_regs.cr,
-            0x24 => self.mc_regs.civ,
+            0x24 => self.mc_regs.civ.load(Ordering::Relaxed) as u8,
             0x25 => self.mc_regs.lvi,
-            0x2a => self.mc_regs.piv,
+            0x2a => self.mc_regs.piv.load(Ordering::Relaxed) as u8,
             0x2b => self.mc_regs.cr,
             0x34 => self.acc_sema,
             _ => 0,
@@ -485,11 +494,11 @@ impl Ac97 {
     pub fn bm_readw(&mut self, offset: u64) -> u16 {
         match offset {
             0x06 => self.pi_regs.sr,
-            0x08 => self.pi_regs.picb,
+            0x08 => self.pi_regs.picb.load(Ordering::Relaxed) as u16,
             0x16 => self.po_regs.sr,
-            0x18 => self.po_regs.picb,
+            0x18 => self.po_regs.picb.load(Ordering::Relaxed) as u16,
             0x26 => self.mc_regs.sr,
-            0x28 => self.mc_regs.picb,
+            0x28 => self.mc_regs.picb.load(Ordering::Relaxed) as u16,
             _ => 0,
         }
     }
