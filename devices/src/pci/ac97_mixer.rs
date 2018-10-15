@@ -29,7 +29,7 @@ pub struct Ac97Mixer {
     master_volume_r: u8,
     master_mute: bool,
     mic_muted: bool,
-    mic_20dB: bool,
+    mic_20db: bool,
     mic_volume: u8,
     record_gain_l: u8,
     record_gain_r: u8,
@@ -47,7 +47,7 @@ impl Ac97Mixer {
             master_volume_r: 0,
             master_mute: true,
             mic_muted: true,
-            mic_20dB: false,
+            mic_20db: false,
             mic_volume: 0x8,
             record_gain_l: 0,
             record_gain_r: 0,
@@ -115,7 +115,7 @@ impl Ac97Mixer {
         if self.mic_muted {
             reg |= MUTE_REG_BIT;
         }
-        if self.mic_20dB {
+        if self.mic_20db {
             reg |= MIXER_MIC_20DB;
         }
         reg
@@ -125,7 +125,7 @@ impl Ac97Mixer {
     fn set_mixer_mic_volume(&mut self, val: u16) {
         self.mic_volume = (val & MIXER_VOL_MASK) as u8;
         self.mic_muted = val & MUTE_REG_BIT != 0;
-        self.mic_20dB = val & MIXER_MIC_20DB != 0;
+        self.mic_20db = val & MIXER_MIC_20DB != 0;
     }
 
     // Returns the value read in the Mic volume register.
