@@ -5,7 +5,8 @@
 use std;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 
 use data_model::VolatileMemory;
 use pci::ac97_mixer::Ac97Mixer;
@@ -292,6 +293,9 @@ pub struct Ac97 {
     acc_sema: u8,
 
     mixer: Ac97Mixer,
+
+    audio_thread_po: Option<thread::JoinHandle<()>>,
+    audio_thread_po_run: Arc<AtomicBool>,
 }
 
 impl Ac97 {
@@ -307,36 +311,39 @@ impl Ac97 {
             acc_sema: 0,
 
             mixer: Ac97Mixer::new(),
+            audio_thread_po: None,
+            audio_thread_po_run: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Return the number of sample sent ts the buffer.
-    pub fn play_buffer(&mut self, out_buffer: &mut [u16]) -> usize {
-        let mut regs = &mut self.po_regs;
-        // walk the valid buffers fill from each, update civ an picb as we go.
-
+    fn play_buffer(regs: &mut Ac97FunctionRegs, mem: &mut GuestMemory, out_buffer: &mut [i16]) -> usize {
         let mut written = 0;
 
+        println!("play_buffer");
+
+        // walk the valid buffers, fill from each, update status regs as we go.
         while written < out_buffer.len() {
             let civ = regs.civ.load(Ordering::Relaxed) as u8;
             let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
-            let buffer_addr: u32 = self.mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
-            let control_reg: u32 = self.mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
+            let buffer_addr: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
+            let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
             let buffer_len: u32 = control_reg & 0x0000_ffff;
 
             let mut picb = regs.picb.load(Ordering::Relaxed) as u16;
             let nread = std::cmp::min(out_buffer.len() - written, picb as usize);
             let read_pos = (buffer_addr + (buffer_len - picb as u32)) as u64;
-            self.mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer[..nread]);
+            mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer[..nread]);
             picb -= nread as u16;
             regs.picb.store(picb as usize, Ordering::Relaxed);
             written += nread;
 
             // Check if this buffer is finished.
             if picb == 0 {
-                Self::next_buffer_descriptor(&mut regs, &self.mem);
+                Self::next_buffer_descriptor(regs, &mem);
             }
         }
+        println!("play_buffer wrote {}", written);
         written
     }
 
@@ -406,15 +413,32 @@ impl Ac97 {
             if val & CR_RPBM == 0 {
                 // Run/Pause set to pause.
                 // TODO(dgreid) disable audio.
+                self.audio_thread_po_run.store(false, Ordering::Relaxed);
+                if let Some(thread) = self.audio_thread_po.take() {
+                    thread.join().unwrap();
+                }
                 regs.sr |= SR_DCH;
-            } else if regs.cr & CR_RPBM != 0 { // Not already running.
+            } else if regs.cr & CR_RPBM == 0 { // Not already running.
                 // Run/Pause set to run.
                 regs.piv.store(0x1f, Ordering::Relaxed); // Set to last buffer.
                 regs.civ.store(0x1f, Ordering::Relaxed);
                 //fetch_bd (s, r);
                 regs.sr &= !SR_DCH;
-                // TODO(dgreid) start audio.
                 Self::next_buffer_descriptor(&mut regs, &self.mem);
+                // TODO(dgreid) start audio.
+                let mut thread_regs = regs.clone();
+                let mut thread_mem = self.mem.clone();
+                self.audio_thread_po_run.store(true, Ordering::Relaxed);
+                let thread_run = self.audio_thread_po_run.clone();
+                self.audio_thread_po = Some(thread::spawn(move || {
+                    println!("in thread");
+                    let mut pb_buf = vec![0i16; 480];
+                    while thread_run.load(Ordering::Relaxed) {
+                        // TODO - actually connect to audio output.
+                        Self::play_buffer(&mut thread_regs, &mut thread_mem, &mut pb_buf);
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }));
             }
             regs.cr = val & CR_VALID_MASK;
         }
