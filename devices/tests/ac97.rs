@@ -76,7 +76,7 @@ fn test_start_playback() {
     const LVI_MASK: u8 = 0x1f; // Five bits for 32 total entries.
     const IOC_MASK: u32 = 0x8000_0000; // Interrupt on completion.
     let num_buffers = LVI_MASK as usize + 1;
-    const BUFFER_SIZE: usize = 1024 * 2;
+    const BUFFER_SIZE: usize = 960;
 
     // Initialize PO registers.
     const PO_BASE: u64 = 0x10;
@@ -118,12 +118,10 @@ fn test_start_playback() {
 
     std::thread::sleep(time::Duration::from_millis(10));
 
-    let mut pb_buf = vec![0u16; BUFFER_SIZE];
-
-    assert_eq!(ac97.play_buffer(&mut pb_buf), pb_buf.len());
-
     assert_ne!(0, ac97.bm_readw(PO_PICB));
     assert_ne!(0, ac97.bm_readb(PO_CIV));
+
+    // TODO(dgreid) - check interrupts were set.
  
     // Stop.
     ac97.bm_writeb(PO_CR, 0);
