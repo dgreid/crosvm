@@ -102,11 +102,11 @@ fn test_start_playback() {
         let pointer_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8);
         let control_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8 + 4);
         if i % 2 == 0 {
-            mem.write_obj_at_addr(GUEST_ADDR_BASE, pointer_addr);
+            mem.write_obj_at_addr(GUEST_ADDR_BASE, pointer_addr).unwrap();
         } else {
-            mem.write_obj_at_addr(GUEST_ADDR_BASE + BUFFER_SIZE as u32 / 2, pointer_addr);
+            mem.write_obj_at_addr(GUEST_ADDR_BASE + BUFFER_SIZE as u32 / 2, pointer_addr).unwrap();
         };
-        mem.write_obj_at_addr(IOC_MASK | (BUFFER_SIZE as u32 / 2), control_addr);
+        mem.write_obj_at_addr(IOC_MASK | (BUFFER_SIZE as u32 / 2), control_addr).unwrap();
     }
 
     ac97.bm_writeb(PO_LVI, LVI_MASK);
