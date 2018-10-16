@@ -112,55 +112,6 @@ impl PciDevice for Ac97Dev {
     }
 }
 
-// Audio Mixer Registers
-// 00h Reset
-// 02h Master Volume Mute
-// 04h Headphone Volume Mute
-// 06h Master Volume Mono Mute
-// 08h Master Tone (R & L)
-// 0Ah PC_BEEP Volume Mute
-// 0Ch Phone Volume Mute
-// 0Eh Mic Volume Mute
-// 10h Line In Volume Mute
-// 12h CD Volume Mute
-// 14h Video Volume Mute
-// 16h Aux Volume Mute
-// 18h PCM Out Volume Mute
-// 1Ah Record Select
-// 1Ch Record Gain Mute
-// 1Eh Record Gain Mic Mute
-// 20h General Purpose
-// 22h 3D Control
-// 24h AC’97 RESERVED
-// 26h Powerdown Ctrl/Stat
-// 28h Extended Audio
-// 2Ah Extended Audio Ctrl/Stat
-//
-// Bus Master regs from ICH spec:
-// 00h PI_BDBAR PCM In Buffer Descriptor list Base Address Register
-// 04h PI_CIV PCM In Current Index Value
-// 05h PI_LVI PCM In Last Valid Index
-// 06h PI_SR PCM In Status Register
-// 08h PI_PICB PCM In Position In Current Buffer
-// 0Ah PI_PIV PCM In Prefetched Index Value
-// 0Bh PI_CR PCM In Control Register
-// 10h PO_BDBAR PCM Out Buffer Descriptor list Base Address Register
-// 14h PO_CIV PCM Out Current Index Value
-// 15h PO_LVI PCM Out Last Valid Index
-// 16h PO_SR PCM Out Status Register
-// 18h PO_PICB PCM Out Position In Current Buffer
-// 1Ah PO_PIV PCM Out Prefetched Index Value
-// 1Bh PO_CR PCM Out Control Register
-// 20h MC_BDBAR Mic. In Buffer Descriptor list Base Address Register
-// 24h PM_CIV Mic. In Current Index Value
-// 25h MC_LVI Mic. In Last Valid Index
-// 26h MC_SR Mic. In Status Register
-// 28h MC_PICB Mic In Position In Current Buffer
-// 2Ah MC_PIV Mic. In Prefetched Index Value
-// 2Bh MC_CR Mic. In Control Register
-// 2Ch GLOB_CNT Global Control
-// 30h GLOB_STA Global Status
-// 34h ACC_SEMA Codec Write Semaphore Register
 struct Ac97BusDevice {
     audio_function: Arc<Mutex<Ac97>>,
 }
