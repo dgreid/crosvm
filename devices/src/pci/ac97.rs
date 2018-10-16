@@ -5,10 +5,11 @@
 use std;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use data_model::VolatileMemory;
+use pci::ac97_regs::*;
 use pci::ac97_mixer::Ac97Mixer;
 use pci::pci_configuration::{
     PciClassCode, PciConfiguration, PciHeaderType, PciMultimediaSubclass,
@@ -20,17 +21,6 @@ use sys_util::{EventFd, GuestAddress, GuestMemory};
 
 // Use 82801AA because it's what qemu does.
 const PCI_DEVICE_ID_INTEL_82801AA_5: u16 = 0x2415;
-
-// Size of IO register regions
-const MIXER_REGS_SIZE: u64 = 0x100;
-const MASTER_REGS_SIZE: u64 = 0x400;
-
-// Global Control
-const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
-const GLOB_CNT_WARM_RESET: u32 = 0x0000_0004;
-const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
-// Global status
-const GLOB_STA_RESET_VAL: u32 = 0x0000_0100; // primary codec ready set.
 
 /// AC97 audio device emulation.
 pub struct Ac97Dev {
@@ -180,102 +170,6 @@ impl Ac97BusDevice {
         Ac97BusDevice { audio_function }
     }
 }
-
-// Registers for individual audio functions.
-// Some are atomic as they need to be updated from the audio thread.
-#[derive(Clone, Default)]
-struct Ac97FunctionRegs {
-    bdbar: u32,
-    civ: Arc<AtomicUsize>, // Actually u8
-    lvi: u8,
-    sr: u16,
-    picb: Arc<AtomicUsize>, // Actually u16
-    piv: Arc<AtomicUsize>, // Actually u8
-    cr: u8,
-}
-
-// Status Register Bits.
-const SR_DCH: u16 = 0x01;
-const SR_CELV: u16 = 0x02;
-const SR_LVBCI: u16 = 0x04;
-const SR_BCIS: u16 = 0x08;
-const SR_FIFOE: u16 = 0x10;
-const SR_VALID_MASK: u16 = 0x1f;
-const SR_WCLEAR_MASK: u16 = SR_FIFOE | SR_BCIS | SR_LVBCI;
-const SR_RO_MASK: u16 = SR_DCH | SR_CELV;
-const SR_INT_MASK: u16 = SR_BCIS | SR_LVBCI;
-
-// Control Register Bits.
-const CR_RPBM: u8 = 0x01;
-const CR_RR: u8 = 0x02;
-const CR_LVBIE: u8 = 0x04;
-const CR_FEIE: u8 = 0x08;
-const CR_IOCE: u8 = 0x10;
-const CR_VALID_MASK: u8 = 0x1f;
-const CR_DONT_CLEAR_MASK: u8 = CR_IOCE | CR_FEIE | CR_LVBIE;
-
-impl Ac97FunctionRegs {
-    pub fn new() -> Self {
-        Ac97FunctionRegs {
-            sr: SR_DCH,
-            ..Default::default()
-        }
-    }
-
-    pub fn do_reset(&mut self) {
-        self.bdbar = 0;
-        self.civ.store(0, Ordering::Relaxed);
-        self.lvi = 0;
-        self.sr = SR_DCH;
-        self.picb.store(0, Ordering::Relaxed);
-        self.piv.store(0, Ordering::Relaxed);
-        self.cr = self.cr & CR_DONT_CLEAR_MASK;
-    }
-
-    /// Read register 4, 5, and 6 as one 32 bit word.
-    /// According to the ICH spec, reading these three with one 32 bit access is allowed.
-    pub fn atomic_status_regs(&self) -> u32 {
-        self.civ.load(Ordering::Relaxed) as u32 | (self.lvi as u32) << 8 | (self.sr as u32) << 16
-    }
-}
-
-enum Ac97Function {
-    Input,
-    Output,
-    Microphone,
-}
-
-// glob_sta bits
-const GS_MD3: u32 = 1 << 17;
-const GS_AD3: u32 = 1 << 16;
-const GS_RCS: u32 = 1 << 15;
-const GS_B3S12: u32 = 1 << 14;
-const GS_B2S12: u32 = 1 << 13;
-const GS_B1S12: u32 = 1 << 12;
-const GS_S1R1: u32 = 1 << 11;
-const GS_S0R1: u32 = 1 << 10;
-const GS_S1CR: u32 = 1 << 9;
-const GS_S0CR: u32 = 1 << 8;
-const GS_MINT: u32 = 1 << 7;
-const GS_POINT: u32 = 1 << 6;
-const GS_PIINT: u32 = 1 << 5;
-const GS_RSRVD: u32 = 1 << 4 | 1 << 3;
-const GS_MOINT: u32 = 1 << 2;
-const GS_MIINT: u32 = 1 << 1;
-const GS_GSCI: u32 = 1;
-const GS_RO_MASK: u32 = GS_B3S12
-    | GS_B2S12
-    | GS_B1S12
-    | GS_S1CR
-    | GS_S0CR
-    | GS_MINT
-    | GS_POINT
-    | GS_PIINT
-    | GS_RSRVD
-    | GS_MOINT
-    | GS_MIINT;
-const GS_VALID_MASK: u32 = 0x0003_ffff;
-const GS_WCLEAR_MASK: u32 = GS_RCS | GS_S1R1 | GS_S0R1 | GS_GSCI;
 
 // Buffer descriptors
 const DESCRIPTOR_LENGTH: usize = 8;
