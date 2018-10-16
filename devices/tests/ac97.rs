@@ -118,7 +118,7 @@ fn test_start_playback() {
 
     std::thread::sleep(time::Duration::from_millis(10));
 
-    assert!(ac97.bm_readw(PO_SR) & 0x01 != 0); // DMA is running.
+    assert!(ac97.bm_readw(PO_SR) & 0x01 == 0); // DMA is running.
     assert_ne!(0, ac97.bm_readw(PO_PICB));
     assert_ne!(0, ac97.bm_readb(PO_CIV));
 
@@ -126,5 +126,5 @@ fn test_start_playback() {
  
     // Stop.
     ac97.bm_writeb(PO_CR, 0);
-    assert!(ac97.bm_readw(PO_SR) & 0x01 -= 0); // DMA is not running.
+    assert!(ac97.bm_readw(PO_SR) & 0x01 != 0); // DMA is not running.
 }
