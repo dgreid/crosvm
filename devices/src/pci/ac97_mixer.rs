@@ -2,22 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Mixer register bits
-const MUTE_REG_BIT: u16 = 0x8000;
-const VOL_REG_MASK: u16 = 0x003f;
-const MIXER_VOL_MASK: u16 = 0x001f;
-const MIXER_VOL_LEFT_SHIFT: usize = 8;
-const MIXER_MIC_20DB: u16 = 0x0040;
-// Powerdown reg
-const PD_REG_STATUS_MASK: u16 = 0x000f;
-const PD_REG_OUTPUT_MUTE_MASK: u16 = 0xb200;
-const PD_REG_INPUT_MUTE_MASK: u16 = 0x0d00;
-// Global Control
-const GLOB_CNT_COLD_RESET: u32 = 0x0000_0002;
-const GLOB_CNT_WARM_RESET: u32 = 0x0000_0004;
-const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset.
-// Global status
-const GLOB_STA_RESET_VAL: u32 = 0x0000_0100; // primary codec ready set.
+use pci::ac97_regs::*;
 
 // AC97 Vendor ID
 const AC97_VENDOR_ID1: u16 = 0x8086;
@@ -67,7 +52,7 @@ impl Ac97Mixer {
             0x18 => self.get_mixer_pcm_out_volume(),
             0x26 => self.power_down_control,
             0x7c => AC97_VENDOR_ID1,
-            0x7e => AC97_VENDOR_ID1,
+            0x7e => AC97_VENDOR_ID2,
             _ => 0,
         }
     }

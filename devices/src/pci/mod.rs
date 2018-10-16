@@ -6,6 +6,7 @@
 
 mod ac97;
 mod ac97_mixer;
+mod ac97_regs;
 mod pci_configuration;
 mod pci_device;
 mod pci_root;
