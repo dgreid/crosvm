@@ -175,3 +175,6 @@ pub enum Ac97Function {
     Output,
     Microphone,
 }
+
+// Buffer descriptors are four bytes of pointer and 4 bytes of control/length.
+pub const DESCRIPTOR_LENGTH: usize = 8;
