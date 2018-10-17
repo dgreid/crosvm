@@ -79,7 +79,8 @@ impl PciDevice for Ac97Dev {
     }
 
     fn keep_fds(&self) -> Vec<RawFd> {
-        Vec::new()
+        vec![0,1,2]
+//        Vec::new()
     }
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {

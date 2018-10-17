@@ -235,14 +235,17 @@ impl Ac97BusMaster {
         match offset {
             0x04 => self.pi_regs.civ.load(Ordering::Relaxed) as u8,
             0x05 => self.pi_regs.lvi,
+            0x06 => self.pi_regs.sr as u8,
             0x0a => self.pi_regs.piv.load(Ordering::Relaxed) as u8,
             0x0b => self.pi_regs.cr,
             0x14 => self.po_regs.civ.load(Ordering::Relaxed) as u8,
             0x15 => self.po_regs.lvi,
+            0x16 => self.po_regs.sr as u8,
             0x1a => self.po_regs.piv.load(Ordering::Relaxed) as u8,
             0x1b => self.po_regs.cr,
             0x24 => self.mc_regs.civ.load(Ordering::Relaxed) as u8,
             0x25 => self.mc_regs.lvi,
+            0x26 => self.mc_regs.sr as u8,
             0x2a => self.mc_regs.piv.load(Ordering::Relaxed) as u8,
             0x2b => self.mc_regs.cr,
             0x34 => self.acc_sema,
@@ -289,6 +292,7 @@ impl Ac97BusMaster {
             0x0b => self.set_cr(Ac97Function::Input, val),
             0x14 => (), // RO
             0x15 => self.set_lvi(Ac97Function::Output, val),
+            0x16 => (), //TODO(dgreid, write-clear LVI int status,
             0x1a => (), // RO
             0x1b => self.set_cr(Ac97Function::Output, val),
             0x24 => (), // RO
