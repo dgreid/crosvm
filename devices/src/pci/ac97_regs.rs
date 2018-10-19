@@ -197,3 +197,4 @@ pub enum Ac97Function {
 
 // Buffer descriptors are four bytes of pointer and 4 bytes of control/length.
 pub const DESCRIPTOR_LENGTH: usize = 8;
+pub const BD_IOC: u32 = 1 << 31;
