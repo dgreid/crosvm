@@ -124,11 +124,23 @@ impl Ac97BusMaster {
                 self.audio_thread_po = Some(thread::spawn(move || {
                     println!("in thread");
                     let mut pb_buf = vec![0i16; 480];
-                    while thread_run.load(Ordering::Relaxed) {
-                        // TODO - actually connect to audio output.
-                        Self::play_buffer(&mut thread_regs, &mut thread_mem, &mut pb_buf);
-                        thread::sleep(std::time::Duration::from_millis(5));
-                    }
+                    match func {
+                        Ac97Function::Output => {
+                            while thread_run.load(Ordering::Relaxed) {
+                                // TODO - actually connect to audio output.
+                                Self::play_buffer(&mut thread_regs, &thread_mem, &mut pb_buf);
+                                thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                        }
+                        Ac97Function::Microphone |
+                        Ac97Function::Input => {
+                            while thread_run.load(Ordering::Relaxed) {
+                                // TODO - actually connect to audio output.
+                                Self::record_buffer(&mut thread_regs, &mut thread_mem, &pb_buf);
+                                thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                        }
+                    };
                 }));
             }
             regs.cr = val & CR_VALID_MASK;
@@ -183,8 +195,8 @@ impl Ac97BusMaster {
         self.glob_cnt = new_glob_cnt;
     }
 
-    /// Return the number of sample sent ts the buffer.
-    fn play_buffer(regs: &mut Ac97FunctionRegs, mem: &mut GuestMemory, out_buffer: &mut [i16]) -> usize {
+    /// Return the number of sample sent to the buffer.
+    fn play_buffer(regs: &mut Ac97FunctionRegs, mem: &GuestMemory, out_buffer: &mut [i16]) -> usize {
         let mut written = 0;
 
         println!("play_buffer");
@@ -211,6 +223,37 @@ impl Ac97BusMaster {
             }
         }
         println!("play_buffer wrote {}", written);
+        written
+    }
+
+    /// Return the number of samples read from the buffer.
+    fn record_buffer(regs: &mut Ac97FunctionRegs, mem: &mut GuestMemory, buffer: &[i16]) -> usize {
+        let mut written = 0;
+
+        println!("record_buffer");
+
+        // walk the valid buffers, fill each, update status regs as we go.
+        while written < buffer.len() {
+            let civ = regs.civ.load(Ordering::Relaxed) as u8;
+            let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
+            let buffer_addr: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
+            let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
+            let buffer_len: u32 = control_reg & 0x0000_ffff;
+
+            let mut picb = regs.picb.load(Ordering::Relaxed) as u16;
+            let nread = std::cmp::min(buffer.len() - written, picb as usize);
+            let read_pos = (buffer_addr + (buffer_len - picb as u32)) as u64;
+            mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_from(&buffer[..nread]);
+            picb -= nread as u16;
+            regs.picb.store(picb as usize, Ordering::Relaxed);
+            written += nread;
+
+            // Check if this buffer is finished.
+            if picb == 0 {
+                Self::next_buffer_descriptor(regs, &mem);
+            }
+        }
+        println!("record_buffer wrote {}", written);
         written
     }
 
@@ -410,17 +453,6 @@ mod test {
         let num_buffers = LVI_MASK as usize + 1;
         const BUFFER_SIZE: usize = 960;
 
-        // Initialize PO registers.
-        const PO_BASE: u64 = 0x10;
-        const PO_BDBAR: u64 = PO_BASE;
-        const PO_CIV: u64 = PO_BASE + 0x4;
-        const PO_LVI: u64 = PO_BASE + 0x5;
-        const PO_SR: u64 = PO_BASE + 0x6;
-        const PO_PICB: u64 = PO_BASE + 0x8;
-        const PO_PIV: u64 = PO_BASE + 0xa;
-        const PO_CR: u64 = PO_BASE + 0xb;
-        const CR_RPBM: u8 = 0x01;
-
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
         let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024*1024*1024)]).unwrap();
         let mut ac97 = Ac97BusMaster::new(mem.clone());
@@ -448,7 +480,7 @@ mod test {
         // Start.
         ac97.writeb(PO_CR, CR_RPBM);
 
-        std::thread::sleep(time::Duration::from_millis(10));
+        std::thread::sleep(time::Duration::from_millis(20));
 
         assert!(ac97.readw(PO_SR) & 0x01 == 0); // DMA is running.
         assert_ne!(0, ac97.readw(PO_PICB));
@@ -459,5 +491,52 @@ mod test {
         // Stop.
         ac97.writeb(PO_CR, 0);
         assert!(ac97.readw(PO_SR) & 0x01 != 0); // DMA is not running.
+    }
+
+    #[test]
+    fn start_record() {
+        const LVI_MASK: u8 = 0x1f; // Five bits for 32 total entries.
+        const IOC_MASK: u32 = 0x8000_0000; // Interrupt on completion.
+        let num_buffers = LVI_MASK as usize + 1;
+        const BUFFER_SIZE: usize = 960;
+
+        const GUEST_ADDR_BASE: u32 = 0x100_0000;
+        let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024*1024*1024)]).unwrap();
+        let mut ac97 = Ac97BusMaster::new(mem.clone());
+
+        // Release cold reset.
+        ac97.writel(GLOB_CNT, 0x0000_0002);
+
+        // Setup ping-pong buffers. A and B repeating for every possible index.
+        ac97.writel(MC_BDBAR, GUEST_ADDR_BASE);
+        for i in 0..num_buffers {
+            let pointer_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8);
+            let control_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8 + 4);
+            if i % 2 == 0 {
+                mem.write_obj_at_addr(GUEST_ADDR_BASE, pointer_addr).unwrap();
+            } else {
+                mem.write_obj_at_addr(GUEST_ADDR_BASE + BUFFER_SIZE as u32 / 2, pointer_addr).unwrap();
+            };
+            mem.write_obj_at_addr(IOC_MASK | (BUFFER_SIZE as u32 / 2), control_addr).unwrap();
+        }
+
+        ac97.writeb(MC_LVI, LVI_MASK);
+
+        // TODO(dgreid) - clear interrupts.
+
+        // Start.
+        ac97.writeb(MC_CR, CR_RPBM);
+
+        std::thread::sleep(time::Duration::from_millis(20));
+
+        assert!(ac97.readw(MC_SR) & 0x01 == 0); // DMA is running.
+        assert_ne!(0, ac97.readw(MC_PICB));
+        assert_ne!(0, ac97.readb(MC_CIV));
+
+        // TODO(dgreid) - check interrupts were set.
+
+        // Stop.
+        ac97.writeb(MC_CR, 0);
+        assert!(ac97.readw(MC_SR) & 0x01 != 0); // DMA is not running.
     }
 }
