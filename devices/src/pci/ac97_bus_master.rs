@@ -163,8 +163,8 @@ impl Ac97BusMaster {
                 self.bm_regs_mut(&func).sr.fetch_or(SR_DCH as usize, Ordering::Relaxed);
             } else if self.bm_regs(&func).cr & CR_RPBM == 0 { // Not already running.
                 // Run/Pause set to run.
-                self.bm_regs_mut(&func).piv.store(0x1f, Ordering::Relaxed); // Set to last buffer.
-                self.bm_regs_mut(&func).civ.store(0x1f, Ordering::Relaxed);
+                self.bm_regs_mut(&func).piv.store(0, Ordering::Relaxed);
+                self.bm_regs_mut(&func).civ.store(0, Ordering::Relaxed);
                 //fetch_bd (s, r);
                 self.bm_regs_mut(&func).sr.fetch_and(!SR_DCH as usize, Ordering::Relaxed);
                 self.start_audio(&func);
@@ -194,6 +194,7 @@ impl Ac97BusMaster {
 
         regs.sr.store(val as usize, Ordering::Relaxed);
 
+        // TODO - maybe update glob_sta as a combinatino of all audio thread sources in the main context.
         if interrupt_high {
             self.glob_sta |= int_mask;
         //pci_irq_assert(&s->dev);
@@ -299,14 +300,15 @@ impl Ac97BusMaster {
     }
 
     fn next_buffer_descriptor(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
-        let mut civ = regs.civ.load(Ordering::Relaxed) as u8;
+        // Move CIV to PIV.
+        let mut civ = regs.piv.load(Ordering::Relaxed) as u8;
 
-        civ = (civ + 1) % 32;
         // TODO - handle civ hitting lvi.
         let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
         let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
         let picb = control_reg as u16; // Truncate droping control bits, leaving buffer length.
         regs.civ.store(civ as usize, Ordering::Relaxed);
+        civ = (civ + 1) % 32; // Move PIV to the next buffer.
         regs.piv.store(civ as usize, Ordering::Relaxed);
         regs.picb.store(picb as usize, Ordering::Relaxed);
     }
@@ -526,6 +528,7 @@ mod test {
         assert!(ac97.readw(PO_SR) & 0x01 == 0); // DMA is running.
         assert_ne!(0, ac97.readw(PO_PICB));
         assert_ne!(0, ac97.readb(PO_CIV));
+        assert_eq!(ac97.readb(PO_PIV), ac97.readb(PO_CIV) + 1);
 
         // TODO(dgreid) - check interrupts were set.
 
