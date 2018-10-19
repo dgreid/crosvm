@@ -34,6 +34,8 @@ pub struct Ac97BusMaster {
     // Audio thread book keeping.
     audio_thread_po: Option<thread::JoinHandle<()>>,
     audio_thread_po_run: Arc<AtomicBool>,
+    audio_thread_mc: Option<thread::JoinHandle<()>>,
+    audio_thread_mc_run: Arc<AtomicBool>,
 }
 
 impl Ac97BusMaster {
@@ -49,6 +51,8 @@ impl Ac97BusMaster {
 
             audio_thread_po: None,
             audio_thread_po_run: Arc::new(AtomicBool::new(false)),
+            audio_thread_mc: None,
+            audio_thread_mc_run: Arc::new(AtomicBool::new(false)),
         }
     }
  
@@ -78,7 +82,7 @@ impl Ac97BusMaster {
     }
 
     fn set_sr(&mut self, func: Ac97Function, val: u16) {
-        let mut sr = self.bm_regs(&func).sr;
+        let mut sr = self.bm_regs(&func).sr.load(Ordering::Relaxed) as u16;
         if val & SR_FIFOE != 0 {
             sr &= !SR_FIFOE;
         }
@@ -91,59 +95,81 @@ impl Ac97BusMaster {
         self.update_sr(&func, sr);
     }
 
-    fn set_cr(&mut self, func: Ac97Function, val: u8) {
-        let mut regs = match func {
-            Ac97Function::Input => &mut self.pi_regs,
-            Ac97Function::Output => &mut self.po_regs,
-            Ac97Function::Microphone => &mut self.mc_regs,
-        };
-        if val & CR_RR != 0 {
-            regs.do_reset();
-            // TODO(dgreid) stop audio
-        } else {
-            if val & CR_RPBM == 0 {
-                // Run/Pause set to pause.
-                // TODO(dgreid) disable audio.
+    fn stop_audio(&mut self, func: &Ac97Function) {
+        match func {
+            Ac97Function::Input => (), // TODO(dgreid)
+            Ac97Function::Output => {
                 self.audio_thread_po_run.store(false, Ordering::Relaxed);
                 if let Some(thread) = self.audio_thread_po.take() {
                     thread.join().unwrap();
                 }
-                regs.sr |= SR_DCH;
-            } else if regs.cr & CR_RPBM == 0 { // Not already running.
-                // Run/Pause set to run.
-                regs.piv.store(0x1f, Ordering::Relaxed); // Set to last buffer.
-                regs.civ.store(0x1f, Ordering::Relaxed);
-                //fetch_bd (s, r);
-                regs.sr &= !SR_DCH;
-                Self::next_buffer_descriptor(&mut regs, &self.mem);
-                // TODO(dgreid) start audio.
-                let mut thread_regs = regs.clone();
-                let mut thread_mem = self.mem.clone();
+            }
+            Ac97Function::Microphone => {
+                self.audio_thread_mc_run.store(false, Ordering::Relaxed);
+                if let Some(thread) = self.audio_thread_mc.take() {
+                    thread.join().unwrap();
+                }
+            }
+        };
+
+    }
+
+    fn start_audio(&mut self, func: &Ac97Function) {
+        let mut thread_mem = self.mem.clone();
+        let mut thread_regs = self.bm_regs(func).clone();
+        Self::next_buffer_descriptor(self.bm_regs_mut(func), &thread_mem);
+        match func {
+            Ac97Function::Output => {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
                 self.audio_thread_po = Some(thread::spawn(move || {
-                    println!("in thread");
+                    println!("in po thread");
                     let mut pb_buf = vec![0i16; 480];
-                    match func {
-                        Ac97Function::Output => {
-                            while thread_run.load(Ordering::Relaxed) {
-                                // TODO - actually connect to audio output.
-                                Self::play_buffer(&mut thread_regs, &thread_mem, &mut pb_buf);
-                                thread::sleep(std::time::Duration::from_millis(5));
-                            }
-                        }
-                        Ac97Function::Microphone |
-                        Ac97Function::Input => {
-                            while thread_run.load(Ordering::Relaxed) {
-                                // TODO - actually connect to audio output.
-                                Self::record_buffer(&mut thread_regs, &mut thread_mem, &pb_buf);
-                                thread::sleep(std::time::Duration::from_millis(5));
-                            }
-                        }
-                    };
+                    while thread_run.load(Ordering::Relaxed) {
+                        // TODO - actually connect to audio output.
+                        Self::play_buffer(&mut thread_regs, &thread_mem, &mut pb_buf);
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
                 }));
             }
-            regs.cr = val & CR_VALID_MASK;
+            Ac97Function::Microphone => {
+                self.audio_thread_mc_run.store(true, Ordering::Relaxed);
+                let thread_run = self.audio_thread_mc_run.clone();
+                self.audio_thread_mc = Some(thread::spawn(move || {
+                    println!("in mc thread");
+                    let mut pb_buf = vec![0i16; 480];
+                    while thread_run.load(Ordering::Relaxed) {
+                        // TODO - actually connect to audio input.
+                        Self::record_buffer(&mut thread_regs, &mut thread_mem, &pb_buf);
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }));
+            }
+            Ac97Function::Input => {
+                // TODO(dgreid)
+            }
+        }
+    }
+
+    fn set_cr(&mut self, func: Ac97Function, val: u8) {
+        if val & CR_RR != 0 {
+            self.stop_audio(&func);
+            self.bm_regs_mut(&func).do_reset();
+        } else {
+            if val & CR_RPBM == 0 {
+                // Run/Pause set to pause.
+                // TODO(dgreid) disable audio.
+                self.stop_audio(&func);
+                self.bm_regs_mut(&func).sr.fetch_or(SR_DCH as usize, Ordering::Relaxed);
+            } else if self.bm_regs(&func).cr & CR_RPBM == 0 { // Not already running.
+                // Run/Pause set to run.
+                self.bm_regs_mut(&func).piv.store(0x1f, Ordering::Relaxed); // Set to last buffer.
+                self.bm_regs_mut(&func).civ.store(0x1f, Ordering::Relaxed);
+                //fetch_bd (s, r);
+                self.bm_regs_mut(&func).sr.fetch_and(!SR_DCH as usize, Ordering::Relaxed);
+                self.start_audio(&func);
+            }
+            self.bm_regs_mut(&func).cr = val & CR_VALID_MASK;
         }
     }
 
@@ -156,7 +182,8 @@ impl Ac97BusMaster {
 
         let mut interrupt_high = false;
 
-        if val & SR_INT_MASK != regs.sr & SR_INT_MASK {
+        let initial_sr = regs.sr.load(Ordering::Relaxed) as u16;
+        if val & SR_INT_MASK != initial_sr & SR_INT_MASK {
             if (val & SR_LVBCI) != 0 && (regs.cr & CR_LVBIE) != 0 {
                 interrupt_high = true;
             }
@@ -165,7 +192,7 @@ impl Ac97BusMaster {
             }
         }
 
-        regs.sr = val;
+        regs.sr.store(val as usize, Ordering::Relaxed);
 
         if interrupt_high {
             self.glob_sta |= int_mask;
@@ -219,7 +246,7 @@ impl Ac97BusMaster {
 
             // Check if this buffer is finished.
             if picb == 0 {
-                Self::next_buffer_descriptor(regs, &mem);
+                Self::buffer_completed(regs, &mem);
             }
         }
         println!("play_buffer wrote {}", written);
@@ -250,11 +277,25 @@ impl Ac97BusMaster {
 
             // Check if this buffer is finished.
             if picb == 0 {
-                Self::next_buffer_descriptor(regs, &mem);
+                Self::buffer_completed(regs, &mem);
             }
         }
         println!("record_buffer wrote {}", written);
         written
+    }
+
+    fn buffer_completed(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
+        // Check if the completed descriptor wanted an interrupt on completion.
+        let civ = regs.civ.load(Ordering::Relaxed) as u8;
+        let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
+        let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
+
+        if control_reg & BD_IOC != 0 {
+            regs.sr.fetch_or(SR_BCIS as usize, Ordering::Relaxed);
+            // TODO(dgreid) - update_sr();
+        }
+
+        Self::next_buffer_descriptor(regs, mem);
     }
 
     fn next_buffer_descriptor(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
@@ -278,17 +319,17 @@ impl Ac97BusMaster {
         match offset {
             0x04 => self.pi_regs.civ.load(Ordering::Relaxed) as u8,
             0x05 => self.pi_regs.lvi,
-            0x06 => self.pi_regs.sr as u8,
+            0x06 => self.pi_regs.sr.load(Ordering::Relaxed) as u8,
             0x0a => self.pi_regs.piv.load(Ordering::Relaxed) as u8,
             0x0b => self.pi_regs.cr,
             0x14 => self.po_regs.civ.load(Ordering::Relaxed) as u8,
             0x15 => self.po_regs.lvi,
-            0x16 => self.po_regs.sr as u8,
+            0x16 => self.po_regs.sr.load(Ordering::Relaxed) as u8,
             0x1a => self.po_regs.piv.load(Ordering::Relaxed) as u8,
             0x1b => self.po_regs.cr,
             0x24 => self.mc_regs.civ.load(Ordering::Relaxed) as u8,
             0x25 => self.mc_regs.lvi,
-            0x26 => self.mc_regs.sr as u8,
+            0x26 => self.mc_regs.sr.load(Ordering::Relaxed) as u8,
             0x2a => self.mc_regs.piv.load(Ordering::Relaxed) as u8,
             0x2b => self.mc_regs.cr,
             0x34 => self.acc_sema,
@@ -298,11 +339,11 @@ impl Ac97BusMaster {
 
     pub fn readw(&mut self, offset: u64) -> u16 {
         match offset {
-            0x06 => self.pi_regs.sr,
+            0x06 => self.pi_regs.sr.load(Ordering::Relaxed) as u16,
             0x08 => self.pi_regs.picb.load(Ordering::Relaxed) as u16,
-            0x16 => self.po_regs.sr,
+            0x16 => self.po_regs.sr.load(Ordering::Relaxed) as u16,
             0x18 => self.po_regs.picb.load(Ordering::Relaxed) as u16,
-            0x26 => self.mc_regs.sr,
+            0x26 => self.mc_regs.sr.load(Ordering::Relaxed) as u16,
             0x28 => self.mc_regs.picb.load(Ordering::Relaxed) as u16,
             _ => 0,
         }
