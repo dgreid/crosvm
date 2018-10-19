@@ -100,6 +100,25 @@ pub const GS_VALID_MASK: u32 = 0x0003_ffff;
 pub const GS_WCLEAR_MASK: u32 = GS_RCS | GS_S1R1 | GS_S0R1 | GS_GSCI;
 
 // Audio funciton registers.
+// Play Out
+pub const PO_BASE: u64 = 0x10;
+pub const PO_BDBAR: u64 = PO_BASE;
+pub const PO_CIV: u64 = PO_BASE + 0x4;
+pub const PO_LVI: u64 = PO_BASE + 0x5;
+pub const PO_SR: u64 = PO_BASE + 0x6;
+pub const PO_PICB: u64 = PO_BASE + 0x8;
+pub const PO_PIV: u64 = PO_BASE + 0xa;
+pub const PO_CR: u64 = PO_BASE + 0xb;
+
+// Microphone
+pub const MC_BASE: u64 = 0x10;
+pub const MC_BDBAR: u64 = PO_BASE;
+pub const MC_CIV: u64 = PO_BASE + 0x4;
+pub const MC_LVI: u64 = PO_BASE + 0x5;
+pub const MC_SR: u64 = PO_BASE + 0x6;
+pub const MC_PICB: u64 = PO_BASE + 0x8;
+pub const MC_PIV: u64 = PO_BASE + 0xa;
+pub const MC_CR: u64 = PO_BASE + 0xb;
 
 // Status Register Bits.
 pub const SR_DCH: u16 = 0x01;
