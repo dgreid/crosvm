@@ -158,7 +158,7 @@ pub struct Ac97FunctionRegs {
     pub bdbar: u32,
     pub civ: Arc<AtomicUsize>, // Actually u8
     pub lvi: u8,
-    pub sr: u16,
+    pub sr: Arc<AtomicUsize>, // Actually u16
     pub picb: Arc<AtomicUsize>, // Actually u16
     pub piv: Arc<AtomicUsize>, // Actually u8
     pub cr: u8,
@@ -167,7 +167,7 @@ pub struct Ac97FunctionRegs {
 impl Ac97FunctionRegs {
     pub fn new() -> Self {
         Ac97FunctionRegs {
-            sr: SR_DCH,
+            sr: Arc::new(AtomicUsize::new(SR_DCH as usize)),
             ..Default::default()
         }
     }
@@ -176,7 +176,7 @@ impl Ac97FunctionRegs {
         self.bdbar = 0;
         self.civ.store(0, Ordering::Relaxed);
         self.lvi = 0;
-        self.sr = SR_DCH;
+        self.sr.store(SR_DCH as usize, Ordering::Relaxed);
         self.picb.store(0, Ordering::Relaxed);
         self.piv.store(0, Ordering::Relaxed);
         self.cr = self.cr & CR_DONT_CLEAR_MASK;
@@ -185,10 +185,12 @@ impl Ac97FunctionRegs {
     /// Read register 4, 5, and 6 as one 32 bit word.
     /// According to the ICH spec, reading these three with one 32 bit access is allowed.
     pub fn atomic_status_regs(&self) -> u32 {
-        self.civ.load(Ordering::Relaxed) as u32 | (self.lvi as u32) << 8 | (self.sr as u32) << 16
+        self.civ.load(Ordering::Relaxed) as u32 | (self.lvi as u32) << 8 |
+            (self.sr.load(Ordering::Relaxed) as u32) << 16
     }
 }
 
+#[derive(Copy, Clone)]
 pub enum Ac97Function {
     Input,
     Output,
