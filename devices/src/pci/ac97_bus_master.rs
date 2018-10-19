@@ -488,6 +488,12 @@ mod test {
 
         // TODO(dgreid) - check interrupts were set.
 
+        // Buffer complete should be set as the IOC bit was set in the descriptor.
+        assert!(ac97.readw(MC_SR) & SR_BCIS != 0);
+        // Clear the BCIS bit
+        ac97.writew(MC_SR, SR_BCIS);
+        assert!(ac97.readw(MC_SR) & SR_BCIS == 0);
+
         // Stop.
         ac97.writeb(PO_CR, 0);
         assert!(ac97.readw(PO_SR) & 0x01 != 0); // DMA is not running.
