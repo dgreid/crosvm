@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use std;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{thread, time};
 
@@ -28,7 +28,7 @@ pub struct Ac97BusMaster {
     po_regs: Ac97FunctionRegs, // Output
     mc_regs: Ac97FunctionRegs, // Microphone
     glob_cnt: u32,
-    glob_sta: u32,
+    glob_sta: Arc<AtomicUsize>, // Actually u32
     acc_sema: u8,
 
     // Audio thread book keeping.
@@ -46,7 +46,7 @@ impl Ac97BusMaster {
             po_regs: Ac97FunctionRegs::new(),
             mc_regs: Ac97FunctionRegs::new(),
             glob_cnt: 0,
-            glob_sta: GLOB_STA_RESET_VAL, 
+            glob_sta: Arc::new(AtomicUsize::new(GLOB_STA_RESET_VAL as usize)), 
             acc_sema: 0,
 
             audio_thread_po: None,
@@ -196,10 +196,10 @@ impl Ac97BusMaster {
 
         // TODO - maybe update glob_sta as a combinatino of all audio thread sources in the main context.
         if interrupt_high {
-            self.glob_sta |= int_mask;
+            self.glob_sta.fetch_or(int_mask as usize, Ordering::Relaxed);
         //pci_irq_assert(&s->dev);
         } else {
-            self.glob_sta &= !int_mask;
+            self.glob_sta.fetch_and(!int_mask as usize, Ordering::Relaxed);
             //pci_irq_deassert(&s->dev);
         }
     }
@@ -360,7 +360,7 @@ impl Ac97BusMaster {
             0x20 => self.mc_regs.bdbar,
             0x24 => self.mc_regs.atomic_status_regs(),
             0x2c => self.glob_cnt,
-            0x30 => self.glob_sta,
+            0x30 => self.glob_sta.load(Ordering::Relaxed) as u32,
             _ => 0,
         }
     }
