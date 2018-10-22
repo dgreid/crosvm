@@ -19,6 +19,7 @@ gpu = ["devices/gpu"]
 
 [dependencies]
 arch = { path = "arch" }
+audio = { path = "audio" }
 bit_field = { path = "bit_field" }
 devices = { path = "devices" }
 gpu_buffer = { path = "gpu_buffer", optional = true }

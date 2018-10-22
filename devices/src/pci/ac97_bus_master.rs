@@ -232,10 +232,9 @@ impl Ac97BusMaster {
             if let Some(irq_evt) = event_fd {
                 irq_evt.write(1).unwrap();
             }
-            //pci_irq_assert(&s->dev);
         } else {
             regs.glob_sta &= !int_mask;
-            //pci_irq_deassert(&s->dev);
+            // TODO(dgreid) - can we deassert the interrupt?
         }
     }
 
