@@ -9,7 +9,7 @@ use std::{thread, time};
 
 use data_model::VolatileMemory;
 use pci::ac97_regs::*;
-use sys_util::{GuestAddress, GuestMemory};
+use sys_util::{EventFd, GuestAddress, GuestMemory};
 
 pub enum BusMasterAction {
     /// `NoAction` indicates that no action needs to be taken by the caller.
@@ -68,6 +68,9 @@ pub struct Ac97BusMaster {
     audio_thread_po_run: Arc<AtomicBool>,
     audio_thread_mc: Option<thread::JoinHandle<()>>,
     audio_thread_mc_run: Arc<AtomicBool>,
+
+    // IRQ event
+    event_fd: Option<EventFd>,
 }
 
 impl Ac97BusMaster {
@@ -81,7 +84,13 @@ impl Ac97BusMaster {
             audio_thread_po_run: Arc::new(AtomicBool::new(false)),
             audio_thread_mc: None,
             audio_thread_mc_run: Arc::new(AtomicBool::new(false)),
+
+            event_fd: None,
         }
+    }
+
+    pub fn set_event_fd(&mut self, irq_evt: EventFd) {
+        self.event_fd = Some(irq_evt);
     }
 
     fn set_bdbar(&mut self, func: Ac97Function, val: u32) {
@@ -104,7 +113,7 @@ impl Ac97BusMaster {
         if val & SR_BCIS != 0 {
             sr &= !SR_BCIS;
         }
-        Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr);
+        Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr, &self.event_fd);
     }
 
     fn stop_audio(&mut self, func: &Ac97Function) {
@@ -193,7 +202,7 @@ impl Ac97BusMaster {
         }
     }
 
-    fn update_sr(regs: &mut Ac97BusMasterRegs, func: &Ac97Function, val: u16) {
+    fn update_sr(regs: &mut Ac97BusMasterRegs, func: &Ac97Function, val: u16, event_fd: &Option<EventFd>) {
         let int_mask = match func {
             Ac97Function::Input => GS_PIINT,
             Ac97Function::Output => GS_POINT,
@@ -220,7 +229,10 @@ impl Ac97BusMaster {
         // TODO - maybe update glob_sta as a combinatino of all audio thread sources in the main context.
         if interrupt_high {
             regs.glob_sta |= int_mask;
-        //pci_irq_assert(&s->dev);
+            if let Some(irq_evt) = event_fd {
+                irq_evt.write(1).unwrap();
+            }
+            //pci_irq_assert(&s->dev);
         } else {
             regs.glob_sta &= !int_mask;
             //pci_irq_deassert(&s->dev);
