@@ -3,8 +3,6 @@
 // found in the LICENSE file.
 
 #![allow(dead_code)]
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Audio Mixer Registers
 // 00h Reset
@@ -152,41 +150,39 @@ pub const PD_REG_OUTPUT_MUTE_MASK: u16 = 0xb200;
 pub const PD_REG_INPUT_MUTE_MASK: u16 = 0x0d00;
 
 // Registers for individual audio functions.
-// Some are atomic as they need to be updated from the audio thread.
 #[derive(Clone, Default)]
 pub struct Ac97FunctionRegs {
     pub bdbar: u32,
-    pub civ: Arc<AtomicUsize>, // Actually u8
+    pub civ: u8,
     pub lvi: u8,
-    pub sr: Arc<AtomicUsize>, // Actually u16
-    pub picb: Arc<AtomicUsize>, // Actually u16
-    pub piv: Arc<AtomicUsize>, // Actually u8
+    pub sr: u16,
+    pub picb: u16,
+    pub piv: u8,
     pub cr: u8,
 }
 
 impl Ac97FunctionRegs {
     pub fn new() -> Self {
         Ac97FunctionRegs {
-            sr: Arc::new(AtomicUsize::new(SR_DCH as usize)),
+            sr: SR_DCH,
             ..Default::default()
         }
     }
 
     pub fn do_reset(&mut self) {
         self.bdbar = 0;
-        self.civ.store(0, Ordering::Relaxed);
+        self.civ = 0;
         self.lvi = 0;
-        self.sr.store(SR_DCH as usize, Ordering::Relaxed);
-        self.picb.store(0, Ordering::Relaxed);
-        self.piv.store(0, Ordering::Relaxed);
+        self.sr = SR_DCH;
+        self.picb = 0;
+        self.piv = 0;
         self.cr = self.cr & CR_DONT_CLEAR_MASK;
     }
 
     /// Read register 4, 5, and 6 as one 32 bit word.
     /// According to the ICH spec, reading these three with one 32 bit access is allowed.
     pub fn atomic_status_regs(&self) -> u32 {
-        self.civ.load(Ordering::Relaxed) as u32 | (self.lvi as u32) << 8 |
-            (self.sr.load(Ordering::Relaxed) as u32) << 16
+        self.civ as u32| (self.lvi as u32) << 8 | (self.sr as u32) << 16
     }
 }
 
