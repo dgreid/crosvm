@@ -39,6 +39,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio"
+version = "0.1.0"
+
+[[package]]
 name = "bit_field"
 version = "0.1.0"
 dependencies = [
@@ -80,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "aarch64 0.1.0",
  "arch 0.1.0",
+ "audio 0.1.0",
  "bit_field 0.1.0",
  "byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "crosvm_plugin 0.16.0",
