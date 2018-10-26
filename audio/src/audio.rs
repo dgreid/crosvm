@@ -24,24 +24,24 @@ type Result<T> = std::result::Result<T, Box<std::error::Error>>;
 
 /// Represents an audio server that can create playback and capture streams.
 pub trait AudioServer<'a, T> {
-    fn create_playback_stream(&'a mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<PlaybackStream<'a, T>>>;
-    fn create_capture_stream(&'a mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<CaptureStream<'a, T>>>;
+    fn create_playback_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<PlaybackStream< T>>>;
+    fn create_capture_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<CaptureStream< T>>>;
 }
 
 /// A stream for playing back audio.
 pub trait PlaybackStream<'a, T> {
     /// Return the next available output bufer to fill with playback data.
-    fn next_playback_buffer(&'a mut self) -> PlaybackBuffer<'a, T>;
+    fn next_playback_buffer(&mut self) -> PlaybackBuffer< T>;
 }
 
 /// A stream for capturing audio.
 pub trait CaptureStream<'a, T> {
     /// Return the next input bufer filled with caputred audio data.
-    fn next_captured_buffer(&'a mut self) -> CaptureBuffer<'a, T>;
+    fn next_captured_buffer<'b>(&'b mut self) -> CaptureBuffer<'b, T>;
 }
 
 /// A buffer to be filled with audio samples. When dropped, the data is committed to the host.
-pub struct PlaybackBuffer<'a, T>(&'a [T]);
+pub struct PlaybackBuffer<'a, T: 'a>(&'a [T]);
 
 impl<'a, T> Drop for PlaybackBuffer<'a, T> {
     fn drop(&mut self) {
@@ -49,7 +49,7 @@ impl<'a, T> Drop for PlaybackBuffer<'a, T> {
 }
 
 /// A buffer filled with audio samples. When dropped, the buffer space is returned to the host.
-pub struct CaptureBuffer<'a, T>(&'a [T]);
+pub struct CaptureBuffer<'a, T: 'a>(&'a [T]);
 
 impl<'a, T> Drop for CaptureBuffer<'a, T> {
     fn drop(&mut self) {
@@ -84,11 +84,11 @@ mod tests {
     }
 
     impl<'a, T> AudioServer<'a, T> for DummyServer {
-        fn create_playback_stream(&'a mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<PlaybackStream<'a, T>>> {
+        fn create_playback_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<PlaybackStream< T>>> {
             Err(Box::new(DummyError::TestError1))
         }
 
-        fn create_capture_stream(&'a mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<CaptureStream<'a,T>>> {
+        fn create_capture_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<CaptureStream<T>>> {
             Err(Box::new(DummyError::TestError1))
         }
 

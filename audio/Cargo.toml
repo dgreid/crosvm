@@ -2,7 +2,6 @@
 name = "audio"
 version = "0.1.0"
 authors = ["The Chromium OS Authors"]
-edition = "2018"
 
 [lib]
 path = "./src/audio.rs"

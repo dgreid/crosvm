@@ -576,6 +576,10 @@ impl Minijail {
             return Err(Error::ForkingWhileMultiThreaded);
         }
 
+        for fd in &[0,1,2] {
+            libminijail::minijail_preserve_fd(self.jail, *fd, *fd);
+        }
+
         if let Some(keep_fds) = inheritable_fds {
             for fd in keep_fds {
                 let ret = libminijail::minijail_preserve_fd(self.jail, *fd, *fd);
@@ -590,17 +594,6 @@ impl Minijail {
             .write(true)
             .open("/dev/null")
             .map_err(Error::OpenDevNull)?;
-        // Set stdin, stdout, and stderr to /dev/null unless they are in the inherit list.
-        // These will only be closed when this process exits.
-        for io_fd in &[libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-            if inheritable_fds.is_none() || !inheritable_fds.unwrap().contains(io_fd) {
-                let ret =
-                    libminijail::minijail_preserve_fd(self.jail, dev_null.as_raw_fd(), *io_fd);
-                if ret < 0 {
-                    return Err(Error::PreservingFd(ret));
-                }
-            }
-        }
 
         libminijail::minijail_close_open_fds(self.jail);
 
