@@ -5,6 +5,7 @@
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
+use audio::DummyStreamSource;
 use pci::ac97_bus_master::Ac97BusMaster;
 use pci::ac97_regs::*;
 use pci::ac97_mixer::Ac97Mixer;
@@ -46,7 +47,13 @@ impl Ac97Dev {
 }
 
 impl PciDevice for Ac97Dev {
-    fn assign_irq(&mut self, irq_evt: EventFd, irq_num: u32, irq_pin: PciInterruptPin) {
+    fn assign_irq(
+        &mut self,
+        irq_evt: EventFd,
+        irq_resample_evt: EventFd,
+        irq_num: u32,
+        irq_pin: PciInterruptPin,
+    ) {
         self.config_regs.set_irq(irq_num as u8, irq_pin);
         self.ac97.set_event_fd(irq_evt);
     }
@@ -130,7 +137,7 @@ pub struct Ac97 {
 impl Ac97 {
     pub fn new(mem: GuestMemory) -> Self {
         Ac97 {
-            bus_master: Ac97BusMaster::new(mem),
+            bus_master: Ac97BusMaster::new(mem, Box::new(DummyStreamSource::new())),
             mixer: Ac97Mixer::new(),
         }
     }

@@ -4,6 +4,7 @@
 
 //! Emulates virtual and hardware devices.
 
+extern crate audio;
 extern crate byteorder;
 extern crate data_model;
 extern crate io_jail;

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{thread, time};
 
+use audio::{DummyStreamSource, PlaybackBuffer, StreamSource};
 use data_model::VolatileMemory;
 use pci::ac97_regs::*;
 use sys_util::{EventFd, GuestAddress, GuestMemory};
@@ -71,10 +72,13 @@ pub struct Ac97BusMaster {
 
     // IRQ event
     event_fd: Option<EventFd>,
+
+    // Audio server used to create playback streams.
+    audio_server: Box<dyn StreamSource>,
 }
 
 impl Ac97BusMaster {
-    pub fn new(mem: GuestMemory) -> Self {
+    pub fn new(mem: GuestMemory, audio_server: Box<dyn StreamSource>) -> Self {
         Ac97BusMaster {
             mem,
             regs: Arc::new(Mutex::new(Ac97BusMasterRegs::new())),
@@ -86,6 +90,8 @@ impl Ac97BusMaster {
             audio_thread_mc_run: Arc::new(AtomicBool::new(false)),
 
             event_fd: None,
+
+            audio_server,
         }
     }
 
@@ -143,13 +149,15 @@ impl Ac97BusMaster {
             Ac97Function::Output => {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
+                // TODO(dgreid) - determine the format for otuput_stream.
+                let mut output_stream = self.audio_server.new_playback_stream(2, 480);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     println!("in po thread");
-                    let mut pb_buf = vec![0i16; 480];
+                    let mut pb_buf = output_stream.next_playback_buffer();
                     while thread_run.load(Ordering::Relaxed) {
                         // TODO - actually connect to audio output.
                         Self::play_buffer(&thread_regs, &thread_mem, &mut pb_buf);
-                        thread::sleep(std::time::Duration::from_millis(5));
+                        thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }));
             }
@@ -157,12 +165,11 @@ impl Ac97BusMaster {
                 self.audio_thread_mc_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_mc_run.clone();
                 self.audio_thread_mc = Some(thread::spawn(move || {
-                    println!("in mc thread");
                     let cap_buf = vec![0i16; 480];
                     while thread_run.load(Ordering::Relaxed) {
                         // TODO - actually connect to audio input.
                         Self::record_buffer(&thread_regs, &mut thread_mem, &cap_buf);
-                        thread::sleep(std::time::Duration::from_millis(5));
+                        thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }));
             }
@@ -263,7 +270,7 @@ impl Ac97BusMaster {
     }
 
     /// Return the number of sample sent to the buffer.
-    fn play_buffer(regs: &Arc<Mutex<Ac97BusMasterRegs>>, mem: &GuestMemory, out_buffer: &mut [i16]) -> usize {
+    fn play_buffer(regs: &Arc<Mutex<Ac97BusMasterRegs>>, mem: &GuestMemory, out_buffer: &mut PlaybackBuffer) -> usize {
         let mut written = 0;
 
         println!("play_buffer");
@@ -282,7 +289,7 @@ impl Ac97BusMaster {
             let mut picb = func_regs.picb as u16;
             let nread = std::cmp::min(out_buffer.len() - written, picb as usize);
             let read_pos = (buffer_addr + (buffer_len - picb as u32)) as u64;
-            mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer[..nread]);
+            mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer.buffer[nread..]);
             picb -= nread as u16;
             func_regs.picb = picb;
             written += nread;
@@ -480,7 +487,7 @@ mod test {
 
     #[test]
     fn bm_bdbar() {
-        let mut ac97 = Ac97BusMaster::new(GuestMemory::new(&[]).unwrap());
+        let mut ac97 = Ac97BusMaster::new(GuestMemory::new(&[]).unwrap(), Box::new(DummyStreamSource::new()));
 
         let bdbars = [0x00u64, 0x10, 0x20];
 
@@ -501,7 +508,7 @@ mod test {
 
     #[test]
     fn bm_status_reg() {
-        let mut ac97 = Ac97BusMaster::new(GuestMemory::new(&[]).unwrap());
+        let mut ac97 = Ac97BusMaster::new(GuestMemory::new(&[]).unwrap(), Box::new(DummyStreamSource::new()));
 
         let sr_addrs = [0x06u64, 0x16, 0x26];
 
@@ -514,7 +521,7 @@ mod test {
 
     #[test]
     fn bm_global_control() {
-        let mut ac97 = Ac97BusMaster::new(GuestMemory::new(&[]).unwrap());
+        let mut ac97 = Ac97BusMaster::new(GuestMemory::new(&[]).unwrap(), Box::new(DummyStreamSource::new()));
 
         assert_eq!(ac97.readl(GLOB_CNT), 0x0000_0000);
 
@@ -546,7 +553,7 @@ mod test {
 
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
         let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024*1024*1024)]).unwrap();
-        let mut ac97 = Ac97BusMaster::new(mem.clone());
+        let mut ac97 = Ac97BusMaster::new(mem.clone(), Box::new(DummyStreamSource::new()));
 
         // Release cold reset.
         ac97.writel(GLOB_CNT, 0x0000_0002);
@@ -600,7 +607,7 @@ mod test {
 
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
         let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024*1024*1024)]).unwrap();
-        let mut ac97 = Ac97BusMaster::new(mem.clone());
+        let mut ac97 = Ac97BusMaster::new(mem.clone(), Box::new(DummyStreamSource::new()));
 
         // Release cold reset.
         ac97.writel(GLOB_CNT, 0x0000_0002);

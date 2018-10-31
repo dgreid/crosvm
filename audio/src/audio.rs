@@ -1,109 +1,104 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+use std::io::{self, Write};
 
-/// Sampling rates for audio streams.
-pub enum SampleRate {
-    Rate8000,
-    Rate16000,
-    Rate32000,
-    Rate44100,
-    Rate48000,
-    Rate96000,
-    Rate192000,
+pub trait StreamSource: Send {
+    fn new_playback_stream(&mut self, num_channels: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream>;
 }
 
-/// Available formats for audio samples.
-pub enum SampleFormat {
-    S16LE,
-    S24LE,
-    S32LE,
+pub trait PlaybackBufferStream: Send {
+    fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a>;
 }
 
-type Result<T> = std::result::Result<T, Box<std::error::Error>>;
-
-/// Represents an audio server that can create playback and capture streams.
-pub trait AudioServer<'a, T> {
-    fn create_playback_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<PlaybackStream< T>>>;
-    fn create_capture_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<CaptureStream< T>>>;
+pub struct PlaybackBuffer<'a> {
+    done_toggle: &'a mut bool,
+    pub buffer: &'a mut [u8],
+    offset: usize, // Write offset in frames.
+    frame_size: usize, // Size of a frame in bytes.
 }
 
-/// A stream for playing back audio.
-pub trait PlaybackStream<'a, T> {
-    /// Return the next available output bufer to fill with playback data.
-    fn next_playback_buffer(&mut self) -> PlaybackBuffer< T>;
-}
+impl<'a> PlaybackBuffer<'a> {
+    pub fn new(frame_size: usize, done_toggle: &'a mut bool, buffer: &'a mut [u8]) -> Self {
+        PlaybackBuffer {
+            done_toggle,
+            buffer,
+            offset: 0,
+            frame_size,
+        }
+    }
 
-/// A stream for capturing audio.
-pub trait CaptureStream<'a, T> {
-    /// Return the next input bufer filled with caputred audio data.
-    fn next_captured_buffer<'b>(&'b mut self) -> CaptureBuffer<'b, T>;
-}
-
-/// A buffer to be filled with audio samples. When dropped, the data is committed to the host.
-pub struct PlaybackBuffer<'a, T: 'a>(&'a [T]);
-
-impl<'a, T> Drop for PlaybackBuffer<'a, T> {
-    fn drop(&mut self) {
+    pub fn len(&self) -> usize {
+        self.buffer.len()
     }
 }
 
-/// A buffer filled with audio samples. When dropped, the buffer space is returned to the host.
-pub struct CaptureBuffer<'a, T: 'a>(&'a [T]);
+impl<'a> Write for PlaybackBuffer<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = (&mut self.buffer[self.offset..]).write(buf)?;
+        self.offset += written;
+        Ok(written/self.frame_size)
+    }
 
-impl<'a, T> Drop for CaptureBuffer<'a, T> {
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> Drop for PlaybackBuffer<'a> {
     fn drop(&mut self) {
+        *self.done_toggle = !*self.done_toggle;
+    }
+}
+
+/// Stream that accepts playback samples but drops them.
+pub struct DummyStream {
+    buffer: Vec<u8>,
+    which_buffer: bool,
+    frame_size: usize,
+}
+
+impl DummyStream {
+    // TODO(allow other formats)
+    pub fn new(num_channels: usize, buffer_size: usize) -> Self {
+        const S16LE_SIZE: usize = 2;
+        let frame_size = S16LE_SIZE * num_channels;
+        DummyStream {
+            buffer: vec![Default::default(); buffer_size * frame_size],
+            which_buffer: false,
+            frame_size: frame_size,
+        }
+    }
+}
+
+impl PlaybackBufferStream for DummyStream {
+    fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a> {
+        PlaybackBuffer::new(self.frame_size, &mut self.which_buffer, &mut self.buffer)
+    }
+}
+
+pub struct DummyStreamSource {
+}
+
+impl DummyStreamSource {
+    pub fn new() -> Self {
+        DummyStreamSource {}
+    }
+}
+
+impl StreamSource for DummyStreamSource {
+    fn new_playback_stream(&mut self, num_channels: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream> {
+        Box::new(DummyStream::new(num_channels, buffer_size))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt;
-
-    #[derive(Debug)]
-    enum DummyError {
-        TestError1
-    }
-
-    impl std::error::Error for DummyError {
-        fn description(&self) -> &str {
-            "It's an error"
-        }
-    }
-
-    impl fmt::Display for DummyError {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            let prefix = "Libfdt Error: ";
-            write!(f, "desc: {}", std::error::Error::description(self))
-        }
-    }
-
-    struct DummyServer {
-        pub num_streams: usize,
-    }
-
-    impl<'a, T> AudioServer<'a, T> for DummyServer {
-        fn create_playback_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<PlaybackStream< T>>> {
-            Err(Box::new(DummyError::TestError1))
-        }
-
-        fn create_capture_stream(&mut self, rate: SampleRate, sample_format: SampleFormat, num_channels: usize, buffer_size: usize) -> Result<Box<CaptureStream<T>>> {
-            Err(Box::new(DummyError::TestError1))
-        }
-
-    }
 
     #[test]
-    fn play_s16le() {
-        let mut server = DummyServer{ num_streams: 0 };
-        let mut pb_stream: Box<PlaybackStream<i16>> = server.create_playback_stream(SampleRate::Rate48000, SampleFormat::S16LE, 2, 480).unwrap();
-
-        { // TODO - fill more buffers for i in 1..10 {
-            let mut this_buff = pb_stream.next_playback_buffer();
-    //        for sample in this_buff.0.iter_mut() {
-      //          *sample = 0 as i16;
-        //    }
-        }
+    fn sixteen_bit_stereo() {
+        let mut server = DummyStreamSource::new();
+        let mut stream = server.new_playback_stream(2, 480);
+        let mut stream_buffer = stream.next_playback_buffer();
+        let pb_buf = [0xa5u8; 480 * 2 * 2];
+        assert_eq!(stream_buffer.write(&pb_buf).unwrap(), 480);
     }
 }
