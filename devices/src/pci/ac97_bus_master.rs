@@ -580,8 +580,17 @@ mod test {
 
         assert!(ac97.readw(PO_SR) & 0x01 == 0); // DMA is running.
         assert_ne!(0, ac97.readw(PO_PICB));
-        assert_ne!(0, ac97.readb(PO_CIV));
-        assert_eq!(ac97.readb(PO_PIV), ac97.readb(PO_CIV) + 1);
+
+        let mut civ = ac97.readb(PO_CIV);
+        for i in 0..30 {
+            if civ != 0 {
+                break;
+            }
+            std::thread::sleep(time::Duration::from_millis(20));
+            civ = ac97.readb(PO_CIV);
+        }
+            
+        assert_ne!(0, civ);
 
         // TODO(dgreid) - check interrupts were set.
 
@@ -634,7 +643,16 @@ mod test {
 
         assert!(ac97.readw(MC_SR) & 0x01 == 0); // DMA is running.
         assert_ne!(0, ac97.readw(MC_PICB));
-        assert_ne!(0, ac97.readb(MC_CIV));
+
+        let mut civ = ac97.readb(PO_CIV);
+        for i in 0..30 {
+            if civ != 0 {
+                break;
+            }
+            std::thread::sleep(time::Duration::from_millis(20));
+            civ = ac97.readb(PO_CIV);
+        }
+        assert_ne!(0, civ);
 
         // TODO(dgreid) - check interrupts were set.
 
