@@ -150,14 +150,12 @@ impl Ac97BusMaster {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
                 // TODO(dgreid) - determine the format for otuput_stream.
-                let mut output_stream = self.audio_server.new_playback_stream(2, 480);
+                let mut output_stream = self.audio_server.new_playback_stream(2, 48000, 480);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     println!("in po thread");
                     let mut pb_buf = output_stream.next_playback_buffer();
                     while thread_run.load(Ordering::Relaxed) {
-                        // TODO - actually connect to audio output.
                         Self::play_buffer(&thread_regs, &thread_mem, &mut pb_buf);
-                        thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }));
             }

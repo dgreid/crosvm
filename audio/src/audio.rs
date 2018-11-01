@@ -1,7 +1,8 @@
 use std::io::{self, Write};
+use std::time::{self, Duration, Instant};
 
 pub trait StreamSource: Send {
-    fn new_playback_stream(&mut self, num_channels: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream>;
+    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream>;
 }
 
 pub trait PlaybackBufferStream: Send {
@@ -53,23 +54,41 @@ pub struct DummyStream {
     buffer: Vec<u8>,
     which_buffer: bool,
     frame_size: usize,
+    frame_rate: usize,
+    interval: Duration,
+    next_frame: Duration,
+    start_time: Option<Instant>,
 }
 
 impl DummyStream {
     // TODO(allow other formats)
-    pub fn new(num_channels: usize, buffer_size: usize) -> Self {
+    pub fn new(num_channels: usize, frame_rate: usize, buffer_size: usize) -> Self {
         const S16LE_SIZE: usize = 2;
         let frame_size = S16LE_SIZE * num_channels;
+        let interval = Duration::from_millis(frame_size as u64 * 1000 / frame_rate as u64);
         DummyStream {
             buffer: vec![Default::default(); buffer_size * frame_size],
             which_buffer: false,
-            frame_size: frame_size,
+            frame_size,
+            frame_rate,
+            interval,
+            next_frame: interval,
+            start_time: None,
         }
     }
 }
 
 impl PlaybackBufferStream for DummyStream {
     fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a> {
+        if let Some(start_time) = self.start_time {
+            if start_time.elapsed() < self.next_frame {
+                std::thread::sleep(self.next_frame - start_time.elapsed());
+            }
+            self.next_frame += self.interval;
+        } else {
+            self.start_time = Some(Instant::now());
+            self.next_frame = self.interval;
+        }
         PlaybackBuffer::new(self.frame_size, &mut self.which_buffer, &mut self.buffer)
     }
 }
@@ -84,8 +103,8 @@ impl DummyStreamSource {
 }
 
 impl StreamSource for DummyStreamSource {
-    fn new_playback_stream(&mut self, num_channels: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream> {
-        Box::new(DummyStream::new(num_channels, buffer_size))
+    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream> {
+        Box::new(DummyStream::new(num_channels, frame_rate, buffer_size))
     }
 }
 
@@ -96,7 +115,7 @@ mod tests {
     #[test]
     fn sixteen_bit_stereo() {
         let mut server = DummyStreamSource::new();
-        let mut stream = server.new_playback_stream(2, 480);
+        let mut stream = server.new_playback_stream(2, 48000, 480);
         let mut stream_buffer = stream.next_playback_buffer();
         let pb_buf = [0xa5u8; 480 * 2 * 2];
         assert_eq!(stream_buffer.write(&pb_buf).unwrap(), 480);
