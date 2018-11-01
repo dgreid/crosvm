@@ -26,8 +26,9 @@ impl<'a> PlaybackBuffer<'a> {
         }
     }
 
+    /// Returns the number of audio frames that fit in the buffer.
     pub fn len(&self) -> usize {
-        self.buffer.len()
+        self.buffer.len() / self.frame_size
     }
 }
 
@@ -65,7 +66,7 @@ impl DummyStream {
     pub fn new(num_channels: usize, frame_rate: usize, buffer_size: usize) -> Self {
         const S16LE_SIZE: usize = 2;
         let frame_size = S16LE_SIZE * num_channels;
-        let interval = Duration::from_millis(frame_size as u64 * 1000 / frame_rate as u64);
+        let interval = Duration::from_millis(buffer_size as u64 * 1000 / frame_rate as u64);
         DummyStream {
             buffer: vec![Default::default(); buffer_size * frame_size],
             which_buffer: false,
@@ -117,7 +118,25 @@ mod tests {
         let mut server = DummyStreamSource::new();
         let mut stream = server.new_playback_stream(2, 48000, 480);
         let mut stream_buffer = stream.next_playback_buffer();
+        assert_eq!(stream_buffer.len(), 480);
         let pb_buf = [0xa5u8; 480 * 2 * 2];
         assert_eq!(stream_buffer.write(&pb_buf).unwrap(), 480);
+    }
+
+    #[test]
+    fn consumption_rate() {
+        let mut server = DummyStreamSource::new();
+        let mut stream = server.new_playback_stream(2, 48000, 480);
+        let start = Instant::now();
+        {
+            let mut stream_buffer = stream.next_playback_buffer();
+            let pb_buf = [0xa5u8; 480 * 2 * 2];
+            assert_eq!(stream_buffer.write(&pb_buf).unwrap(), 480);
+        }
+        // The second call should block until the first buffer is consumed.
+        let stream_buffer = stream.next_playback_buffer();
+        let elapsed = start.elapsed();
+        assert!(elapsed > Duration::from_millis(10),
+               "next_playback_buffer didn't block long enough {}", elapsed.subsec_millis());
     }
 }

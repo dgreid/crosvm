@@ -150,11 +150,13 @@ impl Ac97BusMaster {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
                 // TODO(dgreid) - determine the format for otuput_stream.
-                let mut output_stream = self.audio_server.new_playback_stream(2, 48000, 480);
+                let buffer_size = Self::current_buffer_size(thread_regs.lock().unwrap().func_regs(func), &self.mem);
+                println!("start with buffer size {}", buffer_size);
+                let mut output_stream = self.audio_server.new_playback_stream(2, 48000, buffer_size);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     println!("in po thread");
-                    let mut pb_buf = output_stream.next_playback_buffer();
                     while thread_run.load(Ordering::Relaxed) {
+                        let mut pb_buf = output_stream.next_playback_buffer();
                         Self::play_buffer(&thread_regs, &thread_mem, &mut pb_buf);
                     }
                 }));
@@ -269,43 +271,40 @@ impl Ac97BusMaster {
 
     /// Return the number of sample sent to the buffer.
     fn play_buffer(regs: &Arc<Mutex<Ac97BusMasterRegs>>, mem: &GuestMemory, out_buffer: &mut PlaybackBuffer) -> usize {
-        let mut written = 0;
-
-        println!("play_buffer");
 
         let mut regs = regs.lock().unwrap();
         let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
 
+        let mut frames_written = 0;
         // walk the valid buffers, fill from each, update status regs as we go.
-        while written < out_buffer.len() {
+        while frames_written < out_buffer.len() {
             let civ = func_regs.civ;
             let descriptor_addr = func_regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
             let buffer_addr: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
             let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
-            let buffer_len: u32 = control_reg & 0x0000_ffff;
+            let buffer_len_frames = (control_reg & 0x0000_ffff) as usize;
+            let frame_size = 4;
 
-            let mut picb = func_regs.picb as u16;
-            let nread = std::cmp::min(out_buffer.len() - written, picb as usize);
-            let read_pos = (buffer_addr + (buffer_len - picb as u32)) as u64;
-            mem.get_slice(read_pos, nread as u64 * 2).unwrap().copy_to(&mut out_buffer.buffer[nread..]);
-            picb -= nread as u16;
-            func_regs.picb = picb;
-            written += nread;
+            let mut frames_remaining = func_regs.picb as usize;
+            let frames_to_write = std::cmp::min(out_buffer.len() - frames_written, frames_remaining);
+            let read_pos = (buffer_addr + (buffer_len_frames - frames_remaining as usize) as u32 * frame_size) as u64;
+            let buffer_offset = frames_to_write * frame_size as usize;
+            mem.get_slice(read_pos, frames_to_write as u64 * frame_size as u64).unwrap().copy_to(&mut out_buffer.buffer[buffer_offset..]);
+            frames_remaining -= frames_to_write;
+            func_regs.picb = frames_remaining as u16;
+            frames_written += frames_to_write;
 
             // Check if this buffer is finished.
-            if picb == 0 {
+            if frames_remaining == 0 {
                 Self::buffer_completed(func_regs, &mem);
             }
         }
-        println!("play_buffer wrote {}", written);
-        written
+        frames_written
     }
 
     /// Return the number of samples read from the buffer.
     fn record_buffer(regs: &Arc<Mutex<Ac97BusMasterRegs>>, mem: &mut GuestMemory, buffer: &[i16]) -> usize {
         let mut written = 0;
-
-        println!("record_buffer");
 
         let mut regs = regs.lock().unwrap();
         let mut func_regs = regs.func_regs_mut(&Ac97Function::Input);
@@ -331,7 +330,6 @@ impl Ac97BusMaster {
                 Self::buffer_completed(func_regs, &mem);
             }
         }
-        println!("record_buffer wrote {}", written);
         written
     }
 
@@ -361,6 +359,14 @@ impl Ac97BusMaster {
         civ = (civ + 1) % 32; // Move PIV to the next buffer.
         regs.piv = civ;
         regs.picb = picb;
+    }
+
+    fn current_buffer_size(func_regs: &Ac97FunctionRegs, mem: &GuestMemory) -> usize {
+        let civ = func_regs.civ;
+        let descriptor_addr = func_regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
+        let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
+        let buffer_len: usize = control_reg as usize & 0x0000_ffff;
+        buffer_len
     }
 
     pub fn is_cold_reset(&self) -> bool {
@@ -566,7 +572,7 @@ mod test {
             } else {
                 mem.write_obj_at_addr(GUEST_ADDR_BASE + BUFFER_SIZE as u32 / 2, pointer_addr).unwrap();
             };
-            mem.write_obj_at_addr(IOC_MASK | (BUFFER_SIZE as u32 / 2), control_addr).unwrap();
+            mem.write_obj_at_addr(IOC_MASK | (BUFFER_SIZE as u32), control_addr).unwrap();
         }
 
         ac97.writeb(PO_LVI, LVI_MASK);
@@ -577,11 +583,17 @@ mod test {
         ac97.writeb(PO_CR, CR_RPBM);
 
         std::thread::sleep(time::Duration::from_millis(20));
+        let mut civ = ac97.readb(PO_CIV);
+        let picb = ac97.readw(PO_PICB);
+        let num_samples = (BUFFER_SIZE as u16 - picb) + civ as u16 * BUFFER_SIZE as u16;
+        // The thread should consume more than a frame in 20ms, limit that it doesn't consume more
+        // than two to reduce flakyness from slow machines running this test.
+        assert!((num_samples as usize) >= BUFFER_SIZE && (num_samples as usize) < BUFFER_SIZE * 2,
+                "Inexplainable number of samples consumed {}", num_samples);
 
         assert!(ac97.readw(PO_SR) & 0x01 == 0); // DMA is running.
         assert_ne!(0, ac97.readw(PO_PICB));
 
-        let mut civ = ac97.readb(PO_CIV);
         for i in 0..30 {
             if civ != 0 {
                 break;
@@ -591,6 +603,7 @@ mod test {
         }
             
         assert_ne!(0, civ);
+        let picb = ac97.readw(PO_PICB);
 
         // TODO(dgreid) - check interrupts were set.
 
