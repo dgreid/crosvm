@@ -5,7 +5,8 @@
 use std;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::{thread, time};
+use std::thread;
+use std::time::{self, Instant};
 
 use audio::{DummyStreamSource, PlaybackBuffer, StreamSource};
 use data_model::VolatileMemory;
@@ -25,6 +26,7 @@ pub enum BusMasterAction {
 struct Ac97BusMasterRegs {
     pi_regs: Ac97FunctionRegs, // Input
     po_regs: Ac97FunctionRegs, // Output
+    po_pointer_update_time: Instant, // Time the picb and civ regs were last updated.
     mc_regs: Ac97FunctionRegs, // Microphone
     glob_cnt: u32,
     glob_sta: u32,
@@ -35,6 +37,7 @@ impl Ac97BusMasterRegs {
         Ac97BusMasterRegs {
             pi_regs: Ac97FunctionRegs::new(),
             po_regs: Ac97FunctionRegs::new(),
+            po_pointer_update_time: Instant::now(),
             mc_regs: Ac97FunctionRegs::new(),
             glob_cnt: 0,
             glob_sta: GLOB_STA_RESET_VAL, 
@@ -154,7 +157,6 @@ impl Ac97BusMaster {
                 println!("start with buffer size {}", buffer_size);
                 let mut output_stream = self.audio_server.new_playback_stream(2, 48000, buffer_size);
                 self.audio_thread_po = Some(thread::spawn(move || {
-                    println!("in po thread");
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
                         Self::play_buffer(&thread_regs, &thread_mem, &mut pb_buf);
@@ -273,11 +275,12 @@ impl Ac97BusMaster {
     fn play_buffer(regs: &Arc<Mutex<Ac97BusMasterRegs>>, mem: &GuestMemory, out_buffer: &mut PlaybackBuffer) -> usize {
 
         let mut regs = regs.lock().unwrap();
-        let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
 
         let mut frames_written = 0;
         // walk the valid buffers, fill from each, update status regs as we go.
         while frames_written < out_buffer.len() {
+            {
+            let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
             let civ = func_regs.civ;
             let descriptor_addr = func_regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
             let buffer_addr: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
@@ -298,6 +301,9 @@ impl Ac97BusMaster {
             if frames_remaining == 0 {
                 Self::buffer_completed(func_regs, &mem);
             }
+            }
+
+            regs.po_pointer_update_time = Instant::now();
         }
         frames_written
     }
@@ -402,7 +408,18 @@ impl Ac97BusMaster {
             0x06 => regs.pi_regs.sr,
             0x08 => regs.pi_regs.picb,
             0x16 => regs.po_regs.sr,
-            0x18 => regs.po_regs.picb,
+            0x18 => {
+                if !self.audio_thread_po_run.load(Ordering::Relaxed) {
+                    // Not running, no need to estimate what has been consumed.
+                    regs.po_regs.picb
+                } else {
+                    // Estimate how many samples have been played since the last audio callback.
+                    // Note this can overflow, it is intentional, the emulated register is 16 bits.
+                    // TODO(dgreid) - support other sample rates.
+                    let consumed = regs.po_pointer_update_time.elapsed().subsec_millis() * (48000 / 1000);
+                    regs.po_regs.picb - consumed as u16
+                }
+            }
             0x26 => regs.mc_regs.sr,
             0x28 => regs.mc_regs.picb,
             _ => 0,
