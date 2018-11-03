@@ -65,7 +65,7 @@ pub const GLOB_CNT_STABLE_BITS: u32 = 0x0000_007f; // Bits not affected by reset
 
 // Global status
 pub const GLOB_STA_RESET_VAL: u32 = 0x0000_0100; // primary codec ready set.
-// glob_sta bits
+                                                 // glob_sta bits
 pub const GS_MD3: u32 = 1 << 17;
 pub const GS_AD3: u32 = 1 << 16;
 pub const GS_RCS: u32 = 1 << 15;
@@ -182,7 +182,7 @@ impl Ac97FunctionRegs {
     /// Read register 4, 5, and 6 as one 32 bit word.
     /// According to the ICH spec, reading these three with one 32 bit access is allowed.
     pub fn atomic_status_regs(&self) -> u32 {
-        self.civ as u32| (self.lvi as u32) << 8 | (self.sr as u32) << 16
+        self.civ as u32 | (self.lvi as u32) << 8 | (self.sr as u32) << 16
     }
 }
 

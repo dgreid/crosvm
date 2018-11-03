@@ -150,9 +150,8 @@ impl Ac97Mixer {
 
     // Handles writes to the powerdown ctrl/status register (0x26).
     fn set_power_down_reg(&mut self, val: u16) {
-        self.power_down_control = (val & !PD_REG_STATUS_MASK) |
-                                  (self.power_down_control & PD_REG_STATUS_MASK);
+        self.power_down_control =
+            (val & !PD_REG_STATUS_MASK) | (self.power_down_control & PD_REG_STATUS_MASK);
         // TODO(dgreid) handle mute state changes
     }
-
 }

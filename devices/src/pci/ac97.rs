@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use audio::DummyStreamSource;
 use pci::ac97_bus_master::Ac97BusMaster;
-use pci::ac97_regs::*;
 use pci::ac97_mixer::Ac97Mixer;
+use pci::ac97_regs::*;
 use pci::pci_configuration::{
     PciClassCode, PciConfiguration, PciHeaderType, PciMultimediaSubclass,
 };
@@ -36,7 +36,7 @@ impl Ac97Dev {
             None, // No Programming interface.
             PciHeaderType::Device,
             0x8086, // Subsystem Vendor ID
-            0x1, // Subsystem ID.
+            0x1,    // Subsystem ID.
         );
 
         Ac97Dev {
@@ -58,18 +58,17 @@ impl PciDevice for Ac97Dev {
         self.ac97.set_event_fd(irq_evt);
     }
 
-    fn allocate_io_bars(
-        &mut self,
-        resources: &mut SystemAllocator,
-    ) -> Result<Vec<(u64, u64)>> {
+    fn allocate_io_bars(&mut self, resources: &mut SystemAllocator) -> Result<Vec<(u64, u64)>> {
         let mut ranges = Vec::new();
-        let mixer_regs_addr = resources.allocate_mmio_addresses(MIXER_REGS_SIZE)
+        let mixer_regs_addr = resources
+            .allocate_mmio_addresses(MIXER_REGS_SIZE)
             .ok_or(pci_device::Error::IoAllocationFailed(MIXER_REGS_SIZE))?;
         self.config_regs
             .add_memory_region(mixer_regs_addr, MIXER_REGS_SIZE)
             .ok_or(pci_device::Error::IoRegistrationFailed(mixer_regs_addr))?;
         ranges.push((mixer_regs_addr, MIXER_REGS_SIZE));
-        let master_regs_addr = resources.allocate_mmio_addresses(MASTER_REGS_SIZE)
+        let master_regs_addr = resources
+            .allocate_mmio_addresses(MASTER_REGS_SIZE)
             .ok_or(pci_device::Error::IoAllocationFailed(MASTER_REGS_SIZE))?;
         self.config_regs
             .add_memory_region(master_regs_addr, MASTER_REGS_SIZE)
@@ -87,8 +86,8 @@ impl PciDevice for Ac97Dev {
     }
 
     fn keep_fds(&self) -> Vec<RawFd> {
-        vec![0,1,2]
-//        Vec::new()
+        vec![0, 1, 2]
+        //        Vec::new()
     }
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
@@ -130,7 +129,7 @@ impl Ac97BusDevice {
 
 // Audio driver controlled by the above registers.
 pub struct Ac97 {
-    bus_master:Ac97BusMaster,
+    bus_master: Ac97BusMaster,
     mixer: Ac97Mixer,
 }
 
@@ -160,7 +159,9 @@ impl Ac97 {
 
     fn write_mixer(&mut self, offset: u64, data: &[u8]) {
         match data.len() {
-            2 => self.mixer.writew(offset, data[0] as u16 | (data[1] as u16) << 8),
+            2 => self
+                .mixer
+                .writew(offset, data[0] as u16 | (data[1] as u16) << 8),
             l => println!("wtf mixer write length of {}", l),
         }
     }
@@ -190,7 +191,9 @@ impl Ac97 {
         //        println!("write to BM 0x{:x} {}", offset, data.len());
         match data.len() {
             1 => self.bus_master.writeb(offset, data[0]),
-            2 => self.bus_master.writew(offset, data[0] as u16 | (data[1] as u16) << 8),
+            2 => self
+                .bus_master
+                .writew(offset, data[0] as u16 | (data[1] as u16) << 8),
             4 => self.bus_master.writel(
                 offset,
                 (data[0] as u32)
