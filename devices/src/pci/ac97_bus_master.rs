@@ -147,13 +147,13 @@ impl Ac97BusMaster {
     fn start_audio(&mut self, func: &Ac97Function) {
         let mut thread_mem = self.mem.clone();
         let thread_regs = self.regs.clone();
-        Self::next_buffer_descriptor(thread_regs.lock().unwrap().func_regs_mut(func), &thread_mem);
         match func {
             Ac97Function::Output => {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
                 // TODO(dgreid) - determine the format for otuput_stream.
                 let buffer_samples = Self::current_buffer_size(thread_regs.lock().unwrap().func_regs(func), &self.mem);
+                thread_regs.lock().unwrap().func_regs_mut(func).picb = buffer_samples as u16;
                 println!("start with buffer size {}", buffer_samples);
                 let mut output_stream = self.audio_server.new_playback_stream(2, 48000, buffer_samples/2); // TODO - assuming 2 channels.
                 self.audio_thread_po = Some(thread::spawn(move || {
@@ -278,35 +278,29 @@ impl Ac97BusMaster {
         let mut regs = regs.lock().unwrap();
 
         let mut samples_written = 0;
-        // walk the valid buffers, fill from each, update status regs as we go.
         while samples_written / num_channels < out_buffer.len() {
-            {
             let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
-            let civ = func_regs.civ;
-            let descriptor_addr = func_regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
+            let next_buffer = func_regs.civ;
+            let descriptor_addr = func_regs.bdbar + next_buffer as u32 * DESCRIPTOR_LENGTH as u32;
             let buffer_addr: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64)).unwrap();
-            let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
-            let buffer_len_samples = (control_reg & 0x0000_ffff) as usize;
             let sample_size = 2;
 
-            let mut samples_remaining = func_regs.picb as usize;
+            let samples_remaining = func_regs.picb as usize - samples_written;
+            if samples_remaining == 0 {
+                break;
+            }
             let samples_to_write = std::cmp::min(out_buffer.len()*num_channels - samples_written, samples_remaining);
-            let read_pos = (buffer_addr + (buffer_len_samples - samples_remaining as usize) as u32 * sample_size) as u64;
+            let read_pos = (buffer_addr + samples_written as u32 * sample_size) as u64;
             let buffer_offset = samples_to_write * sample_size as usize;
             mem.get_slice(read_pos, samples_to_write as u64 * sample_size as u64).unwrap().copy_to(&mut out_buffer.buffer[buffer_offset..]);
-            samples_remaining -= samples_to_write;
-            func_regs.picb = samples_remaining as u16;
-            println!("picb {}", func_regs.picb);
             samples_written += samples_to_write;
-
-            // Check if this buffer is finished.
-            if samples_remaining == 0 {
-                Self::buffer_completed(func_regs, &mem);
-            }
-            }
-
-            regs.po_pointer_update_time = Instant::now();
         }
+        {
+            let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
+            Self::buffer_completed(func_regs, &mem);
+        }
+        regs.po_pointer_update_time = Instant::now();
+
         samples_written / num_channels
     }
 
@@ -335,13 +329,8 @@ impl Ac97BusMaster {
         let mut civ = regs.piv;
 
         // TODO - handle civ hitting lvi.
-        let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
-        let control_reg: u32 = mem.read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4)).unwrap();
-        let picb = control_reg as u16; // Truncate droping control bits, leaving buffer length.
-        regs.civ = civ;
-        civ = (civ + 1) % 32; // Move PIV to the next buffer.
-        regs.piv = civ;
-        regs.picb = picb;
+        regs.civ = regs.piv;
+        regs.piv = (regs.piv + 1) % 32; // Move PIV to the next buffer.
     }
 
     fn current_buffer_size(func_regs: &Ac97FunctionRegs, mem: &GuestMemory) -> usize {
@@ -585,6 +574,7 @@ mod test {
         let elapsed = start_time.elapsed().subsec_micros() as usize;
         let picb = ac97.readw(PO_PICB);
         let mut civ = ac97.readb(PO_CIV);
+        assert_eq!(civ, 0);
         let pos = (FRAGMENT_SIZE - (picb as usize * 2)) / 4;
 
         let rate = ((pos*1000) / elapsed) * 1000 + (((pos*1000) % elapsed) * 1000) / elapsed; 
@@ -598,6 +588,7 @@ mod test {
         assert!(ac97.readw(PO_SR) & 0x01 == 0); // DMA is running.
         assert_ne!(0, ac97.readw(PO_PICB));
 
+        // civ should move eventually.
         for i in 0..30 {
             if civ != 0 {
                 break;
