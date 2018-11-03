@@ -153,9 +153,9 @@ impl Ac97BusMaster {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
                 // TODO(dgreid) - determine the format for otuput_stream.
-                let buffer_size = Self::current_buffer_size(thread_regs.lock().unwrap().func_regs(func), &self.mem);
-//                println!("start with buffer size {}", buffer_size);
-                let mut output_stream = self.audio_server.new_playback_stream(2, 48000, buffer_size);
+                let buffer_samples = Self::current_buffer_size(thread_regs.lock().unwrap().func_regs(func), &self.mem);
+                println!("start with buffer size {}", buffer_samples);
+                let mut output_stream = self.audio_server.new_playback_stream(2, 48000, buffer_samples/2); // TODO - assuming 2 channels.
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
