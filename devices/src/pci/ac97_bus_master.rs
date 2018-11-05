@@ -628,7 +628,7 @@ mod test {
         // The thread should consume more than a frame in 20ms, limit that it doesn't consume more
         // than two to reduce flakyness from slow machines running this test.
         assert!(
-            rate > 47500 && rate < 48500,
+            rate > 45000 && rate < 49000, // Big range but UT thread scheduling is unstable.
             "Invalid sample rate: played {} in {}us. Rate: {} {}",
             pos,
             elapsed,
