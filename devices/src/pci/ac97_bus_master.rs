@@ -3,12 +3,12 @@
 // found in the LICENSE file.
 
 use std;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{self, Instant};
+use std::time::Instant;
 
-use audio::{DummyStreamSource, PlaybackBuffer, StreamSource};
+use audio::{PlaybackBuffer, StreamSource};
 use data_model::VolatileMemory;
 use pci::ac97_regs::*;
 use sys_util::{EventFd, GuestAddress, GuestMemory};
@@ -30,6 +30,9 @@ struct Ac97BusMasterRegs {
     mc_regs: Ac97FunctionRegs,       // Microphone
     glob_cnt: u32,
     glob_sta: u32,
+
+    // IRQ event - driven by the glob_sta register.
+    event_fd: Option<EventFd>,
 }
 
 impl Ac97BusMasterRegs {
@@ -41,6 +44,7 @@ impl Ac97BusMasterRegs {
             mc_regs: Ac97FunctionRegs::new(),
             glob_cnt: 0,
             glob_sta: GLOB_STA_RESET_VAL,
+            event_fd: None,
         }
     }
 
@@ -73,9 +77,6 @@ pub struct Ac97BusMaster {
     audio_thread_mc: Option<thread::JoinHandle<()>>,
     audio_thread_mc_run: Arc<AtomicBool>,
 
-    // IRQ event
-    event_fd: Option<EventFd>,
-
     // Audio server used to create playback streams.
     audio_server: Box<dyn StreamSource>,
 }
@@ -92,14 +93,12 @@ impl Ac97BusMaster {
             audio_thread_mc: None,
             audio_thread_mc_run: Arc::new(AtomicBool::new(false)),
 
-            event_fd: None,
-
             audio_server,
         }
     }
 
     pub fn set_event_fd(&mut self, irq_evt: EventFd) {
-        self.event_fd = Some(irq_evt);
+        self.regs.lock().unwrap().event_fd = Some(irq_evt);
     }
 
     fn set_bdbar(&mut self, func: Ac97Function, val: u32) {
@@ -122,7 +121,7 @@ impl Ac97BusMaster {
         if val & SR_BCIS != 0 {
             sr &= !SR_BCIS;
         }
-        Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr, &self.event_fd);
+        Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr);
     }
 
     fn stop_audio(&mut self, func: &Ac97Function) {
@@ -134,19 +133,15 @@ impl Ac97BusMaster {
                     thread.join().unwrap();
                 }
             }
-            Ac97Function::Microphone => {
-                self.audio_thread_mc_run.store(false, Ordering::Relaxed);
-                if let Some(thread) = self.audio_thread_mc.take() {
-                    thread.join().unwrap();
-                }
-            }
+            Ac97Function::Microphone => (), // TODO(dgreid)
         };
     }
 
     fn start_audio(&mut self, func: &Ac97Function) {
-        let mut thread_mem = self.mem.clone();
+        let thread_mem = self.mem.clone();
         let thread_regs = self.regs.clone();
         match func {
+            Ac97Function::Input => (), // TODO(dgreid)
             Ac97Function::Output => {
                 self.audio_thread_po_run.store(true, Ordering::Relaxed);
                 let thread_run = self.audio_thread_po_run.clone();
@@ -159,7 +154,7 @@ impl Ac97BusMaster {
                 println!("start with buffer size {}", buffer_samples);
                 let mut output_stream =
                     self.audio_server
-                        .new_playback_stream(2, 48000, buffer_samples / 2); // TODO - assuming 2 channels.
+                        .new_playback_stream(2, 48000, buffer_samples / 2);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
@@ -167,21 +162,7 @@ impl Ac97BusMaster {
                     }
                 }));
             }
-            Ac97Function::Microphone => {
-                self.audio_thread_mc_run.store(true, Ordering::Relaxed);
-                let thread_run = self.audio_thread_mc_run.clone();
-                self.audio_thread_mc = Some(thread::spawn(move || {
-                    let cap_buf = vec![0i16; 480];
-                    while thread_run.load(Ordering::Relaxed) {
-                        // TODO - actually connect to audio input.
-                        Self::record_buffer(&thread_regs, &mut thread_mem, &cap_buf);
-                        thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }));
-            }
-            Ac97Function::Input => {
-                // TODO(dgreid)
-            }
+            Ac97Function::Microphone => (), // TODO(dgreid)
         }
     }
 
@@ -194,7 +175,6 @@ impl Ac97BusMaster {
             let cr = self.regs.lock().unwrap().func_regs(&func).cr;
             if val & CR_RPBM == 0 {
                 // Run/Pause set to pause.
-                // TODO(dgreid) disable audio.
                 self.stop_audio(&func);
                 let mut regs = self.regs.lock().unwrap();
                 regs.func_regs_mut(&func).sr |= SR_DCH;;
@@ -203,7 +183,7 @@ impl Ac97BusMaster {
                 // Run/Pause set to run.
                 {
                     let mut regs = self.regs.lock().unwrap();
-                    let mut func_regs = regs.func_regs_mut(&func);
+                    let func_regs = regs.func_regs_mut(&func);
                     func_regs.piv = 0;
                     func_regs.civ = 0;
                     //fetch_bd (s, r);
@@ -220,7 +200,6 @@ impl Ac97BusMaster {
         regs: &mut Ac97BusMasterRegs,
         func: &Ac97Function,
         val: u16,
-        event_fd: &Option<EventFd>,
     ) {
         let int_mask = match func {
             Ac97Function::Input => GS_PIINT,
@@ -231,9 +210,9 @@ impl Ac97BusMaster {
         let mut interrupt_high = false;
 
         {
-            let mut func_regs = regs.func_regs_mut(func);
-            let initial_sr = func_regs.sr;
-            if val & SR_INT_MASK != initial_sr & SR_INT_MASK {
+            let func_regs = regs.func_regs_mut(func);
+            func_regs.sr = val;
+            if val & SR_INT_MASK != 0 {
                 if (val & SR_LVBCI) != 0 && (func_regs.cr & CR_LVBIE) != 0 {
                     interrupt_high = true;
                 }
@@ -241,19 +220,16 @@ impl Ac97BusMaster {
                     interrupt_high = true;
                 }
             }
-
-            func_regs.sr = val;
         }
 
-        // TODO - maybe update glob_sta as a combinatino of all audio thread sources in the main context.
         if interrupt_high {
             regs.glob_sta |= int_mask;
-            if let Some(irq_evt) = event_fd {
-                irq_evt.write(1).unwrap();
-            }
+            regs.event_fd.as_ref().unwrap().write(1).unwrap();
         } else {
             regs.glob_sta &= !int_mask;
-            // TODO(dgreid) - can we deassert the interrupt?
+            if regs.glob_sta & GS_PIINT | GS_POINT | GS_MINT == 0 {
+                regs.event_fd.as_ref().unwrap().write(0).unwrap();
+            }
         }
     }
 
@@ -293,7 +269,7 @@ impl Ac97BusMaster {
 
         let mut samples_written = 0;
         while samples_written / num_channels < out_buffer.len() {
-            let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
+            let func_regs = regs.func_regs_mut(&Ac97Function::Output);
             let next_buffer = func_regs.civ;
             let descriptor_addr = func_regs.bdbar + next_buffer as u32 * DESCRIPTOR_LENGTH as u32;
             let buffer_addr: u32 = mem
@@ -316,10 +292,7 @@ impl Ac97BusMaster {
                 .copy_to(&mut out_buffer.buffer[buffer_offset..]);
             samples_written += samples_to_write;
         }
-        {
-            let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
-            Self::buffer_completed(func_regs, &mem);
-        }
+        Self::buffer_completed(&mut regs, &mem, &Ac97Function::Output);
         regs.po_pointer_update_time = Instant::now();
 
         samples_written / num_channels
@@ -335,26 +308,23 @@ impl Ac97BusMaster {
         480
     }
 
-    fn buffer_completed(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
+    fn buffer_completed(regs: &mut Ac97BusMasterRegs, mem: &GuestMemory, func: &Ac97Function) {
         // Check if the completed descriptor wanted an interrupt on completion.
-        let civ = regs.civ;
-        let descriptor_addr = regs.bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
+        let civ = regs.func_regs(func).civ;
+        let descriptor_addr = regs.func_regs(func).bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
         let control_reg: u32 = mem
             .read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4))
             .unwrap();
 
         if control_reg & BD_IOC != 0 {
-            regs.sr |= SR_BCIS;
-            // TODO(dgreid) - update_sr();
+            let new_sr = regs.func_regs(func).sr | SR_BCIS;
+            Self::update_sr(regs, func, new_sr);
         }
 
-        Self::next_buffer_descriptor(regs, mem);
+        Self::next_buffer_descriptor(regs.func_regs_mut(func), mem);
     }
 
     fn next_buffer_descriptor(regs: &mut Ac97FunctionRegs, mem: &GuestMemory) {
-        // Move CIV to PIV.
-        let mut civ = regs.piv;
-
         // TODO - handle civ hitting lvi.
         regs.civ = regs.piv;
         regs.piv = (regs.piv + 1) % 32; // Move PIV to the next buffer.
@@ -413,7 +383,6 @@ impl Ac97BusMaster {
                     // TODO(dgreid) - support other sample rates.
                     let num_channels = 2;
                     let micros = regs.po_pointer_update_time.elapsed().subsec_micros();
-                    println!("micros {} picb {}", micros, regs.po_regs.picb);
                     let consumed = micros * 48 / 1000;
                     regs.po_regs
                         .picb
@@ -503,6 +472,10 @@ impl Ac97BusMaster {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    use std::time;
+
+    use audio::DummyStreamSource;
 
     const GLOB_CNT: u64 = 0x2c;
 
