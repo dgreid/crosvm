@@ -13,6 +13,8 @@ use data_model::VolatileMemory;
 use pci::ac97_regs::*;
 use sys_util::{EventFd, GuestAddress, GuestMemory};
 
+const DEVICE_SAMPLE_RATE: usize = 48000;
+
 pub enum BusMasterAction {
     /// `NoAction` indicates that no action needs to be taken by the caller.
     NoAction,
@@ -74,8 +76,6 @@ pub struct Ac97BusMaster {
     // Audio thread book keeping.
     audio_thread_po: Option<thread::JoinHandle<()>>,
     audio_thread_po_run: Arc<AtomicBool>,
-    audio_thread_mc: Option<thread::JoinHandle<()>>,
-    audio_thread_mc_run: Arc<AtomicBool>,
 
     // Audio server used to create playback streams.
     audio_server: Box<dyn StreamSource>,
@@ -90,8 +90,6 @@ impl Ac97BusMaster {
 
             audio_thread_po: None,
             audio_thread_po_run: Arc::new(AtomicBool::new(false)),
-            audio_thread_mc: None,
-            audio_thread_mc_run: Arc::new(AtomicBool::new(false)),
 
             audio_server,
         }
@@ -154,7 +152,7 @@ impl Ac97BusMaster {
                 println!("start with buffer size {}", buffer_samples);
                 let mut output_stream =
                     self.audio_server
-                        .new_playback_stream(2, 48000, buffer_samples / 2);
+                        .new_playback_stream(2, DEVICE_SAMPLE_RATE, buffer_samples / 2);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
@@ -301,16 +299,6 @@ impl Ac97BusMaster {
         samples_written / num_channels
     }
 
-    /// Return the number of samples read from the buffer.
-    fn record_buffer(
-        regs: &Arc<Mutex<Ac97BusMasterRegs>>,
-        mem: &mut GuestMemory,
-        buffer: &[i16],
-    ) -> usize {
-        // TODO
-        480
-    }
-
     fn buffer_completed(regs: &mut Ac97BusMasterRegs, mem: &GuestMemory, func: &Ac97Function) {
         // Check if the completed descriptor wanted an interrupt on completion.
         let civ = regs.func_regs(func).civ;
@@ -383,10 +371,9 @@ impl Ac97BusMaster {
                     regs.po_regs.picb
                 } else {
                     // Estimate how many samples have been played since the last audio callback.
-                    // TODO(dgreid) - support other sample rates.
                     let num_channels = 2;
                     let micros = regs.po_pointer_update_time.elapsed().subsec_micros();
-                    let consumed = micros * 48 / 1000;
+                    let consumed = micros * (DEVICE_SAMPLE_RATE as u32 / 1000) / 1000;
                     regs.po_regs
                         .picb
                         .saturating_sub((num_channels * consumed) as u16)
