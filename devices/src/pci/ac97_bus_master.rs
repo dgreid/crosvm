@@ -154,9 +154,11 @@ impl Ac97BusMaster {
                 );
                 thread_regs.lock().unwrap().func_regs_mut(func).picb = buffer_samples as u16;
                 println!("start with buffer size {}", buffer_samples);
-                let mut output_stream =
-                    self.audio_server
-                        .new_playback_stream(2, DEVICE_SAMPLE_RATE, buffer_samples / 2);
+                let mut output_stream = self.audio_server.new_playback_stream(
+                    2,
+                    DEVICE_SAMPLE_RATE,
+                    buffer_samples / 2,
+                );
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
@@ -203,11 +205,7 @@ impl Ac97BusMaster {
         }
     }
 
-    fn update_sr(
-        regs: &mut Ac97BusMasterRegs,
-        func: &Ac97Function,
-        val: u16,
-    ) {
+    fn update_sr(regs: &mut Ac97BusMasterRegs, func: &Ac97Function, val: u16) {
         let int_mask = match func {
             Ac97Function::Input => GS_PIINT,
             Ac97Function::Output => GS_POINT,
@@ -319,7 +317,11 @@ impl Ac97BusMaster {
     }
 
     // Return true if out of buffers.
-    fn buffer_completed(regs: &mut Ac97BusMasterRegs, mem: &GuestMemory, func: &Ac97Function) -> bool {
+    fn buffer_completed(
+        regs: &mut Ac97BusMasterRegs,
+        mem: &GuestMemory,
+        func: &Ac97Function,
+    ) -> bool {
         // Check if the completed descriptor wanted an interrupt on completion.
         let civ = regs.func_regs(func).civ;
         let descriptor_addr = regs.func_regs(func).bdbar + civ as u32 * DESCRIPTOR_LENGTH as u32;
