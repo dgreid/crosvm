@@ -330,10 +330,12 @@ impl Ac97BusMaster {
                 .copy_to(&mut out_buffer.buffer[buffer_offset..]);
             samples_written += samples_to_write;
         }
-        Self::buffer_completed(&mut regs, &mem, &Ac97Function::Output);
         regs.po_pointer_update_time = Instant::now();
-
-        Ok(samples_written / num_channels)
+        if Self::buffer_completed(&mut regs, &mem, &Ac97Function::Output) {
+            Err(PlaybackError::HitEnd)
+        } else {
+            Ok(samples_written / num_channels)
+        }
     }
 
     // Return true if out of buffers.
