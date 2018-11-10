@@ -305,6 +305,14 @@ impl Ac97BusMaster {
 
         let mut regs = regs.lock().unwrap();
 
+        // TODO - handle server buffers smaller or larger than the guest buffers.
+        // maybe:
+        // while have buffers
+        //   while space in out_buffer and guest_buffer
+        //     write
+        //   }
+        //   buffer_complete
+        // }
         let mut samples_written = 0;
         while samples_written / num_channels < out_buffer.len() {
             let func_regs = regs.func_regs_mut(&Ac97Function::Output);
