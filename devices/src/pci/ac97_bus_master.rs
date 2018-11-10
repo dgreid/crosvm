@@ -34,7 +34,8 @@ struct Ac97BusMasterRegs {
     glob_sta: u32,
 
     // IRQ event - driven by the glob_sta register.
-    event_fd: Option<EventFd>,
+    irq_evt: Option<EventFd>,
+    irq_resample_evt: Option<EventFd>,
 }
 
 impl Ac97BusMasterRegs {
@@ -46,7 +47,8 @@ impl Ac97BusMasterRegs {
             mc_regs: Ac97FunctionRegs::new(),
             glob_cnt: 0,
             glob_sta: GLOB_STA_RESET_VAL,
-            event_fd: None,
+            irq_evt: None,
+            irq_resample_evt: None,
         }
     }
 
@@ -101,8 +103,10 @@ impl Ac97BusMaster {
         }
     }
 
-    pub fn set_event_fd(&mut self, irq_evt: EventFd) {
-        self.regs.lock().unwrap().event_fd = Some(irq_evt);
+    pub fn set_irq_event_fd(&mut self, irq_evt: EventFd, irq_resample_evt: EventFd) {
+        let mut regs = self.regs.lock().unwrap();
+        regs.irq_evt = Some(irq_evt);
+        regs.irq_resample_evt = Some(irq_resample_evt);
     }
 
     fn set_bdbar(&mut self, func: Ac97Function, val: u32) {
@@ -229,11 +233,11 @@ impl Ac97BusMaster {
 
         if interrupt_high {
             regs.glob_sta |= int_mask;
-            regs.event_fd.as_ref().unwrap().write(1).unwrap();
+            regs.irq_evt.as_ref().unwrap().write(1).unwrap();
         } else {
             regs.glob_sta &= !int_mask;
             if regs.glob_sta & GS_PIINT | GS_POINT | GS_MINT == 0 {
-                regs.event_fd.as_ref().unwrap().write(0).unwrap();
+                regs.irq_evt.as_ref().unwrap().write(0).unwrap();
             }
         }
     }

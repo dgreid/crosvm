@@ -55,7 +55,7 @@ impl PciDevice for Ac97Dev {
         irq_pin: PciInterruptPin,
     ) {
         self.config_regs.set_irq(irq_num as u8, irq_pin);
-        self.ac97.set_event_fd(irq_evt);
+        self.ac97.set_irq_event_fd(irq_evt, irq_resample_evt);
     }
 
     fn allocate_io_bars(&mut self, resources: &mut SystemAllocator) -> Result<Vec<(u64, u64)>> {
@@ -141,8 +141,8 @@ impl Ac97 {
         }
     }
 
-    pub fn set_event_fd(&mut self, irq_evt: EventFd) {
-        self.bus_master.set_event_fd(irq_evt);
+    pub fn set_irq_event_fd(&mut self, irq_evt: EventFd, irq_resample_evt: EventFd) {
+        self.bus_master.set_irq_event_fd(irq_evt, irq_resample_evt);
     }
 
     fn read_mixer(&mut self, offset: u64, data: &mut [u8]) {
