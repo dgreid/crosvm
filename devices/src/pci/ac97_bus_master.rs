@@ -35,7 +35,6 @@ struct Ac97BusMasterRegs {
 
     // IRQ event - driven by the glob_sta register.
     irq_evt: Option<EventFd>,
-    irq_resample_evt: Option<EventFd>,
 }
 
 impl Ac97BusMasterRegs {
@@ -48,7 +47,6 @@ impl Ac97BusMasterRegs {
             glob_cnt: 0,
             glob_sta: GLOB_STA_RESET_VAL,
             irq_evt: None,
-            irq_resample_evt: None,
         }
     }
 
@@ -87,6 +85,9 @@ pub struct Ac97BusMaster {
 
     // Audio server used to create playback streams.
     audio_server: Box<dyn StreamSource>,
+
+    // Thread for hadlind IRQ resample events from teh guest.
+    irq_resample_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Ac97BusMaster {
@@ -100,13 +101,28 @@ impl Ac97BusMaster {
             audio_thread_po_run: Arc::new(AtomicBool::new(false)),
 
             audio_server,
+
+            irq_resample_thread: None,
         }
     }
 
     pub fn set_irq_event_fd(&mut self, irq_evt: EventFd, irq_resample_evt: EventFd) {
-        let mut regs = self.regs.lock().unwrap();
-        regs.irq_evt = Some(irq_evt);
-        regs.irq_resample_evt = Some(irq_resample_evt);
+        let thread_regs = self.regs.clone();
+        self.regs.lock().unwrap().irq_evt = Some(irq_evt);
+        self.irq_resample_thread = Some(thread::spawn(move || {
+            loop {
+                irq_resample_evt.read().unwrap(); // TODO Unwrap.
+                let irq_high = false;
+                { // Scope for the lock on thread_regs.
+                    let mut regs = thread_regs.lock().unwrap();
+                    if regs.func_regs(&Ac97Function::Output).sr & (SR_LVBCI | SR_BCIS) != 0 {
+                        if let Some(irq_evt) = regs.irq_evt.as_ref() {
+                            irq_evt.write(1).unwrap();
+                        }
+                    }
+                }
+            }
+        }));
     }
 
     fn set_bdbar(&mut self, func: Ac97Function, val: u32) {
