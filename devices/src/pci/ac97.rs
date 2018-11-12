@@ -5,7 +5,7 @@
 use std::os::unix::io::RawFd;
 
 use audio::DummyStreamSource;
-use pci::ac97_bus_master::Ac97BusMaster;
+use pci::ac97_bus_master::{Ac97BusMaster, BusMasterAction};
 use pci::ac97_mixer::Ac97Mixer;
 use pci::ac97_regs::*;
 use pci::pci_configuration::{
@@ -178,7 +178,7 @@ impl Ac97 {
     // TODO(dgreid) make bus master return an action and act on it.
     fn write_bus_master(&mut self, offset: u64, data: &[u8]) {
         //        println!("write to BM 0x{:x} {}", offset, data.len());
-        match data.len() {
+        let action = match data.len() {
             1 => self.bus_master.writeb(offset, data[0], &self.mixer),
             2 => self
                 .bus_master
@@ -190,7 +190,18 @@ impl Ac97 {
                     | ((data[2] as u32) << 16)
                     | ((data[3] as u32) << 24),
             ),
-            l => println!("wtf write length of {}", l),
+            l => {
+                println!("wtf write length of {}", l);
+                BusMasterAction::NoAction
+            }
+        };
+
+        match action {
+            BusMasterAction::NoAction => (),
+            BusMasterAction::StartAudio(function) => {
+            }
+            BusMasterAction::StopAudio(function) => {
+            }
         }
     }
 }

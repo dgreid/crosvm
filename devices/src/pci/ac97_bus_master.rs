@@ -199,7 +199,8 @@ impl Ac97BusMaster {
         }
     }
 
-    fn set_cr(&mut self, func: Ac97Function, val: u8, mixer: &Ac97Mixer) {
+    fn set_cr(&mut self, func: Ac97Function, val: u8, mixer: &Ac97Mixer) -> BusMasterAction {
+        let mut next_action = BusMasterAction::NoAction;
         if val & CR_RR != 0 {
             self.stop_audio(&func);
             let mut regs = self.regs.lock().unwrap();
@@ -210,7 +211,8 @@ impl Ac97BusMaster {
                 // Run/Pause set to pause.
                 self.stop_audio(&func);
                 let mut regs = self.regs.lock().unwrap();
-                regs.func_regs_mut(&func).sr |= SR_DCH;;
+                regs.func_regs_mut(&func).sr |= SR_DCH;
+                next_action = BusMasterAction::StopAudio(func);
             } else if cr & CR_RPBM == 0 {
                 // Not already running.
                 // Run/Pause set to run.
@@ -223,10 +225,12 @@ impl Ac97BusMaster {
                     func_regs.sr &= !SR_DCH;
                 }
                 self.start_audio(&func, mixer);
+                next_action = BusMasterAction::StartAudio(func);
             }
             let mut regs = self.regs.lock().unwrap();
             regs.func_regs_mut(&func).cr = val & CR_VALID_MASK;
         }
+        next_action
     }
 
     fn update_sr(regs: &mut Ac97BusMasterRegs, func: &Ac97Function, val: u16) {
@@ -467,34 +471,35 @@ impl Ac97BusMaster {
         }
     }
 
-    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) {
+    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) -> BusMasterAction {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
-            return;
+            return BusMasterAction::NoAction;
         }
 
         match offset {
             0x04 => (), // RO
             0x05 => self.set_lvi(Ac97Function::Input, val),
             0x0a => (), // RO
-            0x0b => self.set_cr(Ac97Function::Input, val, mixer),
+            0x0b => return self.set_cr(Ac97Function::Input, val, mixer),
             0x14 => (), // RO
             0x15 => self.set_lvi(Ac97Function::Output, val),
             0x1a => (), // RO
-            0x1b => self.set_cr(Ac97Function::Output, val, mixer),
+            0x1b => return self.set_cr(Ac97Function::Output, val, mixer),
             0x24 => (), // RO
             0x25 => self.set_lvi(Ac97Function::Microphone, val),
             0x2a => (), // RO
-            0x2b => self.set_cr(Ac97Function::Microphone, val, mixer),
+            0x2b => return self.set_cr(Ac97Function::Microphone, val, mixer),
             0x34 => self.acc_sema = val,
             o => println!("wtf write byte to 0x{:x}", o),
         }
+        BusMasterAction::NoAction
     }
 
-    pub fn writew(&mut self, offset: u64, val: u16) {
+    pub fn writew(&mut self, offset: u64, val: u16) -> BusMasterAction {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
-            return;
+            return BusMasterAction::NoAction;
         }
         match offset {
             0x06 => self.set_sr(Ac97Function::Input, val),
@@ -505,23 +510,25 @@ impl Ac97BusMaster {
             0x28 => (), // RO
             o => println!("wtf write word to 0x{:x}", o),
         }
+        BusMasterAction::NoAction
     }
 
-    pub fn writel(&mut self, offset: u64, val: u32) {
+    pub fn writel(&mut self, offset: u64, val: u32) -> BusMasterAction {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
             if offset != 0x2c {
-                return;
+                return BusMasterAction::NoAction;
             }
         }
         match offset {
             0x00 => self.set_bdbar(Ac97Function::Input, val),
             0x10 => self.set_bdbar(Ac97Function::Output, val),
             0x20 => self.set_bdbar(Ac97Function::Microphone, val),
-            0x2c => self.set_glob_cnt(val),
+            0x2c => self.set_glob_cnt(val), // TODO - return StopAudio if needed.
             0x30 => (), // RO
             o => println!("wtf write long to 0x{:x}", o),
         }
+        BusMasterAction::NoAction
     }
 }
 
