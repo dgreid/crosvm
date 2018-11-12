@@ -117,16 +117,6 @@ impl PciDevice for Ac97Dev {
     }
 }
 
-struct Ac97BusDevice {
-    audio_function: Arc<Mutex<Ac97>>,
-}
-
-impl Ac97BusDevice {
-    pub fn new(audio_function: Arc<Mutex<Ac97>>) -> Self {
-        Ac97BusDevice { audio_function }
-    }
-}
-
 // Audio driver controlled by the above registers.
 pub struct Ac97 {
     bus_master: Ac97BusMaster,
