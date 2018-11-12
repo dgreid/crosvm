@@ -7,6 +7,8 @@ pub trait StreamSource: Send {
 
 pub trait PlaybackBufferStream: Send {
     fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a>;
+    fn set_volume(&mut self, _scaler: f64) {}
+    fn set_mute(&mut self, _mute: bool) {}
 }
 
 pub struct PlaybackBuffer<'a> {

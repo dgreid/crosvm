@@ -8,6 +8,9 @@ use pci::ac97_regs::*;
 const AC97_VENDOR_ID1: u16 = 0x8086;
 const AC97_VENDOR_ID2: u16 = 0x8086;
 
+// Master volume register is specified in 1.5dB steps.
+const MASTER_VOLUME_STEP_DB: f64 = 1.5;
+
 pub struct Ac97Mixer {
     // Mixer Registers
     master_volume_l: u8,
@@ -68,14 +71,6 @@ impl Ac97Mixer {
         }
     }
 
-    pub fn output_muted(&self) -> bool {
-        self.master_mute | (self.power_down_control & PD_REG_OUTPUT_MUTE_MASK != 0)
-    }
-
-    pub fn input_muted(&self) -> bool {
-        self.record_gain_mute | (self.power_down_control & PD_REG_INPUT_MUTE_MASK != 0)
-    }
-
     // Returns the master mute and l/r volumes (reg 0x02).
     fn get_master_reg(&self) -> u16 {
         let reg = (self.master_volume_l as u16) << 8 | self.master_volume_r as u16;
@@ -84,6 +79,13 @@ impl Ac97Mixer {
         } else {
             reg
         }
+    }
+
+    // Returns the mute status and left and right attenuation from the master volume register.
+    pub fn get_master_volume(&self) -> (bool, f64, f64) {
+        (self.master_mute,
+         f64::from(self.master_volume_l) * MASTER_VOLUME_STEP_DB,
+         f64::from(self.master_volume_r) * MASTER_VOLUME_STEP_DB)
     }
 
     // Handles writes to the master register (0x02).

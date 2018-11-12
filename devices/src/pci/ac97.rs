@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Mutex};
 
 use audio::DummyStreamSource;
 use pci::ac97_bus_master::Ac97BusMaster;
@@ -180,7 +179,7 @@ impl Ac97 {
     fn write_bus_master(&mut self, offset: u64, data: &[u8]) {
         //        println!("write to BM 0x{:x} {}", offset, data.len());
         match data.len() {
-            1 => self.bus_master.writeb(offset, data[0]),
+            1 => self.bus_master.writeb(offset, data[0], &self.mixer),
             2 => self
                 .bus_master
                 .writew(offset, data[0] as u16 | (data[1] as u16) << 8),

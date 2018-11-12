@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use audio::{PlaybackBuffer, StreamSource};
 use data_model::VolatileMemory;
+use pci::ac97_mixer::Ac97Mixer;
 use pci::ac97_regs::*;
 use sys_util::{EventFd, GuestAddress, GuestMemory};
 
@@ -112,7 +113,6 @@ impl Ac97BusMaster {
         self.irq_resample_thread = Some(thread::spawn(move || {
             loop {
                 irq_resample_evt.read().unwrap(); // TODO Unwrap.
-                let irq_high = false;
                 { // Scope for the lock on thread_regs.
                     let mut regs = thread_regs.lock().unwrap();
                     if regs.func_regs(&Ac97Function::Output).sr & (SR_LVBCI | SR_BCIS) != 0 {
@@ -160,7 +160,7 @@ impl Ac97BusMaster {
         };
     }
 
-    fn start_audio(&mut self, func: &Ac97Function) {
+    fn start_audio(&mut self, func: &Ac97Function, mixer: &Ac97Mixer) {
         let thread_mem = self.mem.clone();
         let thread_regs = self.regs.clone();
         match func {
@@ -179,6 +179,10 @@ impl Ac97BusMaster {
                     DEVICE_SAMPLE_RATE,
                     buffer_samples / 2,
                 );
+                // The audio server only supports one volume, not separate left and right.
+                let (start_muted, left_volume, _right_volume) = mixer.get_master_volume();
+                output_stream.set_volume(left_volume);
+                output_stream.set_mute(start_muted);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
@@ -195,7 +199,7 @@ impl Ac97BusMaster {
         }
     }
 
-    fn set_cr(&mut self, func: Ac97Function, val: u8) {
+    fn set_cr(&mut self, func: Ac97Function, val: u8, mixer: &Ac97Mixer) {
         if val & CR_RR != 0 {
             self.stop_audio(&func);
             let mut regs = self.regs.lock().unwrap();
@@ -218,7 +222,7 @@ impl Ac97BusMaster {
                     //fetch_bd (s, r);
                     func_regs.sr &= !SR_DCH;
                 }
-                self.start_audio(&func);
+                self.start_audio(&func, mixer);
             }
             let mut regs = self.regs.lock().unwrap();
             regs.func_regs_mut(&func).cr = val & CR_VALID_MASK;
@@ -377,7 +381,7 @@ impl Ac97BusMaster {
             Self::update_sr(regs, func, new_sr);
             true
         } else {
-            let mut func_regs = regs.func_regs_mut(func);
+            let func_regs = regs.func_regs_mut(func);
             func_regs.civ = func_regs.piv;
             func_regs.piv = (func_regs.piv + 1) % 32; // Move PIV to the next buffer.
             false
@@ -463,7 +467,7 @@ impl Ac97BusMaster {
         }
     }
 
-    pub fn writeb(&mut self, offset: u64, val: u8) {
+    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
             return;
@@ -473,15 +477,15 @@ impl Ac97BusMaster {
             0x04 => (), // RO
             0x05 => self.set_lvi(Ac97Function::Input, val),
             0x0a => (), // RO
-            0x0b => self.set_cr(Ac97Function::Input, val),
+            0x0b => self.set_cr(Ac97Function::Input, val, mixer),
             0x14 => (), // RO
             0x15 => self.set_lvi(Ac97Function::Output, val),
             0x1a => (), // RO
-            0x1b => self.set_cr(Ac97Function::Output, val),
+            0x1b => self.set_cr(Ac97Function::Output, val, mixer),
             0x24 => (), // RO
             0x25 => self.set_lvi(Ac97Function::Microphone, val),
             0x2a => (), // RO
-            0x2b => self.set_cr(Ac97Function::Microphone, val),
+            0x2b => self.set_cr(Ac97Function::Microphone, val, mixer),
             0x34 => self.acc_sema = val,
             o => println!("wtf write byte to 0x{:x}", o),
         }
@@ -533,7 +537,7 @@ mod test {
 
     #[test]
     fn bm_bdbar() {
-        let mut ac97 = Ac97BusMaster::new(
+        let mut bm = Ac97BusMaster::new(
             GuestMemory::new(&[]).unwrap(),
             Box::new(DummyStreamSource::new()),
         );
@@ -541,23 +545,23 @@ mod test {
         let bdbars = [0x00u64, 0x10, 0x20];
 
         // Make sure writes have no affect during cold reset.
-        ac97.writel(0x00, 0x5555_555f);
-        assert_eq!(ac97.readl(0x00), 0x0000_0000);
+        bm.writel(0x00, 0x5555_555f);
+        assert_eq!(bm.readl(0x00), 0x0000_0000);
 
         // Relesase cold reset.
-        ac97.writel(GLOB_CNT, 0x0000_0002);
+        bm.writel(GLOB_CNT, 0x0000_0002);
 
         // Tests that the base address is writable and that the bottom three bits are read only.
         for bdbar in &bdbars {
-            assert_eq!(ac97.readl(*bdbar), 0x0000_0000);
-            ac97.writel(*bdbar, 0x5555_555f);
-            assert_eq!(ac97.readl(*bdbar), 0x5555_5558);
+            assert_eq!(bm.readl(*bdbar), 0x0000_0000);
+            bm.writel(*bdbar, 0x5555_555f);
+            assert_eq!(bm.readl(*bdbar), 0x5555_5558);
         }
     }
 
     #[test]
     fn bm_status_reg() {
-        let mut ac97 = Ac97BusMaster::new(
+        let mut bm = Ac97BusMaster::new(
             GuestMemory::new(&[]).unwrap(),
             Box::new(DummyStreamSource::new()),
         );
@@ -565,38 +569,38 @@ mod test {
         let sr_addrs = [0x06u64, 0x16, 0x26];
 
         for sr in &sr_addrs {
-            assert_eq!(ac97.readw(*sr), 0x0001);
-            ac97.writew(*sr, 0xffff);
-            assert_eq!(ac97.readw(*sr), 0x0001);
+            assert_eq!(bm.readw(*sr), 0x0001);
+            bm.writew(*sr, 0xffff);
+            assert_eq!(bm.readw(*sr), 0x0001);
         }
     }
 
     #[test]
     fn bm_global_control() {
-        let mut ac97 = Ac97BusMaster::new(
+        let mut bm = Ac97BusMaster::new(
             GuestMemory::new(&[]).unwrap(),
             Box::new(DummyStreamSource::new()),
         );
 
-        assert_eq!(ac97.readl(GLOB_CNT), 0x0000_0000);
+        assert_eq!(bm.readl(GLOB_CNT), 0x0000_0000);
 
         // Relesase cold reset.
-        ac97.writel(GLOB_CNT, 0x0000_0002);
+        bm.writel(GLOB_CNT, 0x0000_0002);
 
         // Check interrupt enable bits are writable.
-        ac97.writel(GLOB_CNT, 0x0000_0072);
-        assert_eq!(ac97.readl(GLOB_CNT), 0x0000_0072);
+        bm.writel(GLOB_CNT, 0x0000_0072);
+        assert_eq!(bm.readl(GLOB_CNT), 0x0000_0072);
 
         // A Warm reset should doesn't affect register state and is auto cleared.
-        ac97.writel(0x00, 0x5555_5558);
-        ac97.writel(GLOB_CNT, 0x0000_0076);
-        assert_eq!(ac97.readl(GLOB_CNT), 0x0000_0072);
-        assert_eq!(ac97.readl(0x00), 0x5555_5558);
+        bm.writel(0x00, 0x5555_5558);
+        bm.writel(GLOB_CNT, 0x0000_0076);
+        assert_eq!(bm.readl(GLOB_CNT), 0x0000_0072);
+        assert_eq!(bm.readl(0x00), 0x5555_5558);
         // Check that a cold reset works, but setting bdbar and checking it is zeroed.
-        ac97.writel(0x00, 0x5555_555f);
-        ac97.writel(GLOB_CNT, 0x000_0070);
-        assert_eq!(ac97.readl(GLOB_CNT), 0x0000_0070);
-        assert_eq!(ac97.readl(0x00), 0x0000_0000);
+        bm.writel(0x00, 0x5555_555f);
+        bm.writel(GLOB_CNT, 0x000_0070);
+        assert_eq!(bm.readl(GLOB_CNT), 0x0000_0070);
+        assert_eq!(bm.readl(0x00), 0x0000_0000);
     }
 
     #[test]
@@ -610,13 +614,14 @@ mod test {
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
         let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024 * 1024 * 1024)])
             .unwrap();
-        let mut ac97 = Ac97BusMaster::new(mem.clone(), Box::new(DummyStreamSource::new()));
+        let mut bm = Ac97BusMaster::new(mem.clone(), Box::new(DummyStreamSource::new()));
+        let mixer = Ac97Mixer::new();
 
         // Release cold reset.
-        ac97.writel(GLOB_CNT, 0x0000_0002);
+        bm.writel(GLOB_CNT, 0x0000_0002);
 
         // Setup ping-pong buffers. A and B repeating for every possible index.
-        ac97.writel(PO_BDBAR, GUEST_ADDR_BASE);
+        bm.writel(PO_BDBAR, GUEST_ADDR_BASE);
         for i in 0..num_buffers {
             let pointer_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8);
             let control_addr = GuestAddress(GUEST_ADDR_BASE as u64 + i as u64 * 8 + 4);
@@ -631,17 +636,17 @@ mod test {
                 .unwrap();
         }
 
-        ac97.writeb(PO_LVI, LVI_MASK);
+        bm.writeb(PO_LVI, LVI_MASK, &mixer);
 
         // Start.
-        ac97.writeb(PO_CR, CR_RPBM);
+        bm.writeb(PO_CR, CR_RPBM, &mixer);
 
         let start_time = Instant::now();
 
         std::thread::sleep(time::Duration::from_millis(50));
         let elapsed = start_time.elapsed().subsec_micros() as usize;
-        let picb = ac97.readw(PO_PICB);
-        let mut civ = ac97.readb(PO_CIV);
+        let picb = bm.readw(PO_PICB);
+        let mut civ = bm.readb(PO_CIV);
         assert_eq!(civ, 0);
         let pos = (FRAGMENT_SIZE - (picb as usize * 2)) / 4;
 
@@ -658,35 +663,34 @@ mod test {
             civ
         );
 
-        assert!(ac97.readw(PO_SR) & 0x01 == 0); // DMA is running.
-        assert_ne!(0, ac97.readw(PO_PICB));
+        assert!(bm.readw(PO_SR) & 0x01 == 0); // DMA is running.
+        assert_ne!(0, bm.readw(PO_PICB));
 
         // civ should move eventually.
-        for i in 0..30 {
+        for _i in 0..30 {
             if civ != 0 {
                 break;
             }
             std::thread::sleep(time::Duration::from_millis(20));
-            civ = ac97.readb(PO_CIV);
+            civ = bm.readb(PO_CIV);
         }
 
         assert_ne!(0, civ);
-        let picb = ac97.readw(PO_PICB);
 
         // Buffer complete should be set as the IOC bit was set in the descriptor.
-        assert!(ac97.readw(MC_SR) & SR_BCIS != 0);
+        assert!(bm.readw(MC_SR) & SR_BCIS != 0);
         // Clear the BCIS bit
-        ac97.writew(MC_SR, SR_BCIS);
-        assert!(ac97.readw(MC_SR) & SR_BCIS == 0);
+        bm.writew(MC_SR, SR_BCIS);
+        assert!(bm.readw(MC_SR) & SR_BCIS == 0);
 
         // Set last valid to the two buffers from now and wait until it is hit.
-        ac97.writeb(PO_LVI, civ + 2);
+        bm.writeb(PO_LVI, civ + 2, &mixer);
         std::thread::sleep(time::Duration::from_millis(1000));
-        assert!(ac97.readw(MC_SR) & SR_LVBCI != 0);
-        assert_eq!(ac97.readb(PO_LVI), ac97.readb(PO_CIV));
+        assert!(bm.readw(MC_SR) & SR_LVBCI != 0);
+        assert_eq!(bm.readb(PO_LVI), bm.readb(PO_CIV));
 
         // Stop.
-        ac97.writeb(PO_CR, 0);
-        assert!(ac97.readw(PO_SR) & 0x01 != 0); // DMA is not running.
+        bm.writeb(PO_CR, 0, &mixer);
+        assert!(bm.readw(PO_SR) & 0x01 != 0); // DMA is not running.
     }
 }
