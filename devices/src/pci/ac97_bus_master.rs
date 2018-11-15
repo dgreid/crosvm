@@ -75,6 +75,7 @@ pub struct Ac97BusMaster {
     // Audio thread book keeping.
     audio_thread_po: Option<thread::JoinHandle<()>>,
     audio_thread_po_run: Arc<AtomicBool>,
+    po_stream_control: Option<Box<dyn StreamControl>>,
 
     // Audio server used to create playback streams.
     audio_server: Box<dyn StreamSource>,
@@ -90,8 +91,10 @@ impl Ac97BusMaster {
             regs: Arc::new(Mutex::new(Ac97BusMasterRegs::new())),
             acc_sema: 0,
 
+            // TODO - group this state in a struct.
             audio_thread_po: None,
             audio_thread_po_run: Arc::new(AtomicBool::new(false)),
+            po_stream_control: None,
 
             audio_server,
 
@@ -139,15 +142,13 @@ impl Ac97BusMaster {
         Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr);
     }
 
-    fn update_output_stream_mixer<'a>(&self, control: &mut (dyn StreamControl + 'a), mixer:
-                                      &Ac97Mixer) {
-        // The audio server only supports one volume, not separate left and right.
-        let (muted, left_volume, _right_volume) = mixer.get_master_volume();
-        control.set_volume(left_volume);
-        control.set_mute(muted);
-    }
-
     pub fn update_mixer_settings(&mut self, mixer: &Ac97Mixer) {
+        if let Some(control) = self.po_stream_control.as_mut() {
+            // The audio server only supports one volume, not separate left and right.
+            let (muted, left_volume, _right_volume) = mixer.get_master_volume();
+            control.set_volume(left_volume);
+            control.set_mute(muted);
+        }
     }
 
     fn stop_audio(&mut self, func: &Ac97Function) {
@@ -182,7 +183,8 @@ impl Ac97BusMaster {
                     DEVICE_SAMPLE_RATE,
                     buffer_samples / 2,
                 );
-                self.update_output_stream_mixer(stream_control.borrow_mut(), mixer);
+                self.po_stream_control = Some(stream_control);
+                self.update_mixer_settings(mixer);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
