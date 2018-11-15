@@ -153,6 +153,7 @@ impl Ac97 {
                 .writew(offset, data[0] as u16 | (data[1] as u16) << 8),
             l => println!("wtf mixer write length of {}", l),
         }
+        self.bus_master.update_mixer_settings(&self.mixer);
     }
 
     fn read_bus_master(&mut self, offset: u64, data: &mut [u8]) {
