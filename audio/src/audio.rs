@@ -2,11 +2,17 @@ use std::io::{self, Write};
 use std::time::{self, Duration, Instant};
 
 pub trait StreamSource: Send {
-    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream>;
+    // Returns a stream control and buffer generator object. These are separate as the buffer
+    // generator might want to be passed to the audio stream.
+    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize) ->
+        (Box<dyn StreamControl>, Box<dyn PlaybackBufferStream>);
 }
 
 pub trait PlaybackBufferStream: Send {
     fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a>;
+}
+
+pub trait StreamControl: Send + Sync {
     fn set_volume(&mut self, _scaler: f64) {}
     fn set_mute(&mut self, _mute: bool) {}
 }
@@ -96,6 +102,18 @@ impl PlaybackBufferStream for DummyStream {
     }
 }
 
+pub struct DummyStreamControl {
+}
+
+impl DummyStreamControl {
+    pub fn new() -> Self {
+        DummyStreamControl {}
+    }
+}
+
+impl StreamControl for DummyStreamControl {
+}
+
 pub struct DummyStreamSource {
 }
 
@@ -106,8 +124,11 @@ impl DummyStreamSource {
 }
 
 impl StreamSource for DummyStreamSource {
-    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize) -> Box<dyn PlaybackBufferStream> {
-        Box::new(DummyStream::new(num_channels, frame_rate, buffer_size))
+    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize)
+        -> (Box<dyn StreamControl>, Box<dyn PlaybackBufferStream>)
+    {
+        (Box::new(DummyStreamControl::new()),
+         Box::new(DummyStream::new(num_channels, frame_rate, buffer_size)))
     }
 }
 

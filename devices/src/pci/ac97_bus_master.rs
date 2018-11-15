@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use audio::{PlaybackBuffer, PlaybackBufferStream, StreamSource};
+use audio::{PlaybackBuffer, PlaybackBufferStream, StreamControl, StreamSource};
 use data_model::VolatileMemory;
 use pci::ac97_mixer::Ac97Mixer;
 use pci::ac97_regs::*;
@@ -139,12 +139,12 @@ impl Ac97BusMaster {
         Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr);
     }
 
-    fn update_output_stream_mixer<'a>(&self, stream: &mut (dyn PlaybackBufferStream + 'a), mixer:
+    fn update_output_stream_mixer<'a>(&self, control: &mut (dyn StreamControl + 'a), mixer:
                                       &Ac97Mixer) {
         // The audio server only supports one volume, not separate left and right.
         let (muted, left_volume, _right_volume) = mixer.get_master_volume();
-        stream.set_volume(left_volume);
-        stream.set_mute(muted);
+        control.set_volume(left_volume);
+        control.set_mute(muted);
     }
 
     pub fn update_mixer_settings(&mut self, mixer: &Ac97Mixer) {
@@ -177,12 +177,12 @@ impl Ac97BusMaster {
                 );
                 thread_regs.lock().unwrap().func_regs_mut(func).picb = buffer_samples as u16;
                 println!("start with buffer size {}", buffer_samples);
-                let mut output_stream = self.audio_server.new_playback_stream(
+                let (mut stream_control, mut output_stream) = self.audio_server.new_playback_stream(
                     2,
                     DEVICE_SAMPLE_RATE,
                     buffer_samples / 2,
                 );
-                self.update_output_stream_mixer(output_stream.borrow_mut(), mixer);
+                self.update_output_stream_mixer(stream_control.borrow_mut(), mixer);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
