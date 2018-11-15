@@ -3,27 +3,19 @@
 // found in the LICENSE file.
 
 use std;
+use std::borrow::BorrowMut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use audio::{PlaybackBuffer, StreamSource};
+use audio::{PlaybackBuffer, PlaybackBufferStream, StreamSource};
 use data_model::VolatileMemory;
 use pci::ac97_mixer::Ac97Mixer;
 use pci::ac97_regs::*;
 use sys_util::{EventFd, GuestAddress, GuestMemory};
 
 const DEVICE_SAMPLE_RATE: usize = 48000;
-
-pub enum BusMasterAction {
-    /// `NoAction` indicates that no action needs to be taken by the caller.
-    NoAction,
-    /// `StartAudio` indicates that audio for the given function should be started.
-    StartAudio(Ac97Function),
-    /// `StopAudio` indicates that audio for the given function should be stopped.
-    StopAudio(Ac97Function),
-}
 
 // Bus Master registers
 struct Ac97BusMasterRegs {
@@ -87,7 +79,7 @@ pub struct Ac97BusMaster {
     // Audio server used to create playback streams.
     audio_server: Box<dyn StreamSource>,
 
-    // Thread for hadlind IRQ resample events from teh guest.
+    // Thread for hadlind IRQ resample events from the guest.
     irq_resample_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -147,6 +139,17 @@ impl Ac97BusMaster {
         Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr);
     }
 
+    fn update_output_stream_mixer<'a>(&self, stream: &mut (dyn PlaybackBufferStream + 'a), mixer:
+                                      &Ac97Mixer) {
+        // The audio server only supports one volume, not separate left and right.
+        let (muted, left_volume, _right_volume) = mixer.get_master_volume();
+        stream.set_volume(left_volume);
+        stream.set_mute(muted);
+    }
+
+    pub fn update_mixer_settings(&mut self, mixer: &Ac97Mixer) {
+    }
+
     fn stop_audio(&mut self, func: &Ac97Function) {
         match func {
             Ac97Function::Input => (),
@@ -179,10 +182,7 @@ impl Ac97BusMaster {
                     DEVICE_SAMPLE_RATE,
                     buffer_samples / 2,
                 );
-                // The audio server only supports one volume, not separate left and right.
-                let (start_muted, left_volume, _right_volume) = mixer.get_master_volume();
-                output_stream.set_volume(left_volume);
-                output_stream.set_mute(start_muted);
+                self.update_output_stream_mixer(output_stream.borrow_mut(), mixer);
                 self.audio_thread_po = Some(thread::spawn(move || {
                     while thread_run.load(Ordering::Relaxed) {
                         let mut pb_buf = output_stream.next_playback_buffer();
@@ -199,8 +199,7 @@ impl Ac97BusMaster {
         }
     }
 
-    fn set_cr(&mut self, func: Ac97Function, val: u8, mixer: &Ac97Mixer) -> BusMasterAction {
-        let mut next_action = BusMasterAction::NoAction;
+    fn set_cr(&mut self, func: Ac97Function, val: u8, mixer: &Ac97Mixer) {
         if val & CR_RR != 0 {
             self.stop_audio(&func);
             let mut regs = self.regs.lock().unwrap();
@@ -212,7 +211,6 @@ impl Ac97BusMaster {
                 self.stop_audio(&func);
                 let mut regs = self.regs.lock().unwrap();
                 regs.func_regs_mut(&func).sr |= SR_DCH;
-                next_action = BusMasterAction::StopAudio(func);
             } else if cr & CR_RPBM == 0 {
                 // Not already running.
                 // Run/Pause set to run.
@@ -225,12 +223,10 @@ impl Ac97BusMaster {
                     func_regs.sr &= !SR_DCH;
                 }
                 self.start_audio(&func, mixer);
-                next_action = BusMasterAction::StartAudio(func);
             }
             let mut regs = self.regs.lock().unwrap();
             regs.func_regs_mut(&func).cr = val & CR_VALID_MASK;
         }
-        next_action
     }
 
     fn update_sr(regs: &mut Ac97BusMasterRegs, func: &Ac97Function, val: u16) {
@@ -471,35 +467,34 @@ impl Ac97BusMaster {
         }
     }
 
-    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) -> BusMasterAction {
+    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
-            return BusMasterAction::NoAction;
+            return;
         }
 
         match offset {
             0x04 => (), // RO
             0x05 => self.set_lvi(Ac97Function::Input, val),
             0x0a => (), // RO
-            0x0b => return self.set_cr(Ac97Function::Input, val, mixer),
+            0x0b => self.set_cr(Ac97Function::Input, val, mixer),
             0x14 => (), // RO
             0x15 => self.set_lvi(Ac97Function::Output, val),
             0x1a => (), // RO
-            0x1b => return self.set_cr(Ac97Function::Output, val, mixer),
+            0x1b => self.set_cr(Ac97Function::Output, val, mixer),
             0x24 => (), // RO
             0x25 => self.set_lvi(Ac97Function::Microphone, val),
             0x2a => (), // RO
-            0x2b => return self.set_cr(Ac97Function::Microphone, val, mixer),
+            0x2b => self.set_cr(Ac97Function::Microphone, val, mixer),
             0x34 => self.acc_sema = val,
             o => println!("wtf write byte to 0x{:x}", o),
         }
-        BusMasterAction::NoAction
     }
 
-    pub fn writew(&mut self, offset: u64, val: u16) -> BusMasterAction {
+    pub fn writew(&mut self, offset: u64, val: u16) {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
-            return BusMasterAction::NoAction;
+            return;
         }
         match offset {
             0x06 => self.set_sr(Ac97Function::Input, val),
@@ -510,14 +505,13 @@ impl Ac97BusMaster {
             0x28 => (), // RO
             o => println!("wtf write word to 0x{:x}", o),
         }
-        BusMasterAction::NoAction
     }
 
-    pub fn writel(&mut self, offset: u64, val: u32) -> BusMasterAction {
+    pub fn writel(&mut self, offset: u64, val: u32) {
         // Only process writes to the control register when cold reset is set.
         if self.is_cold_reset() {
             if offset != 0x2c {
-                return BusMasterAction::NoAction;
+                return;
             }
         }
         match offset {
@@ -528,7 +522,6 @@ impl Ac97BusMaster {
             0x30 => (), // RO
             o => println!("wtf write long to 0x{:x}", o),
         }
-        BusMasterAction::NoAction
     }
 }
 
