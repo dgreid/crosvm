@@ -3,13 +3,12 @@
 // found in the LICENSE file.
 
 use std;
-use std::borrow::BorrowMut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use audio::{PlaybackBuffer, PlaybackBufferStream, StreamControl, StreamSource};
+use audio::{PlaybackBuffer, StreamControl, StreamSource};
 use data_model::VolatileMemory;
 use pci::ac97_mixer::Ac97Mixer;
 use pci::ac97_regs::*;
@@ -17,7 +16,8 @@ use sys_util::{EventFd, GuestAddress, GuestMemory};
 
 const DEVICE_SAMPLE_RATE: usize = 48000;
 
-// Bus Master registers
+// Bus Master registers. Keeps the state of the bus master register values. Used to share the state
+// between the main and audio threads.
 struct Ac97BusMasterRegs {
     pi_regs: Ac97FunctionRegs,       // Input
     po_regs: Ac97FunctionRegs,       // Output
@@ -31,7 +31,7 @@ struct Ac97BusMasterRegs {
 }
 
 impl Ac97BusMasterRegs {
-    pub fn new() -> Ac97BusMasterRegs {
+    fn new() -> Ac97BusMasterRegs {
         Ac97BusMasterRegs {
             pi_regs: Ac97FunctionRegs::new(),
             po_regs: Ac97FunctionRegs::new(),
@@ -60,12 +60,14 @@ impl Ac97BusMasterRegs {
     }
 }
 
+// Internal error type used for reporting errors from the audio playback thread.
 enum PlaybackError {
     HitEnd, // Out of audio buffers to play.
 }
-
 type PlaybackResult<T> = std::result::Result<T, PlaybackError>;
 
+/// `Ac97BusMaster` emulated the bus master portion of AC97. It exposes a register read/write
+/// interface compliant with the the ICH bus master.
 pub struct Ac97BusMaster {
     // Keep guest memory as each function will use it for buffer descriptors.
     mem: GuestMemory,
@@ -85,6 +87,8 @@ pub struct Ac97BusMaster {
 }
 
 impl Ac97BusMaster {
+    /// Creates an Ac97BusMaster` object that plays audio from `mem` to streams provided by
+    /// `audio_server`.
     pub fn new(mem: GuestMemory, audio_server: Box<dyn StreamSource>) -> Self {
         Ac97BusMaster {
             mem,
@@ -102,6 +106,7 @@ impl Ac97BusMaster {
         }
     }
 
+    /// Provides the events needed to raise interrupts in the guest.
     pub fn set_irq_event_fd(&mut self, irq_evt: EventFd, irq_resample_evt: EventFd) {
         let thread_regs = self.regs.clone();
         self.regs.lock().unwrap().irq_evt = Some(irq_evt);
@@ -120,6 +125,149 @@ impl Ac97BusMaster {
         }));
     }
 
+    /// Called when `mixer` has been changed and the new values should be applied to currently
+    /// active streams.
+    pub fn update_mixer_settings(&mut self, mixer: &Ac97Mixer) {
+        if let Some(control) = self.po_stream_control.as_mut() {
+            // The audio server only supports one volume, not separate left and right.
+            let (muted, left_volume, _right_volume) = mixer.get_master_volume();
+            control.set_volume(left_volume);
+            control.set_mute(muted);
+        }
+    }
+
+    /// Checks if the bus master is in the cold reset state.
+    pub fn is_cold_reset(&self) -> bool {
+        self.regs.lock().unwrap().glob_cnt & GLOB_CNT_COLD_RESET == 0
+    }
+
+    /// Reads a byte from the given `offset`.
+    pub fn readb(&mut self, offset: u64) -> u8 {
+        let regs = self.regs.lock().unwrap();
+        match offset {
+            0x04 => regs.pi_regs.civ,
+            0x05 => regs.pi_regs.lvi,
+            0x06 => regs.pi_regs.sr as u8,
+            0x0a => regs.pi_regs.piv,
+            0x0b => regs.pi_regs.cr,
+            0x14 => regs.po_regs.civ,
+            0x15 => regs.po_regs.lvi,
+            0x16 => regs.po_regs.sr as u8,
+            0x1a => regs.po_regs.piv,
+            0x1b => regs.po_regs.cr,
+            0x24 => regs.mc_regs.civ,
+            0x25 => regs.mc_regs.lvi,
+            0x26 => regs.mc_regs.sr as u8,
+            0x2a => regs.mc_regs.piv,
+            0x2b => regs.mc_regs.cr,
+            0x34 => self.acc_sema,
+            _ => 0,
+        }
+    }
+
+    /// Reads a word from the given `offset`.
+    pub fn readw(&mut self, offset: u64) -> u16 {
+        let regs = self.regs.lock().unwrap();
+        match offset {
+            0x06 => regs.pi_regs.sr,
+            0x08 => regs.pi_regs.picb,
+            0x16 => regs.po_regs.sr,
+            0x18 => {
+                // PO PICB
+                if !self.audio_thread_po_run.load(Ordering::Relaxed) {
+                    // Not running, no need to estimate what has been consumed.
+                    regs.po_regs.picb
+                } else {
+                    // Estimate how many samples have been played since the last audio callback.
+                    let num_channels = 2;
+                    let micros = regs.po_pointer_update_time.elapsed().subsec_micros();
+                    let consumed = micros * (DEVICE_SAMPLE_RATE as u32 / 1000) / 1000;
+                    regs.po_regs
+                        .picb
+                        .saturating_sub((num_channels * consumed) as u16)
+                }
+            }
+            0x26 => regs.mc_regs.sr,
+            0x28 => regs.mc_regs.picb,
+            _ => 0,
+        }
+    }
+
+    /// Reads a 32-bit word from the given `offset`.
+    pub fn readl(&mut self, offset: u64) -> u32 {
+        let regs = self.regs.lock().unwrap();
+        match offset {
+            0x00 => regs.pi_regs.bdbar,
+            0x04 => regs.pi_regs.atomic_status_regs(),
+            0x10 => regs.po_regs.bdbar,
+            0x14 => regs.po_regs.atomic_status_regs(),
+            0x20 => regs.mc_regs.bdbar,
+            0x24 => regs.mc_regs.atomic_status_regs(),
+            0x2c => regs.glob_cnt,
+            0x30 => regs.glob_sta,
+            _ => 0,
+        }
+    }
+
+    /// Writes the byte `val` to the register specified by `offset`.
+    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) {
+        // Only process writes to the control register when cold reset is set.
+        if self.is_cold_reset() {
+            return;
+        }
+
+        match offset {
+            0x04 => (), // RO
+            0x05 => self.set_lvi(Ac97Function::Input, val),
+            0x0a => (), // RO
+            0x0b => self.set_cr(Ac97Function::Input, val, mixer),
+            0x14 => (), // RO
+            0x15 => self.set_lvi(Ac97Function::Output, val),
+            0x1a => (), // RO
+            0x1b => self.set_cr(Ac97Function::Output, val, mixer),
+            0x24 => (), // RO
+            0x25 => self.set_lvi(Ac97Function::Microphone, val),
+            0x2a => (), // RO
+            0x2b => self.set_cr(Ac97Function::Microphone, val, mixer),
+            0x34 => self.acc_sema = val,
+            o => println!("wtf write byte to 0x{:x}", o),
+        }
+    }
+
+    /// Writes the word `val` to the register specified by `offset`.
+    pub fn writew(&mut self, offset: u64, val: u16) {
+        // Only process writes to the control register when cold reset is set.
+        if self.is_cold_reset() {
+            return;
+        }
+        match offset {
+            0x06 => self.set_sr(Ac97Function::Input, val),
+            0x08 => (), // RO
+            0x16 => self.set_sr(Ac97Function::Output, val),
+            0x18 => (), // RO
+            0x26 => self.set_sr(Ac97Function::Microphone, val),
+            0x28 => (), // RO
+            o => println!("wtf write word to 0x{:x}", o),
+        }
+    }
+
+    /// Writes the 32-bit `val` to the register specified by `offset`.
+    pub fn writel(&mut self, offset: u64, val: u32) {
+        // Only process writes to the control register when cold reset is set.
+        if self.is_cold_reset() {
+            if offset != 0x2c {
+                return;
+            }
+        }
+        match offset {
+            0x00 => self.set_bdbar(Ac97Function::Input, val),
+            0x10 => self.set_bdbar(Ac97Function::Output, val),
+            0x20 => self.set_bdbar(Ac97Function::Microphone, val),
+            0x2c => self.set_glob_cnt(val), // TODO - return StopAudio if needed.
+            0x30 => (), // RO
+            o => println!("wtf write long to 0x{:x}", o),
+        }
+    }
     fn set_bdbar(&mut self, func: Ac97Function, val: u32) {
         self.regs.lock().unwrap().func_regs_mut(&func).bdbar = val & !0x07;
     }
@@ -140,15 +288,6 @@ impl Ac97BusMaster {
             sr &= !SR_BCIS;
         }
         Self::update_sr(&mut self.regs.lock().unwrap(), &func, sr);
-    }
-
-    pub fn update_mixer_settings(&mut self, mixer: &Ac97Mixer) {
-        if let Some(control) = self.po_stream_control.as_mut() {
-            // The audio server only supports one volume, not separate left and right.
-            let (muted, left_volume, _right_volume) = mixer.get_master_volume();
-            control.set_volume(left_volume);
-            control.set_mute(muted);
-        }
     }
 
     fn stop_audio(&mut self, func: &Ac97Function) {
@@ -400,131 +539,6 @@ impl Ac97BusMaster {
         buffer_len
     }
 
-    pub fn is_cold_reset(&self) -> bool {
-        self.regs.lock().unwrap().glob_cnt & GLOB_CNT_COLD_RESET == 0
-    }
-
-    pub fn readb(&mut self, offset: u64) -> u8 {
-        let regs = self.regs.lock().unwrap();
-        match offset {
-            0x04 => regs.pi_regs.civ,
-            0x05 => regs.pi_regs.lvi,
-            0x06 => regs.pi_regs.sr as u8,
-            0x0a => regs.pi_regs.piv,
-            0x0b => regs.pi_regs.cr,
-            0x14 => regs.po_regs.civ,
-            0x15 => regs.po_regs.lvi,
-            0x16 => regs.po_regs.sr as u8,
-            0x1a => regs.po_regs.piv,
-            0x1b => regs.po_regs.cr,
-            0x24 => regs.mc_regs.civ,
-            0x25 => regs.mc_regs.lvi,
-            0x26 => regs.mc_regs.sr as u8,
-            0x2a => regs.mc_regs.piv,
-            0x2b => regs.mc_regs.cr,
-            0x34 => self.acc_sema,
-            _ => 0,
-        }
-    }
-
-    pub fn readw(&mut self, offset: u64) -> u16 {
-        let regs = self.regs.lock().unwrap();
-        match offset {
-            0x06 => regs.pi_regs.sr,
-            0x08 => regs.pi_regs.picb,
-            0x16 => regs.po_regs.sr,
-            0x18 => {
-                // PO PICB
-                if !self.audio_thread_po_run.load(Ordering::Relaxed) {
-                    // Not running, no need to estimate what has been consumed.
-                    regs.po_regs.picb
-                } else {
-                    // Estimate how many samples have been played since the last audio callback.
-                    let num_channels = 2;
-                    let micros = regs.po_pointer_update_time.elapsed().subsec_micros();
-                    let consumed = micros * (DEVICE_SAMPLE_RATE as u32 / 1000) / 1000;
-                    regs.po_regs
-                        .picb
-                        .saturating_sub((num_channels * consumed) as u16)
-                }
-            }
-            0x26 => regs.mc_regs.sr,
-            0x28 => regs.mc_regs.picb,
-            _ => 0,
-        }
-    }
-
-    pub fn readl(&mut self, offset: u64) -> u32 {
-        let regs = self.regs.lock().unwrap();
-        match offset {
-            0x00 => regs.pi_regs.bdbar,
-            0x04 => regs.pi_regs.atomic_status_regs(),
-            0x10 => regs.po_regs.bdbar,
-            0x14 => regs.po_regs.atomic_status_regs(),
-            0x20 => regs.mc_regs.bdbar,
-            0x24 => regs.mc_regs.atomic_status_regs(),
-            0x2c => regs.glob_cnt,
-            0x30 => regs.glob_sta,
-            _ => 0,
-        }
-    }
-
-    pub fn writeb(&mut self, offset: u64, val: u8, mixer: &Ac97Mixer) {
-        // Only process writes to the control register when cold reset is set.
-        if self.is_cold_reset() {
-            return;
-        }
-
-        match offset {
-            0x04 => (), // RO
-            0x05 => self.set_lvi(Ac97Function::Input, val),
-            0x0a => (), // RO
-            0x0b => self.set_cr(Ac97Function::Input, val, mixer),
-            0x14 => (), // RO
-            0x15 => self.set_lvi(Ac97Function::Output, val),
-            0x1a => (), // RO
-            0x1b => self.set_cr(Ac97Function::Output, val, mixer),
-            0x24 => (), // RO
-            0x25 => self.set_lvi(Ac97Function::Microphone, val),
-            0x2a => (), // RO
-            0x2b => self.set_cr(Ac97Function::Microphone, val, mixer),
-            0x34 => self.acc_sema = val,
-            o => println!("wtf write byte to 0x{:x}", o),
-        }
-    }
-
-    pub fn writew(&mut self, offset: u64, val: u16) {
-        // Only process writes to the control register when cold reset is set.
-        if self.is_cold_reset() {
-            return;
-        }
-        match offset {
-            0x06 => self.set_sr(Ac97Function::Input, val),
-            0x08 => (), // RO
-            0x16 => self.set_sr(Ac97Function::Output, val),
-            0x18 => (), // RO
-            0x26 => self.set_sr(Ac97Function::Microphone, val),
-            0x28 => (), // RO
-            o => println!("wtf write word to 0x{:x}", o),
-        }
-    }
-
-    pub fn writel(&mut self, offset: u64, val: u32) {
-        // Only process writes to the control register when cold reset is set.
-        if self.is_cold_reset() {
-            if offset != 0x2c {
-                return;
-            }
-        }
-        match offset {
-            0x00 => self.set_bdbar(Ac97Function::Input, val),
-            0x10 => self.set_bdbar(Ac97Function::Output, val),
-            0x20 => self.set_bdbar(Ac97Function::Microphone, val),
-            0x2c => self.set_glob_cnt(val), // TODO - return StopAudio if needed.
-            0x30 => (), // RO
-            o => println!("wtf write long to 0x{:x}", o),
-        }
-    }
 }
 
 #[cfg(test)]
