@@ -1,17 +1,21 @@
 use std::io::{self, Write};
-use std::time::{self, Duration, Instant};
+use std::time::{Duration, Instant};
 
+/// `StreamSource` creates streams for playback or capture of audio.
 pub trait StreamSource: Send {
-    // Returns a stream control and buffer generator object. These are separate as the buffer
-    // generator might want to be passed to the audio stream.
-    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize) ->
-        (Box<dyn StreamControl>, Box<dyn PlaybackBufferStream>);
+    /// Returns a stream control and buffer generator object. These are separate as the buffer
+    /// generator might want to be passed to the audio stream.
+    fn new_playback_stream(&mut self, num_channels: usize, frame_rate: usize, buffer_size: usize)
+        -> (Box<dyn StreamControl>, Box<dyn PlaybackBufferStream>);
 }
 
+/// `PlaybackBufferStream` provides `PlaybackBuffer`s to fill with audio samples for playback.
 pub trait PlaybackBufferStream: Send {
     fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a>;
 }
 
+/// `StreamControl` provides a way to set the volume and mute states of a stream. `StreamControl`
+/// is separate from the stream so it can be owned by a different thread if needed.
 pub trait StreamControl: Send + Sync {
     fn set_volume(&mut self, _scaler: f64) {}
     fn set_mute(&mut self, _mute: bool) {}
@@ -63,7 +67,6 @@ pub struct DummyStream {
     buffer: Vec<u8>,
     which_buffer: bool,
     frame_size: usize,
-    frame_rate: usize,
     interval: Duration,
     next_frame: Duration,
     start_time: Option<Instant>,
@@ -79,7 +82,6 @@ impl DummyStream {
             buffer: vec![Default::default(); buffer_size * frame_size],
             which_buffer: false,
             frame_size,
-            frame_rate,
             interval,
             next_frame: interval,
             start_time: None,
@@ -139,7 +141,7 @@ mod tests {
     #[test]
     fn sixteen_bit_stereo() {
         let mut server = DummyStreamSource::new();
-        let mut stream = server.new_playback_stream(2, 48000, 480);
+        let (_, mut stream) = server.new_playback_stream(2, 48000, 480);
         let mut stream_buffer = stream.next_playback_buffer();
         assert_eq!(stream_buffer.len(), 480);
         let pb_buf = [0xa5u8; 480 * 2 * 2];
@@ -149,7 +151,7 @@ mod tests {
     #[test]
     fn consumption_rate() {
         let mut server = DummyStreamSource::new();
-        let mut stream = server.new_playback_stream(2, 48000, 480);
+        let (_, mut stream) = server.new_playback_stream(2, 48000, 480);
         let start = Instant::now();
         {
             let mut stream_buffer = stream.next_playback_buffer();
@@ -157,7 +159,7 @@ mod tests {
             assert_eq!(stream_buffer.write(&pb_buf).unwrap(), 480);
         }
         // The second call should block until the first buffer is consumed.
-        let stream_buffer = stream.next_playback_buffer();
+        let _stream_buffer = stream.next_playback_buffer();
         let elapsed = start.elapsed();
         assert!(elapsed > Duration::from_millis(10),
                "next_playback_buffer didn't block long enough {}", elapsed.subsec_millis());
