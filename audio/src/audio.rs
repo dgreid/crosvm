@@ -21,6 +21,8 @@ pub trait StreamControl: Send + Sync {
     fn set_mute(&mut self, _mute: bool) {}
 }
 
+/// `PlaybackBuffer` is one buffer that holds buffer_size audio frames. It is used to temporarily
+/// allow access to an audio buffer and notifes the owning stream of write completion when dropped.
 pub struct PlaybackBuffer<'a> {
     done_toggle: &'a mut bool,
     pub buffer: &'a mut [u8],
@@ -29,6 +31,8 @@ pub struct PlaybackBuffer<'a> {
 }
 
 impl<'a> PlaybackBuffer<'a> {
+    /// Creates a new `PlaybackBuffer` that holds a reference to the backing memory specified in
+    /// `buffer`. When dropped, the `done_toggle` will be inverted.
     pub fn new(frame_size: usize, done_toggle: &'a mut bool, buffer: &'a mut [u8]) -> Self {
         PlaybackBuffer {
             done_toggle,
