@@ -20,12 +20,15 @@ use sys_util::{EventFd, GuestMemory};
 const PCI_DEVICE_ID_INTEL_82801AA_5: u16 = 0x2415;
 
 /// AC97 audio device emulation.
+/// Provides the PCI interface for the internal Ac97 emulation.
 pub struct Ac97Dev {
     config_regs: PciConfiguration,
     ac97: Ac97,
 }
 
 impl Ac97Dev {
+    /// Creates an 'Ac97Dev' that uses the given `GuestMemory` and starts with all registers at
+    /// default values.
     pub fn new(mem: GuestMemory) -> Self {
         let config_regs = PciConfiguration::new(
             0x8086,
@@ -117,32 +120,32 @@ impl PciDevice for Ac97Dev {
 }
 
 // Audio driver controlled by the above registers.
-pub struct Ac97 {
+// Couples the bus master and mixer objects to emulate an Ac97 bus and codec.
+struct Ac97 {
     bus_master: Ac97BusMaster,
     mixer: Ac97Mixer,
 }
 
 impl Ac97 {
-    pub fn new(mem: GuestMemory) -> Self {
+    fn new(mem: GuestMemory) -> Self {
         Ac97 {
             bus_master: Ac97BusMaster::new(mem, Box::new(DummyStreamSource::new())),
             mixer: Ac97Mixer::new(),
         }
     }
 
-    pub fn set_irq_event_fd(&mut self, irq_evt: EventFd, irq_resample_evt: EventFd) {
+    fn set_irq_event_fd(&mut self, irq_evt: EventFd, irq_resample_evt: EventFd) {
         self.bus_master.set_irq_event_fd(irq_evt, irq_resample_evt);
     }
 
     fn read_mixer(&mut self, offset: u64, data: &mut [u8]) {
-        //        println!("read from mixer 0x{:x} {}", offset, data.len());
         match data.len() {
             2 => {
                 let val: u16 = self.mixer.readw(offset);
                 data[0] = val as u8;
                 data[1] = (val >> 8) as u8;
             }
-            l => println!("wtf mixer read length of {}", l),
+            l => println!("mixer read length of {}", l),
         }
     }
 
@@ -151,13 +154,13 @@ impl Ac97 {
             2 => self
                 .mixer
                 .writew(offset, data[0] as u16 | (data[1] as u16) << 8),
-            l => println!("wtf mixer write length of {}", l),
+            l => println!("mixer write length of {}", l),
         }
+        // Apply the new mixer settings to the bus master.
         self.bus_master.update_mixer_settings(&self.mixer);
     }
 
     fn read_bus_master(&mut self, offset: u64, data: &mut [u8]) {
-        //        println!("read from BM 0x{:x} {}", offset, data.len());
         match data.len() {
             1 => data[0] = self.bus_master.readb(offset),
             2 => {
@@ -172,12 +175,11 @@ impl Ac97 {
                 data[2] = (val >> 16) as u8;
                 data[3] = (val >> 24) as u8;
             }
-            l => println!("wtf read length of {}", l),
+            l => println!("read length of {}", l),
         }
     }
 
     fn write_bus_master(&mut self, offset: u64, data: &[u8]) {
-        //        println!("write to BM 0x{:x} {}", offset, data.len());
         match data.len() {
             1 => self.bus_master.writeb(offset, data[0], &self.mixer),
             2 => self
@@ -190,7 +192,7 @@ impl Ac97 {
                     | ((data[2] as u32) << 16)
                     | ((data[3] as u32) << 24),
             ),
-            l => println!("wtf write length of {}", l),
+            l => println!("write length of {}", l),
         }
     }
 }
