@@ -11,6 +11,9 @@ const AC97_VENDOR_ID2: u16 = 0x8086;
 // Master volume register is specified in 1.5dB steps.
 const MASTER_VOLUME_STEP_DB: f64 = 1.5;
 
+/// `Ac97Mixer` holds the mixer state for the AC97 bus.
+/// The mixer is used by calling the `readb`/`readw`/`readl` functions to read register values and
+/// the `writeb`/`writew`/`writel` functions to set register values.
 pub struct Ac97Mixer {
     // Mixer Registers
     master_volume_l: u8,
@@ -29,6 +32,7 @@ pub struct Ac97Mixer {
 }
 
 impl Ac97Mixer {
+    /// Creates an 'Ac97Mixer' with the standard default register values.
     pub fn new() -> Self {
         Ac97Mixer {
             master_volume_l: 0,
@@ -47,6 +51,7 @@ impl Ac97Mixer {
         }
     }
 
+    /// Reads a word from the register at `offset`.
     pub fn readw(&self, offset: u64) -> u16 {
         match offset {
             0x02 => self.get_master_reg(),
@@ -60,6 +65,7 @@ impl Ac97Mixer {
         }
     }
 
+    /// Writes a word `val` to the register `offset`.
     pub fn writew(&mut self, offset: u64, val: u16) {
         match offset {
             0x02 => self.set_master_reg(val),
@@ -81,7 +87,7 @@ impl Ac97Mixer {
         }
     }
 
-    // Returns the mute status and left and right attenuation from the master volume register.
+    /// Returns the mute status and left and right attenuation from the master volume register.
     pub fn get_master_volume(&self) -> (bool, f64, f64) {
         (self.master_mute,
          f64::from(self.master_volume_l) * MASTER_VOLUME_STEP_DB,
@@ -90,7 +96,6 @@ impl Ac97Mixer {
 
     // Handles writes to the master register (0x02).
     fn set_master_reg(&mut self, val: u16) {
-        // TODO(dgreid) set mute right away on the stream.
         self.master_mute = val & MUTE_REG_BIT != 0;
         self.master_volume_r = (val & VOL_REG_MASK) as u8;
         self.master_volume_l = (val >> 8 & VOL_REG_MASK) as u8;
@@ -144,7 +149,6 @@ impl Ac97Mixer {
 
     // Handles writes to the record_gain register (0x1c).
     fn set_record_gain_reg(&mut self, val: u16) {
-        // TODO(dgreid) set mute right away on the stream.
         self.record_gain_mute = val & MUTE_REG_BIT != 0;
         self.record_gain_r = (val & VOL_REG_MASK) as u8;
         self.record_gain_l = (val >> 8 & VOL_REG_MASK) as u8;
@@ -154,6 +158,5 @@ impl Ac97Mixer {
     fn set_power_down_reg(&mut self, val: u16) {
         self.power_down_control =
             (val & !PD_REG_STATUS_MASK) | (self.power_down_control & PD_REG_STATUS_MASK);
-        // TODO(dgreid) handle mute state changes
     }
 }
