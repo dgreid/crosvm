@@ -115,7 +115,8 @@ impl Ac97BusMaster {
                 irq_resample_evt.read().unwrap(); // TODO Unwrap.
                 { // Scope for the lock on thread_regs.
                     let mut regs = thread_regs.lock().unwrap();
-                    if regs.func_regs(&Ac97Function::Output).sr & (SR_LVBCI | SR_BCIS) != 0 {
+                    let int_mask = regs.func_regs(&Ac97Function::Output).int_mask();
+                    if regs.func_regs(&Ac97Function::Output).sr & int_mask != 0 {
                         if let Some(irq_evt) = regs.irq_evt.as_ref() {
                             irq_evt.write(1).unwrap();
                         }
@@ -223,6 +224,7 @@ impl Ac97BusMaster {
             0x0b => self.set_cr(Ac97Function::Input, val, mixer),
             0x14 => (), // RO
             0x15 => self.set_lvi(Ac97Function::Output, val),
+            0x16 => self.set_sr(Ac97Function::Output, u16::from(val)),
             0x1a => (), // RO
             0x1b => self.set_cr(Ac97Function::Output, val, mixer),
             0x24 => (), // RO
@@ -484,6 +486,13 @@ impl Ac97BusMaster {
             samples_written += samples_to_write;
         }
         regs.po_pointer_update_time = Instant::now();
+        {
+            let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
+            if func_regs.civ == func_regs.piv {
+                func_regs.piv = (func_regs.piv + 1) % 32;
+                return Ok(samples_written / num_channels);
+            }
+        }
         if Self::buffer_completed(&mut regs, &mem, &Ac97Function::Output) {
             Err(PlaybackError::HitEnd)
         } else {
@@ -504,29 +513,30 @@ impl Ac97BusMaster {
             .read_obj_from_addr(GuestAddress(descriptor_addr as u64 + 4))
             .unwrap();
 
+        let mut new_sr = regs.func_regs(func).sr;
+
         if control_reg & BD_IOC != 0 {
-            let new_sr = regs.func_regs(func).sr | SR_BCIS;
-            Self::update_sr(regs, func, new_sr);
+            new_sr |= SR_BCIS;
         }
 
-        Self::next_buffer_descriptor(regs, func)
-    }
-
-    fn next_buffer_descriptor(regs: &mut Ac97BusMasterRegs, func: &Ac97Function) -> bool {
         let civ = regs.func_regs(func).civ;
         let lvi = regs.func_regs(func).lvi;
+        println!("Buffer complete civ:{:x} lvi:{:x} piv:{:x}", civ, lvi, regs.func_regs(func).piv);
         // If the current buffer was the last valid buffer, then update the status register to
         // indicate that the end of audio was hit and possibly raise an interrupt.
+        let mut hit_end = false;
         if civ == lvi {
-            let new_sr = regs.func_regs(func).sr | SR_LVBCI | SR_DCH | SR_CELV;
-            Self::update_sr(regs, func, new_sr);
-            true
+            new_sr |= SR_LVBCI | SR_DCH | SR_CELV;
+            hit_end = true;
         } else {
             let func_regs = regs.func_regs_mut(func);
             func_regs.civ = func_regs.piv;
             func_regs.piv = (func_regs.piv + 1) % 32; // Move PIV to the next buffer.
-            false
         }
+        if new_sr != regs.func_regs(func).sr {
+            Self::update_sr(regs, func, new_sr);
+        }
+        hit_end
     }
 
     fn current_buffer_size(func_regs: &Ac97FunctionRegs, mem: &GuestMemory) -> usize {
@@ -671,7 +681,7 @@ mod test {
         // Check that frames are consumed at close to 48k.
         // This wont be exact as during unit tests the thread scheduling is highly variable.
         assert!(
-            rate > 24000 && rate < 80000, // Big range but UT thread scheduling is unstable.
+            rate > 44000 && rate < 50000, // Big range but UT thread scheduling is unstable.
             "Invalid sample rate: played {} in {}us. Rate: {} {}",
             pos,
             elapsed,
@@ -704,6 +714,9 @@ mod test {
         std::thread::sleep(time::Duration::from_millis(1000));
         assert!(bm.readw(MC_SR) & SR_LVBCI != 0);
         assert_eq!(bm.readb(PO_LVI), bm.readb(PO_CIV));
+        // Clear the LVB bit
+        bm.writeb(MC_SR, SR_LVBCI as u8, &mixer);
+        assert!(bm.readw(MC_SR) & SR_LVBCI == 0);
 
         // Stop.
         bm.writeb(PO_CR, 0, &mixer);

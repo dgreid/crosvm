@@ -184,6 +184,19 @@ impl Ac97FunctionRegs {
     pub fn atomic_status_regs(&self) -> u32 {
         self.civ as u32 | (self.lvi as u32) << 8 | (self.sr as u32) << 16
     }
+
+    /// Returns the mask for enabled interrupts. The returned mask represents the bits in the status
+    /// register that should trigger and interrupt.
+    pub fn int_mask(&self) -> u16 {
+        let mut int_mask = 0;
+        if self.cr & CR_LVBIE != 0 {
+            int_mask |= SR_LVBCI;
+        }
+        if self.cr & CR_IOCE != 0 {
+            int_mask |= SR_BCIS;
+        }
+        int_mask
+    }
 }
 
 #[derive(Copy, Clone)]
