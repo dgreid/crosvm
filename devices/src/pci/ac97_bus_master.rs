@@ -487,7 +487,7 @@ impl Ac97BusMaster {
         }
         regs.po_pointer_update_time = Instant::now();
         {
-            let mut func_regs = regs.func_regs_mut(&Ac97Function::Output);
+            let func_regs = regs.func_regs_mut(&Ac97Function::Output);
             if func_regs.civ == func_regs.piv {
                 func_regs.piv = (func_regs.piv + 1) % 32;
                 return Ok(samples_written / num_channels);
