@@ -7,3 +7,4 @@ authors = ["The Chromium OS Authors"]
 path = "src/audio.rs"
 
 [dependencies]
+alsa = "*"

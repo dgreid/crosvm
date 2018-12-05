@@ -1,3 +1,7 @@
+extern crate alsa;
+
+mod alsa_streams;
+
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
