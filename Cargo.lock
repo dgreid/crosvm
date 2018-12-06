@@ -143,6 +143,7 @@ dependencies = [
 name = "devices"
 version = "0.1.0"
 dependencies = [
+ "audio 0.1.0",
  "bit_field 0.1.0",
  "byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "data_model 0.1.0",
