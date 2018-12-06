@@ -23,6 +23,10 @@ const PCI_DEVICE_ID_INTEL_82801AA_5: u16 = 0x2415;
 /// Provides the PCI interface for the internal Ac97 emulation.
 pub struct Ac97Dev {
     config_regs: PciConfiguration,
+    // The irq events are temporarily saved here. They need to be passed to the device after the
+    // jail forks. This happens when the bus is first written.
+    irq_evt: Option<EventFd>,
+    irq_resample_evt: Option<EventFd>,
     ac97: Ac97,
 }
 
@@ -43,6 +47,8 @@ impl Ac97Dev {
 
         Ac97Dev {
             config_regs,
+            irq_evt: None,
+            irq_resample_evt: None,
             ac97: Ac97::new(mem, audio_server),
         }
     }
@@ -57,7 +63,8 @@ impl PciDevice for Ac97Dev {
         irq_pin: PciInterruptPin,
     ) {
         self.config_regs.set_irq(irq_num as u8, irq_pin);
-        self.ac97.set_irq_event_fd(irq_evt, irq_resample_evt);
+        self.irq_evt = Some(irq_evt);
+        self.irq_resample_evt = Some(irq_resample_evt);
     }
 
     fn allocate_io_bars(&mut self, resources: &mut SystemAllocator) -> Result<Vec<(u64, u64)>> {
@@ -112,6 +119,12 @@ impl PciDevice for Ac97Dev {
                 self.ac97.write_mixer(addr - bar0, data)
             }
             a if a >= bar1 && a < bar1 + MASTER_REGS_SIZE => {
+                // Check if the irq needs to be passed to the device.
+                if let (Some(irq_evt), Some(irq_resample_evt)) =
+                    (self.irq_evt.take(), self.irq_resample_evt.take())
+                {
+                    self.ac97.set_irq_event_fd(irq_evt, irq_resample_evt);
+                }
                 self.ac97.write_bus_master(addr - bar1, data)
             }
             _ => (),
