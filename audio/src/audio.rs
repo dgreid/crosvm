@@ -14,8 +14,8 @@ pub trait StreamSource: Send {
 }
 
 /// `PlaybackBufferStream` provides `PlaybackBuffer`s to fill with audio samples for playback.
-pub trait PlaybackBufferStream: Send {
-    fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a>;
+pub trait PlaybackBufferStream<F: FnOnce()>: Send {
+    fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a, F>;
 }
 
 /// `StreamControl` provides a way to set the volume and mute states of a stream. `StreamControl`
@@ -27,22 +27,28 @@ pub trait StreamControl: Send + Sync {
 
 /// `PlaybackBuffer` is one buffer that holds buffer_size audio frames. It is used to temporarily
 /// allow access to an audio buffer and notifes the owning stream of write completion when dropped.
-pub struct PlaybackBuffer<'a> {
-    done_toggle: &'a mut bool,
+pub struct PlaybackBuffer<'a, F>
+where
+    F: 'a + FnOnce()
+{
     pub buffer: &'a mut [u8],
     offset: usize, // Write offset in frames.
     frame_size: usize, // Size of a frame in bytes.
+    done_cb: FnOnce(),
 }
 
-impl<'a> PlaybackBuffer<'a> {
+impl<'a, F:'a + FnOnce()> PlaybackBuffer<'a, F> {
     /// Creates a new `PlaybackBuffer` that holds a reference to the backing memory specified in
     /// `buffer`. When dropped, the `done_toggle` will be inverted.
-    pub fn new(frame_size: usize, done_toggle: &'a mut bool, buffer: &'a mut [u8]) -> Self {
+    pub fn new<F>(frame_size: usize, buffer: &'a mut [u8], done_cb: F) -> Self
+    where
+        F: 'a + FnOnce()
+    {
         PlaybackBuffer {
-            done_toggle,
             buffer,
             offset: 0,
             frame_size,
+            done_cb,
         }
     }
 
@@ -52,7 +58,7 @@ impl<'a> PlaybackBuffer<'a> {
     }
 }
 
-impl<'a> Write for PlaybackBuffer<'a> {
+impl<'a, F> Write for PlaybackBuffer<'a, F> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let written = (&mut self.buffer[self.offset..]).write(buf)?;
         self.offset += written;
@@ -64,9 +70,9 @@ impl<'a> Write for PlaybackBuffer<'a> {
     }
 }
 
-impl<'a> Drop for PlaybackBuffer<'a> {
+impl<'a, F> Drop for PlaybackBuffer<'a, F> {
     fn drop(&mut self) {
-        *self.done_toggle = !*self.done_toggle;
+        self.done_cb();
     }
 }
 
@@ -97,8 +103,8 @@ impl DummyStream {
     }
 }
 
-impl PlaybackBufferStream for DummyStream {
-    fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a> {
+impl<F: FnOnce()> PlaybackBufferStream<F> for DummyStream {
+    fn next_playback_buffer<'a>(&'a mut self) -> PlaybackBuffer<'a, F> {
         if let Some(start_time) = self.start_time {
             if start_time.elapsed() < self.next_frame {
                 std::thread::sleep(self.next_frame - start_time.elapsed());
@@ -108,7 +114,7 @@ impl PlaybackBufferStream for DummyStream {
             self.start_time = Some(Instant::now());
             self.next_frame = self.interval;
         }
-        PlaybackBuffer::new(self.frame_size, &mut self.which_buffer, &mut self.buffer)
+        PlaybackBuffer::new(self.frame_size, &mut self.buffer, || {self.which_buffer = !self.which_buffer;})
     }
 }
 
