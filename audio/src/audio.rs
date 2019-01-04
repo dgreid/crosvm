@@ -4,6 +4,7 @@
 
 use std::error;
 use std::fmt::{self, Display};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::result::Result;
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ pub trait StreamControl: Send + Sync {
 pub trait BufferDrop {
     /// Called when an audio buffer is dropped. `nframes` indicates the number of audio frames that
     /// were read or written to the device.
-    fn trigger(&mut self, nframes: usize);
+    fn trigger(&mut self, nframes: usize, buffer: &[u8]);
 }
 
 /// Errors that are possible from a `PlaybackBuffer`.
@@ -111,7 +112,8 @@ impl<'a> Write for PlaybackBuffer<'a> {
 
 impl<'a> Drop for PlaybackBuffer<'a> {
     fn drop(&mut self) {
-        self.drop.trigger(self.offset);
+        self.drop
+            .trigger(self.offset / self.frame_size, self.buffer);
     }
 }
 
@@ -127,13 +129,15 @@ pub struct DummyStream {
 
 /// DummyStream data that is needed from the buffer complete callback.
 struct DummyBufferDrop {
-    which_buffer: bool,
+    capture_file: Option<File>,
 }
 
 impl BufferDrop for DummyBufferDrop {
-    fn trigger(&mut self, _nwritten: usize) {
+    fn trigger(&mut self, nwritten: usize, buffer: &[u8]) {
         // When a buffer completes, switch to the other one.
-        self.which_buffer ^= true;
+        if let Some(file) = self.capture_file.as_mut() {
+            file.write(&buffer[..nwritten * 4]).unwrap();
+        }
     }
 }
 
@@ -150,7 +154,15 @@ impl DummyStream {
             next_frame: interval,
             start_time: None,
             buffer_drop: DummyBufferDrop {
-                which_buffer: false,
+                capture_file: Some(
+                    OpenOptions::new()
+                        .read(false)
+                        .write(true)
+                        .truncate(true)
+                        .create(true)
+                        .open("/tmp/out.raw")
+                        .unwrap(),
+                ),
             },
         }
     }
@@ -217,9 +229,7 @@ mod tests {
     fn invalid_buffer_length() {
         // Playback buffers can't be created with a size that isn't divisible by the frame size.
         let mut pb_buf = [0xa5u8; 480 * 2 * 2 + 1];
-        let mut buffer_drop = DummyBufferDrop {
-            which_buffer: false,
-        };
+        let mut buffer_drop = DummyBufferDrop { capture_file: None };
         assert!(PlaybackBuffer::new(2, &mut pb_buf, &mut buffer_drop).is_err());
     }
 

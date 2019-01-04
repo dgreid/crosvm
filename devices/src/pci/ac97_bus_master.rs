@@ -245,6 +245,10 @@ impl Ac97BusMaster {
             0x04 => regs.pi_regs.atomic_status_regs(),
             0x10 => regs.po_regs.bdbar,
             0x14 => regs.po_regs.atomic_status_regs(),
+            0x18 => {
+                error!("readw 18");
+                0
+            }
             0x20 => regs.mc_regs.bdbar,
             0x24 => regs.mc_regs.atomic_status_regs(),
             0x2c => regs.glob_cnt,
@@ -522,15 +526,26 @@ impl Ac97BusMaster {
 
         let mut samples_written = 0;
         while samples_written / num_channels < out_buffer.frame_capacity() {
+            if samples_written > 0 {
+                error!("wrote {} samples the first time.", samples_written);
+            }
             let func_regs = regs.func_regs_mut(&Ac97Function::Output);
             let next_buffer = func_regs.civ;
             let descriptor_addr = func_regs.bdbar + next_buffer as u32 * DESCRIPTOR_LENGTH as u32;
-            let buffer_addr: u32 = mem
+            let buffer_reg: u32 = mem
                 .read_obj_from_addr(GuestAddress(descriptor_addr as u64))
                 .map_err(PlaybackError::ReadingGuestBufferAddress)?;
+            let buffer_addr = buffer_reg & !3;
             let sample_size = 2;
 
+            let current_buffer_size = Self::current_buffer_size(func_regs, mem).unwrap();
+            if current_buffer_size != func_regs.picb as usize {
+                error!("size mismatch {} {}", current_buffer_size, func_regs.picb);
+            }
             let samples_remaining = func_regs.picb as usize - samples_written;
+            if samples_remaining < out_buffer.frame_capacity() * num_channels - samples_written {
+                error!("only space for {} samples.", samples_remaining);
+            }
             if samples_remaining == 0 {
                 break;
             }
@@ -538,11 +553,15 @@ impl Ac97BusMaster {
                 out_buffer.frame_capacity() * num_channels - samples_written,
                 samples_remaining,
             );
-            let read_pos = (buffer_addr + samples_written as u32 * sample_size) as u64;
-            mem.get_slice(read_pos, samples_to_write as u64 * sample_size as u64)
+            let bytes_written = mem
+                .get_slice(
+                    buffer_addr as u64,
+                    samples_to_write as u64 * sample_size as u64,
+                )
                 .map_err(PlaybackError::ReadingGuestSamples)?
                 .write_to(out_buffer)
                 .map_err(PlaybackError::WritingOutput)?;
+            //     error!("pos {:x} {:x}", read_pos, bytes_written);
             samples_written += samples_to_write;
         }
         regs.po_pointer_update_time = Instant::now();
@@ -700,7 +719,7 @@ mod test {
         const LVI_MASK: u8 = 0x1f; // Five bits for 32 total entries.
         const IOC_MASK: u32 = 0x8000_0000; // Interrupt on completion.
         let num_buffers = LVI_MASK as usize + 1;
-        const BUFFER_SIZE: usize = 32768;
+        const BUFFER_SIZE: usize = 16384;
         const FRAGMENT_SIZE: usize = BUFFER_SIZE / 2;
 
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
