@@ -30,6 +30,7 @@ sandboxed-libusb = ["usb_util/sandboxed-libusb"]
 
 [dependencies]
 arch = { path = "arch" }
+audio_streams = "*"
 bit_field = { path = "bit_field" }
 devices = { path = "devices" }
 gpu_buffer = { path = "gpu_buffer", optional = true }
