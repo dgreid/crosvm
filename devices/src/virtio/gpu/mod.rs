@@ -750,7 +750,7 @@ impl VirtioDevice for Gpu {
             let device = match Device::new(drm_card) {
                 Ok(d) => d,
                 Err(()) => {
-                    error!("failed to open device");
+                    error!("failed to open device {:?}", drm_card);
                     return;
                 }
             };

@@ -96,12 +96,5 @@ RUN rm -r /scratch /usr/bin/meson
 RUN ldconfig
 
 # The /build directory is used so that the bind mounted /src volume does not get scribbled on.
-ENV CARGO_TARGET_DIR=/build
-RUN mkdir -p $CARGO_TARGET_DIR
 WORKDIR /src
-CMD cargo --version && rustc --version && rustfmt --version && \
-    echo "Running cargo test" && \
-    cargo test --no-fail-fast --all-features --all --exclude aarch64 $TEST_FLAGS -- \
-    --test-threads=1 $TEST_RUNNER_FLAGS && \
-    echo "Running cargo fmt" && \
-    cargo fmt --all -- --check
+CMD cargo build --features=gpu

@@ -521,8 +521,12 @@ fn create_virtio_devs(
                     getegid()
                 }
             };
-            jail.change_uid(crosvm_uid);
-            jail.change_gid(crosvm_gid);
+            if crosvm_uid != 0 {
+                jail.change_uid(crosvm_uid);
+            }
+            if crosvm_gid != 0 {
+                jail.change_gid(crosvm_gid);
+            }
             jail.uidmap(&format!("{0} {0} 1", crosvm_uid))
                 .map_err(Error::SettingUidMap)?;
             jail.gidmap(&format!("{0} {0} 1", crosvm_gid))
