@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+extern crate data_model;
 extern crate sys_util;
 
 use std::ffi::CStr;
@@ -9,6 +10,7 @@ use std::fmt::{self, Display};
 use std::io::{Read, Seek, SeekFrom};
 use std::mem;
 
+use data_model::VolatileMemory;
 use sys_util::{GuestAddress, GuestMemory};
 
 #[allow(dead_code)]
@@ -156,16 +158,10 @@ pub fn load_cmdline(
         return Ok(());
     }
 
-    let end = guest_addr
-        .checked_add(len as u64 + 1)
-        .ok_or(Error::CommandLineOverflow)?; // Extra for null termination.
-    if end > guest_mem.end_addr() {
-        return Err(Error::CommandLineOverflow)?;
-    }
-
     guest_mem
-        .write_at_addr(cmdline.to_bytes_with_nul(), guest_addr)
-        .map_err(|_| Error::CommandLineCopy)?;
+        .get_slice(guest_addr.0, len as u64 + 1) // + 1 for null
+        .map_err(|_| Error::CommandLineOverflow)?
+        .copy_from(cmdline.to_bytes_with_nul());
 
     Ok(())
 }

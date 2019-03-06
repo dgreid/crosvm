@@ -3,10 +3,12 @@
 // found in the LICENSE file.
 
 extern crate arch;
+extern crate data_model;
 
 use arch::fdt::{begin_node, end_node, finish_fdt, property_string, start_fdt, Error};
 use bootparam::setup_data;
 use bootparam::SETUP_DTB;
+use data_model::VolatileMemory;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -81,11 +83,10 @@ pub fn create_fdt(
         .map_err(|_| Error::FdtGuestMemoryWriteError)?;
 
     let fdt_data_address = GuestAddress(fdt_load_offset + mem::size_of::<setup_data>() as u64);
-    let written = guest_mem
-        .write_at_addr(fdt_final.as_slice(), fdt_data_address)
-        .map_err(|_| Error::FdtGuestMemoryWriteError)?;
-    if written < fdt_data_size {
-        return Err(Box::new(Error::FdtGuestMemoryWriteError));
-    }
+    let write_len = fdt_final.as_slice().len();
+    guest_mem
+        .get_slice(fdt_data_address.0, write_len as u64)
+        .map_err(|_| Error::FdtGuestMemoryWriteError)?
+        .copy_from(fdt_final.as_slice());
     Ok(fdt_data_size)
 }

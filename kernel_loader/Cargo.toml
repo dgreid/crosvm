@@ -3,5 +3,6 @@ name = "kernel_loader"
 version = "0.1.0"
 
 [dependencies]
+data_model = { path = "../data_model" }
 libc = "*"
 sys_util = { path = "../sys_util" }

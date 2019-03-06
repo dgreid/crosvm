@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use data_model::VolatileMemory;
 use p9;
 use sys_util::{Error as SysError, EventFd, GuestAddress, GuestMemory, PollContext, PollToken};
 use virtio_sys::vhost::VIRTIO_F_VERSION_1;
@@ -180,17 +181,17 @@ where
                 })?;
 
             let len = min(buf.len(), (current.len - self.offset) as usize);
-            let count = self
-                .mem
-                .write_at_addr(&buf[..len], addr)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            self.mem
+                .get_slice(addr.0, len as u64)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .copy_from(&buf[..len]);
 
-            // |count| has to fit into a u32 because it must be less than or equal to
+            // |len| has to fit into a u32 because it must be less than or equal to
             // |current.len|, which does fit into a u32.
-            self.offset += count as u32;
-            self.bytes_written += count as u32;
+            self.offset += len as u32;
+            self.bytes_written += len as u32;
 
-            Ok(count)
+            Ok(len)
         } else {
             // No more room in the descriptor chain.
             Ok(0)

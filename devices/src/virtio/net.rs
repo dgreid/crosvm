@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use data_model::VolatileMemory;
 use libc::EAGAIN;
 use net_sys;
 use net_util::{Error as TapError, MacAddress, TapT};
@@ -124,17 +125,14 @@ where
                     }
                     let limit = cmp::min(write_count + desc.len as usize, self.rx_count);
                     let source_slice = &self.rx_buf[write_count..limit];
-                    let write_result = self.mem.write_at_addr(source_slice, desc.addr);
+                    let dest_slice =
+                        match self.mem.get_slice(desc.addr.0, source_slice.len() as u64) {
+                            Ok(s) => s,
+                            Err(_) => break,
+                        };
+                    dest_slice.copy_from(source_slice);
 
-                    match write_result {
-                        Ok(sz) => {
-                            write_count += sz;
-                        }
-                        Err(e) => {
-                            warn!("net: rx: failed to write slice: {}", e);
-                            break;
-                        }
-                    };
+                    write_count += desc.len as usize;
 
                     if write_count >= self.rx_count {
                         break;

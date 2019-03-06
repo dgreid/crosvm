@@ -41,6 +41,8 @@ pub enum VolatileMemoryError {
     Overflow { base: u64, offset: u64 },
 }
 
+impl std::error::Error for VolatileMemoryError {}
+
 impl Display for VolatileMemoryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::VolatileMemoryError::*;
