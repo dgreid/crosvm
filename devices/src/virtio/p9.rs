@@ -125,16 +125,16 @@ where
                     )
                 })?;
             let len = min(buf.len(), (current.len - self.offset) as usize);
-            let count = self
-                .mem
-                .read_at_addr(&mut buf[..len], addr)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            self.mem
+                .get_slice(addr.0, len as u64)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .copy_to(buf);
 
-            // |count| has to fit into a u32 because it must be less than or equal to
+            // |len| has to fit into a u32 because it must be less than or equal to
             // |current.len|, which does fit into a u32.
-            self.offset += count as u32;
+            self.offset += len as u32;
 
-            Ok(count)
+            Ok(len)
         } else {
             // Nothing left to read.
             Ok(0)

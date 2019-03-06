@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use data_model::{VolatileMemory, VolatileMemoryError};
 use sys_util::{EventFd, GuestMemory, GuestMemoryError, PollContext, PollToken};
 use tpm2;
 
@@ -76,8 +77,9 @@ impl Device {
         }
 
         let mut command = vec![0u8; read_desc.len as usize];
-        mem.read_exact_at_addr(&mut command, read_desc.addr)
-            .map_err(Error::Read)?;
+        mem.get_slice(read_desc.addr.0, command.len())
+            .map_err(Error::Read)?
+            .copy_to(&mut command);
 
         let response = self.simulator.execute_command(&command);
 
@@ -302,7 +304,7 @@ enum Error {
     ExpectedSecondBuffer,
     ExpectedWriteOnly,
     CommandTooLong { size: usize },
-    Read(GuestMemoryError),
+    Read(VolatileMemoryError),
     ResponseTooLong { size: usize },
     BufferTooSmall { size: usize, required: usize },
     Write(GuestMemoryError),

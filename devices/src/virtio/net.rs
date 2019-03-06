@@ -198,19 +198,17 @@ where
                 if desc.is_write_only() {
                     break;
                 }
-                let limit = cmp::min(read_count + desc.len as usize, frame.len());
-                let read_result = self
-                    .mem
-                    .read_at_addr(&mut frame[read_count..limit as usize], desc.addr);
-                match read_result {
-                    Ok(sz) => {
-                        read_count += sz;
-                    }
+                let nread = cmp::min(desc.len as usize, frame.len() - read_count);
+                let source_slice = match self.mem.get_slice(desc.addr.0, nread as u64) {
+                    Ok(s) => s,
                     Err(e) => {
                         warn!("net: tx: failed to read slice: {}", e);
                         break;
                     }
-                }
+                };
+                source_slice.copy_to(&mut frame[read_count..]);
+
+                read_count += nread;
                 next_desc = desc.next_descriptor();
             }
 

@@ -174,64 +174,6 @@ impl GuestMemory {
         Ok(())
     }
 
-    /// Reads to a slice from guest memory at the specified guest address.
-    /// Returns the number of bytes read.  The number of bytes read can
-    /// be less than the length of the slice if there isn't enough room in the
-    /// memory region.
-    ///
-    /// # Examples
-    /// * Read a slice of length 16 at guestaddress 0x200.
-    ///
-    /// ```
-    /// # use sys_util::{GuestAddress, GuestMemory, MemoryMapping};
-    /// # fn test_write_u64() -> Result<(), ()> {
-    /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
-    ///     let buf = &mut [0u8; 16];
-    ///     let res = gm.read_at_addr(buf, GuestAddress(0x200)).map_err(|_| ())?;
-    ///     assert_eq!(16, res);
-    ///     Ok(())
-    /// # }
-    /// ```
-    pub fn read_at_addr(&self, mut buf: &mut [u8], guest_addr: GuestAddress) -> Result<usize> {
-        self.do_in_region(guest_addr, move |mapping, offset| {
-            mapping
-                .read_slice(buf, offset)
-                .map_err(|e| Error::MemoryAccess(guest_addr, e))
-        })
-    }
-
-    /// Reads from guest memory at the specified address to fill the entire
-    /// buffer.
-    ///
-    /// Returns an error if there isn't enough room in the memory region to fill
-    /// the entire buffer. Part of the buffer may have been filled nevertheless.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use sys_util::{guest_memory, GuestAddress, GuestMemory, MemoryMapping};
-    ///
-    /// fn test_read_exact() -> guest_memory::Result<()> {
-    ///     let ranges = &[(GuestAddress(0x1000), 0x400)];
-    ///     let gm = GuestMemory::new(ranges)?;
-    ///     let mut buffer = [0u8; 0x200];
-    ///     gm.read_exact_at_addr(&mut buffer, GuestAddress(0x1200))
-    /// }
-    /// ```
-    pub fn read_exact_at_addr(&self, buf: &mut [u8], guest_addr: GuestAddress) -> Result<()> {
-        let expected = buf.len();
-        let completed = self.read_at_addr(buf, guest_addr)?;
-        if expected == completed {
-            Ok(())
-        } else {
-            Err(Error::ShortRead {
-                expected,
-                completed,
-            })
-        }
-    }
-
     /// Reads an object from guest memory at the given guest address.
     /// Reading from a volatile area isn't strictly safe as it could change
     /// mid-read.  However, as long as the type T is plain old data and can
