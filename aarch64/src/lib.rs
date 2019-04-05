@@ -305,6 +305,7 @@ impl arch::LinuxArch for AArch64 {
             io_bus,
             mmio_bus,
             pid_debug_label_map,
+            rt_cpus: components.rt_cpus,
         })
     }
 }

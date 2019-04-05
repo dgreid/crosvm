@@ -350,6 +350,9 @@ impl arch::LinuxArch for X8664arch {
         for param in components.extra_kernel_params {
             cmdline.insert_str(&param).map_err(Error::Cmdline)?;
         }
+        for param in components.init_params {
+            cmdline.insert_init_arg(&param).map_err(Error::Cmdline)?;
+        }
 
         // separate out load_kernel from other setup to get a specific error for
         // kernel loading
@@ -379,6 +382,7 @@ impl arch::LinuxArch for X8664arch {
             io_bus,
             mmio_bus,
             pid_debug_label_map,
+            rt_cpus: components.rt_cpus,
         })
     }
 }

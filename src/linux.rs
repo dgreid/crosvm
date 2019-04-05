@@ -39,8 +39,8 @@ use sys_util::net::{UnixSeqpacket, UnixSeqpacketListener, UnlinkUnixSeqpacketLis
 use sys_util::{
     self, block_signal, clear_signal, drop_capabilities, error, flock, get_blocked_signals,
     get_group_id, get_user_id, getegid, geteuid, info, register_signal_handler, set_cpu_affinity,
-    validate_raw_fd, warn, EventFd, FlockOperation, GuestMemory, Killable, PollContext, PollToken,
-    SignalFd, Terminal, TimerFd, SIGRTMIN,
+    set_rt_prio_limit, set_rt_round_robin, validate_raw_fd, warn, EventFd, FlockOperation,
+    GuestMemory, Killable, PollContext, PollToken, SignalFd, Terminal, TimerFd, SIGRTMIN,
 };
 #[cfg(feature = "gpu-forward")]
 use sys_util::{GuestAddress, MemoryMapping, Protection};
@@ -964,6 +964,7 @@ impl VcpuRunMode {
 fn run_vcpu(
     vcpu: Vcpu,
     cpu_id: u32,
+    run_rt: bool,
     vcpu_affinity: Vec<usize>,
     start_barrier: Arc<Barrier>,
     io_bus: devices::Bus,
@@ -978,6 +979,16 @@ fn run_vcpu(
             if vcpu_affinity.len() != 0 {
                 if let Err(e) = set_cpu_affinity(vcpu_affinity) {
                     error!("Failed to set CPU affinity: {}", e);
+                }
+            }
+
+            if run_rt {
+                const DEFAULT_VCPU_RT_LEVEL: u64 = 6;
+                if let Err(e) = set_rt_prio_limit(DEFAULT_VCPU_RT_LEVEL) {
+                    error!("Failed to set real-time limit: {}", e);
+                }
+                if let Err(e) = set_rt_round_robin(DEFAULT_VCPU_RT_LEVEL as i32) {
+                    error!("Failed to set real-time priority: {}", e);
                 }
             }
 
@@ -1160,7 +1171,9 @@ pub fn run_config(cfg: Config) -> Result<()> {
             .map_or(Ok(None), |v| v.map(Some))?,
         initrd_image,
         extra_kernel_params: cfg.params.clone(),
+        init_params: cfg.init_params.clone(),
         wayland_dmabuf: cfg.wayland_dmabuf,
+        rt_cpus: cfg.rt_cpus.clone(),
     };
 
     let control_server_socket = match &cfg.socket_path {
@@ -1381,6 +1394,7 @@ fn run_control(
         let handle = run_vcpu(
             vcpu,
             cpu_id as u32,
+            linux.rt_cpus.contains(&cpu_id),
             linux.vcpu_affinity.clone(),
             vcpu_thread_barrier.clone(),
             linux.io_bus.clone(),

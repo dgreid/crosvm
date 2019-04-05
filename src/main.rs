@@ -77,12 +77,14 @@ impl TouchDeviceOption {
 
 pub struct Config {
     vcpu_count: Option<u32>,
+    rt_cpus: Vec<usize>,
     vcpu_affinity: Vec<usize>,
     memory: Option<usize>,
     kernel_path: PathBuf,
     android_fstab: Option<PathBuf>,
     initrd_path: Option<PathBuf>,
     params: Vec<String>,
+    init_params: Vec<String>,
     socket_path: Option<PathBuf>,
     plugin: Option<PathBuf>,
     plugin_root: Option<PathBuf>,
@@ -119,12 +121,14 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             vcpu_count: None,
+            rt_cpus: Vec::new(),
             vcpu_affinity: Vec::new(),
             memory: None,
             kernel_path: PathBuf::default(),
             android_fstab: None,
             initrd_path: None,
             params: Vec::new(),
+            init_params: Vec::new(),
             socket_path: None,
             plugin: None,
             plugin_root: None,
@@ -349,6 +353,14 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
                 ));
             }
             cfg.vcpu_affinity = parse_cpu_set(value.unwrap())?;
+        }
+        "rt-cpus" => {
+            if !cfg.rt_cpus.is_empty() {
+                return Err(argument::Error::TooManyArguments(
+                    "`rt-cpus` already given".to_owned(),
+                ));
+            }
+            cfg.rt_cpus = parse_cpu_set(value.unwrap())?;
         }
         "mem" => {
             if cfg.memory.is_some() {
@@ -779,6 +791,7 @@ fn run_vm(args: std::env::Args) -> std::result::Result<(), ()> {
                                 "Extra kernel or plugin command line arguments. Can be given more than once."),
           Argument::short_value('c', "cpus", "N", "Number of VCPUs. (default: 1)"),
           Argument::value("cpu-affinity", "CPUSET", "Comma-separated list of CPUs or CPU ranges to run VCPUs on. (e.g. 0,1-3,5) (default: no mask)"),
+          Argument::value("rt-cpus", "CPUSET", "Comma-separated list of CPUs or CPU ranges to run VCPUs on. (e.g. 0,1-3,5) (default: none)"),
           Argument::short_value('m',
                                 "mem",
                                 "N",
@@ -876,6 +889,25 @@ fn run_vm(args: std::env::Args) -> std::result::Result<(), ()> {
                 "`plugin-root` requires `plugin`".to_owned(),
             ));
         }
+        if cfg.rt_cpus.len() != 0 {
+            let cpu_string = cfg
+                .rt_cpus
+                .iter()
+                .map(|&cpu| {
+                    if cpu >= cfg.vcpu_count.unwrap_or(1) as usize {
+                        Err(argument::Error::ExpectedArgument(
+                            "`rt-cpus` must be contained in `cpus`".to_owned(),
+                        ))
+                    } else {
+                        Ok(cpu.to_string())
+                    }
+                })
+                .collect::<Result<Vec<String>, argument::Error>>()?
+                .join(",");
+            let rt_init_arg = "--rt-cpus=".to_owned() + &cpu_string;
+            cfg.init_params.push(rt_init_arg);
+        }
+
         Ok(())
     });
 

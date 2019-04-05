@@ -34,7 +34,9 @@ pub struct VmComponents {
     pub android_fstab: Option<File>,
     pub initrd_image: Option<File>,
     pub extra_kernel_params: Vec<String>,
+    pub init_params: Vec<String>,
     pub wayland_dmabuf: bool,
+    pub rt_cpus: Vec<usize>,
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
@@ -50,6 +52,7 @@ pub struct RunnableLinuxVm {
     pub io_bus: Bus,
     pub mmio_bus: Bus,
     pub pid_debug_label_map: BTreeMap<u32, String>,
+    pub rt_cpus: Vec<usize>,
 }
 
 /// The device and optional jail.
