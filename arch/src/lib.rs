@@ -4,6 +4,7 @@
 
 pub mod android;
 pub mod fdt;
+pub mod gdb;
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
@@ -23,6 +24,9 @@ use kvm::{IoeventAddress, Kvm, Vcpu, Vm};
 use resources::SystemAllocator;
 use sync::Mutex;
 use sys_util::{syslog, EventFd, GuestAddress, GuestMemory, GuestMemoryError};
+use vm_control::VmControlRequestSocket;
+
+use gdb::GdbControl;
 
 pub enum VmImage {
     Kernel(File),
@@ -40,6 +44,7 @@ pub struct VmComponents {
     pub initrd_image: Option<File>,
     pub extra_kernel_params: Vec<String>,
     pub wayland_dmabuf: bool,
+    pub gdb: Option<(u32, VmControlRequestSocket)>, // port and control socket.
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
@@ -55,6 +60,7 @@ pub struct RunnableLinuxVm {
     pub io_bus: Bus,
     pub mmio_bus: Bus,
     pub pid_debug_label_map: BTreeMap<u32, String>,
+    pub gdb_stub: Option<Arc<Mutex<dyn GdbControl + Send>>>,
 }
 
 /// The device and optional jail.

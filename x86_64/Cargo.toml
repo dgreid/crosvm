@@ -11,16 +11,19 @@ assertions = { path = "../assertions" }
 byteorder = "*"
 data_model = { path = "../data_model" }
 devices = { path = "../devices" }
+gdb-remote-protocol = { path = "/usr/local/google/home/dgreid/third_party/rust-gdb-remote-protocol" }
 io_jail = { path = "../io_jail" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 kernel_loader = { path = "../kernel_loader" }
 kvm = { path = "../kvm" }
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
+msg_socket = { path = "../msg_socket" }
 remain = "*"
 resources = { path = "../resources" }
 sync = { path = "../sync" }
 sys_util = { path = "../sys_util" }
+vm_control = { path = "../vm_control" }
 
 [build-dependencies]
 cc = "=1.0.25"

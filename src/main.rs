@@ -127,6 +127,7 @@ pub struct Config {
     virtio_keyboard: Option<PathBuf>,
     virtio_input_evdevs: Vec<PathBuf>,
     split_irqchip: bool,
+    gdb: Option<u32>, // specifies the port to be used for gdb if gdb is to be used.
 }
 
 impl Default for Config {
@@ -169,6 +170,7 @@ impl Default for Config {
             virtio_keyboard: None,
             virtio_input_evdevs: Vec::new(),
             split_irqchip: false,
+            gdb: None,
         }
     }
 }
@@ -313,6 +315,18 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
                 });
             }
             cfg.executable_path = Some(Executable::Kernel(kernel_path));
+        }
+        "gdb" => {
+            let port =
+                value
+                    .unwrap_or("2424")
+                    .parse()
+                    .map_err(|_| argument::Error::InvalidValue {
+                        value: value.unwrap().to_owned(),
+                        expected: "expected a valid port number",
+                    })?;
+            cfg.gdb = Some(port);
+            syslog::echo_stderr(false);
         }
         "android-fstab" => {
             if cfg.android_fstab.is_some()
@@ -867,6 +881,7 @@ fn run_vm(args: std::env::Args) -> std::result::Result<(), ()> {
                           "File descriptor for configured tap device. A different virtual network card will be added each time this argument is given."),
           #[cfg(feature = "gpu")]
           Argument::flag("gpu", "(EXPERIMENTAL) enable virtio-gpu device"),
+          Argument::value("gdb", "PORT", "(EXPERIMENTAL) gdb on the given port"),
           #[cfg(feature = "tpm")]
           Argument::flag("software-tpm", "enable a software emulated trusted platform module device"),
           Argument::value("evdev", "PATH", "Path to an event device node. The device will be grabbed (unusable from the host) and made available to the guest with the same configuration it shows on the host"),

@@ -68,6 +68,8 @@ pub enum VmRunMode {
     Suspending,
     /// Indicates that the VM is exiting all processes.
     Exiting,
+    /// Indicates that the VM is in a breakpoint waiting for the debugger to do continue.
+    Breakpoint,
 }
 
 impl Display for VmRunMode {
@@ -78,6 +80,7 @@ impl Display for VmRunMode {
             Running => write!(f, "running"),
             Suspending => write!(f, "suspending"),
             Exiting => write!(f, "exiting"),
+            Breakpoint => write!(f, "breakpoint"),
         }
     }
 }

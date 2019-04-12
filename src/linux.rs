@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std;
+
 use std::cmp::min;
 use std::convert::TryFrom;
 use std::error::Error as StdError;
@@ -26,6 +27,7 @@ use libc::{self, c_int, gid_t, uid_t};
 use audio_streams::DummyStreamSource;
 use devices::virtio::{self, VirtioDevice};
 use devices::{self, HostBackendDeviceProvider, PciDevice, VirtioPciDevice, XhciController};
+use gdb_remote_protocol::StopReason as GdbStopReason;
 use io_jail::{self, Minijail};
 use kvm::*;
 use libcras::CrasClient;
@@ -50,11 +52,13 @@ use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket, DiskControlResult,
     UsbControlSocket, VmControlResponseSocket, VmMemoryControlRequestSocket,
-    VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse, VmRunMode,
+    VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse, VmRequest, VmResponse,
+    VmRunMode,
 };
 
 use crate::{Config, DiskOption, Executable, TouchDeviceOption};
 
+use arch::gdb::GdbControl;
 use arch::{self, LinuxArch, RunnableLinuxVm, VirtioDeviceStub, VmComponents, VmImage};
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -132,6 +136,7 @@ pub enum Error {
     SettingGidMap(io_jail::Error),
     SettingUidMap(io_jail::Error),
     SignalFd(sys_util::SignalFdError),
+    SpawnGdbServer(io::Error),
     SpawnVcpu(io::Error),
     TimerFd(sys_util::Error),
     ValidateRawFd(sys_util::Error),
@@ -229,6 +234,7 @@ impl Display for Error {
             SettingGidMap(e) => write!(f, "error setting GID map: {}", e),
             SettingUidMap(e) => write!(f, "error setting UID map: {}", e),
             SignalFd(e) => write!(f, "failed to read signal fd: {}", e),
+            SpawnGdbServer(e) => write!(f, "failed to spawn GDB thread: {}", e),
             SpawnVcpu(e) => write!(f, "failed to spawn VCPU thread: {}", e),
             TimerFd(e) => write!(f, "failed to read timer fd: {}", e),
             ValidateRawFd(e) => write!(f, "failed to validate raw fd: {}", e),
@@ -1052,6 +1058,7 @@ fn run_vcpu(
     exit_evt: EventFd,
     requires_kvmclock_ctrl: bool,
     from_main_channel: mpsc::Receiver<VCpuControl>,
+    gdb_stub: Option<Arc<Mutex<dyn GdbControl + Send>>>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
@@ -1117,6 +1124,18 @@ fn run_vcpu(
                                             cpu_id, e
                                         );
                                         }
+                                    }
+                                }
+                                VmRunMode::Breakpoint => {
+                                    if let Some(gdb_stub) = &gdb_stub {
+                                        // Wait for action from the debugger.
+                                        let mut gdb = gdb_stub.lock();
+                                        gdb.cpu_stopped(
+                                            cpu_id as usize,
+                                            Some(GdbStopReason::Signal(5)),
+                                        );
+                                    } else {
+                                        error!("Hit breakpoint but not debugging.");
                                     }
                                 }
                                 VmRunMode::Exiting => break 'vcpu_loop,
@@ -1252,6 +1271,17 @@ pub fn run_config(cfg: Config) -> Result<()> {
         _ => panic!("Did not receive a bios or kernel, should be impossible."),
     };
 
+    let mut control_sockets = Vec::new();
+    let gdb_socket = if let Some(port) = cfg.gdb {
+        // GDB needs a control socket to interrupt vcpus.
+        let (gdb_host_socket, gdb_control_socket) =
+            msg_socket::pair::<VmResponse, VmRequest>().map_err(Error::CreateSocket)?;
+        control_sockets.push(TaggedControlSocket::Vm(gdb_host_socket));
+        Some((port, gdb_control_socket))
+    } else {
+        None
+    };
+
     let components = VmComponents {
         memory_size: (cfg.memory.unwrap_or(256) << 20) as u64,
         vcpu_count: cfg.vcpu_count.unwrap_or(1),
@@ -1265,6 +1295,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
         initrd_image,
         extra_kernel_params: cfg.params.clone(),
         wayland_dmabuf: cfg.wayland_dmabuf,
+        gdb: gdb_socket,
     };
 
     let control_server_socket = match &cfg.socket_path {
@@ -1274,7 +1305,6 @@ pub fn run_config(cfg: Config) -> Result<()> {
         None => None,
     };
 
-    let mut control_sockets = Vec::new();
     let (wayland_host_socket, wayland_device_socket) =
         msg_socket::pair::<VmMemoryResponse, VmMemoryRequest>().map_err(Error::CreateSocket)?;
     control_sockets.push(TaggedControlSocket::VmMemory(wayland_host_socket));
@@ -1372,6 +1402,36 @@ pub fn run_config(cfg: Config) -> Result<()> {
     )
 }
 
+// TODO(dgreid) move to a gdb file or maybe in arch.
+fn gdb_thread(gdb_stub: Arc<Mutex<dyn GdbControl>>) {
+    use std::net::TcpListener;
+
+    let port = {
+        let stub = gdb_stub.lock();
+        stub.port()
+    };
+
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
+    for res in listener.incoming() {
+        if let Ok(mut stream) = res {
+            {
+                let mut stub = gdb_stub.lock();
+                stub.set_output(Box::new(stream.try_clone().unwrap()));
+            }
+            loop {
+                let mut buf = [0u8; 1];
+                if let Ok(nread) = stream.read(&mut buf) {
+                    if nread == 0 {
+                        break;
+                    }
+                    let mut stub = gdb_stub.lock();
+                    stub.next_byte(buf[0]);
+                }
+            }
+        }
+    }
+}
+
 fn run_control(
     mut linux: RunnableLinuxVm,
     control_server_socket: Option<UnlinkUnixSeqpacketListener>,
@@ -1420,6 +1480,19 @@ fn run_control(
     stdin_lock
         .set_raw_mode()
         .expect("failed to set terminal raw mode");
+
+    let gdb_handle = if let Some(gdb_stub) = linux.gdb_stub.clone() {
+        Some(
+            thread::Builder::new()
+                .name("gdb".to_owned())
+                .spawn(move || {
+                    gdb_thread(gdb_stub);
+                })
+                .map_err(Error::SpawnGdbServer)?,
+        )
+    } else {
+        None
+    };
 
     let poll_ctx = PollContext::new().map_err(Error::CreatePollContext)?;
     poll_ctx
@@ -1494,6 +1567,7 @@ fn run_control(
             linux.exit_evt.try_clone().map_err(Error::CloneEventFd)?,
             linux.vm.check_extension(Cap::KvmclockCtrl),
             from_main_channel,
+            linux.gdb_stub.clone(),
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
@@ -1774,6 +1848,12 @@ fn run_control(
             }
             Err(e) => error!("failed to kill vcpu thread: {}", e),
         }
+    }
+
+    if let Some(gdb_handle) = gdb_handle {
+        //if let Err(e) = gdb_handle.join() {
+        // error!("failed to join gdb thread: {:?}", e);
+        // }
     }
 
     stdin_lock

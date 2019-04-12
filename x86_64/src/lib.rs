@@ -37,6 +37,7 @@ unsafe impl data_model::DataInit for mpspec::mpf_intel {}
 
 mod bzimage;
 mod cpuid;
+mod gdbstub;
 mod gdt;
 mod interrupts;
 mod mptable;
@@ -53,8 +54,10 @@ use std::mem;
 use std::sync::Arc;
 
 use crate::bootparam::boot_params;
+use arch::gdb::{GdbControl, GdbStub};
 use arch::{RunnableLinuxVm, VmComponents, VmImage};
 use devices::{get_serial_tty_string, PciConfigIo, PciDevice, PciInterruptPin, SerialParameters};
+use gdbstub::GdbX86;
 use io_jail::Minijail;
 use kvm::*;
 use remain::sorted;
@@ -393,6 +396,20 @@ impl arch::LinuxArch for X8664arch {
                 )?;
             }
         }
+
+        let gdb_stub: Option<Arc<Mutex<dyn GdbControl + Send>>> =
+            if let Some((port, gdb_socket)) = components.gdb {
+                Some(Arc::new(Mutex::new(GdbStub::new(
+                    mem.clone(),
+                    vcpu_count as usize,
+                    port,
+                    gdb_socket,
+                    GdbX86::new(),
+                ))))
+            } else {
+                None
+            };
+
         Ok(RunnableLinuxVm {
             vm,
             kvm,
@@ -405,6 +422,7 @@ impl arch::LinuxArch for X8664arch {
             io_bus,
             mmio_bus,
             pid_debug_label_map,
+            gdb_stub,
         })
     }
 }

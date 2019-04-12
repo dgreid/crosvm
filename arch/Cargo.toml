@@ -7,10 +7,13 @@ edition = "2018"
 [dependencies]
 byteorder = "*"
 devices = { path = "../devices" }
+gdb-remote-protocol = { path = "/usr/local/google/home/dgreid/third_party/rust-gdb-remote-protocol" }
 io_jail = { path = "../io_jail" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 kvm = { path = "../kvm" }
 libc = "*"
+msg_socket = { path = "../msg_socket" }
 resources = { path = "../resources" }
 sync = { path = "../sync" }
 sys_util = { path = "../sys_util" }
+vm_control = { path = "../vm_control" }
