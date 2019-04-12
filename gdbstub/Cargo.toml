@@ -8,3 +8,5 @@ edition = "2018"
 path = "src/gdbstub.rs"
 
 [dependencies]
+
+[workspace]
