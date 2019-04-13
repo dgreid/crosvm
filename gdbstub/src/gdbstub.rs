@@ -48,6 +48,9 @@ where
         }
     }
 
+    /// Handles the next byte removed from the gdb client.
+    /// Returns None if the message isn't yet complete.
+    /// Returns a Result with either a valid message or an error on checksum failure.
     pub fn next_byte(&mut self, byte: u8) -> Option<Result<GdbMessage>> {
         use MessageState::*;
 
