@@ -1,53 +1,132 @@
 mod gdbreply;
 
+use std::io::Read;
+
 fn handle_msg(msg: &[u8]) -> impl Iterator<Item = u8> {
     gdbreply::empty()
 }
 
 enum MessageState {
     Idle,
-    RecievePacket(Vec<u8>),
-    ReceiveChecksum(Vec<u8>, Option<u8>, Option<u8>),
+    ReceivePacket,
+    ReceiveChecksum,
 }
 
 struct GdbMessage {
-    packet_data: &[u8],
+    packet_data: Vec<u8>, // TODO stupid extra allocation
 }
 
-struct MessageReader<T>
+#[derive(Debug)]
+pub enum Error {
+    ChecksumMismatch,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+struct GdbMessageReader<T>
 where
     T: Read,
 {
     source: T,
+    state: MessageState,
+    checksum_calculated: u8,
+    data: Vec<u8>,
+    msb: Option<u8>,
 }
 
-impl<T> Iterator for MessageReader<T> {
-    type Item = GdbMessage;
+impl<T> GdbMessageReader<T>
+where
+    T: Read,
+{
+    pub fn new(source: T) -> Self {
+        GdbMessageReader {
+            source,
+            state: MessageState::Idle,
+            checksum_calculated: 0,
+            data: Vec::new(),
+            msb: None,
+        }
+    }
+}
+
+impl<T> Iterator for GdbMessageReader<T>
+where
+    T: Read,
+{
+    type Item = Result<GdbMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
         use MessageState::*;
 
         loop {
             let mut bytes = [0u8; 1];
-            self.source.read(&mut bytes);
+            match self.source.read(&mut bytes) {
+                Err(_) => return None, // Failure leads to dropping the connection.
+                Ok(1) => (),
+                Ok(_) => return None, // Also an error.
+            }
 
             let byte = bytes[0];
 
             match self.state {
                 Idle => {
                     if byte == b'$' {
-                        self.state = ReceiveChecksum(Vec::new());
+                        self.state = ReceivePacket;
                     }
                 }
-                ReceiveChecksum(v) => {
+                ReceivePacket => {
+                    self.checksum_calculated = self.checksum_calculated.wrapping_add(byte);
+                    if byte == b'#' {
+                        self.state = ReceiveChecksum;
+                    } else {
+                        self.msb = Some(byte);
+                        self.state = ReceivePacket;
+                    }
+                }
+                ReceiveChecksum => match self.msb {
+                    None => self.msb = Some(byte),
+                    Some(msb) => {
+                        self.state = Idle;
+                        let checksum_transmitted = from_ascii(msb) << 4 | from_ascii(byte);
+                        if checksum_transmitted == self.checksum_calculated {
+                            return Some(Ok(GdbMessage {
+                                packet_data: std::mem::replace(&mut self.data, Vec::new()),
+                            }));
+                        } else {
+                            return Some(Err(Error::ChecksumMismatch));
+                        }
+                    }
+                },
             }
         }
+    }
+}
+
+// Return a u8 value from an ascii digit.
+fn from_ascii(digit: u8) -> u8 {
+    // TODO - return an error if invalid?
+    match digit {
+        d if d >= b'0' && d <= b'9' => d - b'0',
+        d if d >= b'a' && d <= b'f' => d - b'a',
+        d if d >= b'A' && d <= b'F' => d - b'A',
+        _ => 0,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::Cursor;
+
+    #[test]
+    fn back_checksum() {
+        let msg = Cursor::new(b"$g#66");
+        let mut messages = GdbMessageReader::new(msg);
+
+        let result = messages.next().unwrap();
+        assert!(result.is_err());
+    }
 
     #[test]
     fn read_regs() {
