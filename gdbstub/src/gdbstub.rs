@@ -47,6 +47,46 @@ where
             msb: None,
         }
     }
+
+    pub fn next_byte(&mut self, byte: u8) -> Option<Result<GdbMessage>> {
+        use MessageState::*;
+
+        match self.state {
+            Idle => {
+                if byte == b'$' {
+                    self.state = ReceivePacket;
+                }
+                None
+            }
+            ReceivePacket => {
+                self.checksum_calculated = self.checksum_calculated.wrapping_add(byte);
+                if byte == b'#' {
+                    self.state = ReceiveChecksum;
+                } else {
+                    self.msb = Some(byte);
+                    self.state = ReceivePacket;
+                }
+                None
+            }
+            ReceiveChecksum => match self.msb {
+                None => {
+                    self.msb = Some(byte);
+                    None
+                }
+                Some(msb) => {
+                    self.state = Idle;
+                    let checksum_transmitted = from_ascii(msb) << 4 | from_ascii(byte);
+                    if checksum_transmitted == self.checksum_calculated {
+                        Some(Ok(GdbMessage {
+                            packet_data: std::mem::replace(&mut self.data, Vec::new()),
+                        }))
+                    } else {
+                        Some(Err(Error::ChecksumMismatch))
+                    }
+                }
+            },
+        }
+    }
 }
 
 impl<T> Iterator for GdbMessageReader<T>
@@ -56,8 +96,6 @@ where
     type Item = Result<GdbMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use MessageState::*;
-
         loop {
             let mut bytes = [0u8; 1];
             match self.source.read(&mut bytes) {
@@ -68,35 +106,8 @@ where
 
             let byte = bytes[0];
 
-            match self.state {
-                Idle => {
-                    if byte == b'$' {
-                        self.state = ReceivePacket;
-                    }
-                }
-                ReceivePacket => {
-                    self.checksum_calculated = self.checksum_calculated.wrapping_add(byte);
-                    if byte == b'#' {
-                        self.state = ReceiveChecksum;
-                    } else {
-                        self.msb = Some(byte);
-                        self.state = ReceivePacket;
-                    }
-                }
-                ReceiveChecksum => match self.msb {
-                    None => self.msb = Some(byte),
-                    Some(msb) => {
-                        self.state = Idle;
-                        let checksum_transmitted = from_ascii(msb) << 4 | from_ascii(byte);
-                        if checksum_transmitted == self.checksum_calculated {
-                            return Some(Ok(GdbMessage {
-                                packet_data: std::mem::replace(&mut self.data, Vec::new()),
-                            }));
-                        } else {
-                            return Some(Err(Error::ChecksumMismatch));
-                        }
-                    }
-                },
+            if let Some(r) = self.next_byte(bytes[0]) {
+                return Some(r);
             }
         }
     }
