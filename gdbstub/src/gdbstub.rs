@@ -18,7 +18,7 @@ struct GdbMessage {
 
 #[derive(Debug)]
 pub enum Error {
-    ChecksumMismatch,
+    ChecksumMismatch(u8, u8),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -57,16 +57,18 @@ where
         match self.state {
             Idle => {
                 if byte == b'$' {
+                    self.msb = None;
+                    self.checksum_calculated = 0;
                     self.state = ReceivePacket;
                 }
                 None
             }
             ReceivePacket => {
-                self.checksum_calculated = self.checksum_calculated.wrapping_add(byte);
                 if byte == b'#' {
                     self.state = ReceiveChecksum;
                 } else {
-                    self.msb = Some(byte);
+                    self.checksum_calculated = self.checksum_calculated.wrapping_add(byte);
+                    self.data.push(byte);
                     self.state = ReceivePacket;
                 }
                 None
@@ -84,7 +86,10 @@ where
                             packet_data: std::mem::replace(&mut self.data, Vec::new()),
                         }))
                     } else {
-                        Some(Err(Error::ChecksumMismatch))
+                        Some(Err(Error::ChecksumMismatch(
+                            checksum_transmitted,
+                            self.checksum_calculated,
+                        )))
                     }
                 }
             },
@@ -134,12 +139,14 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn back_checksum() {
-        let msg = Cursor::new(b"$g#66");
+    fn bad_checksum_then_good() {
+        let msg = Cursor::new(b"$g#66$g#67");
         let mut messages = GdbMessageReader::new(msg);
 
         let result = messages.next().unwrap();
         assert!(result.is_err());
+        let result = messages.next().unwrap();
+        assert!(result.is_ok());
     }
 
     #[test]
