@@ -2,17 +2,7 @@ mod gdbreply;
 
 use std::io::Read;
 
-fn handle_msg(msg: &[u8]) -> impl Iterator<Item = u8> {
-    gdbreply::empty()
-}
-
-enum MessageState {
-    Idle,
-    ReceivePacket,
-    ReceiveChecksum,
-}
-
-struct GdbMessage {
+pub struct GdbMessage {
     packet_data: Vec<u8>, // TODO stupid extra allocation
 }
 
@@ -23,24 +13,22 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-struct GdbMessageReader<T>
-where
-    T: Read,
-{
-    source: T,
+enum MessageState {
+    Idle,
+    ReceivePacket,
+    ReceiveChecksum,
+}
+
+pub struct GdbMessageReader {
     state: MessageState,
     checksum_calculated: u8,
     data: Vec<u8>,
     msb: Option<u8>,
 }
 
-impl<T> GdbMessageReader<T>
-where
-    T: Read,
-{
-    pub fn new(source: T) -> Self {
+impl GdbMessageReader {
+    pub fn new() -> Self {
         GdbMessageReader {
-            source,
             state: MessageState::Idle,
             checksum_calculated: 0,
             data: Vec::new(),
@@ -60,6 +48,7 @@ where
                     self.msb = None;
                     self.checksum_calculated = 0;
                     self.state = ReceivePacket;
+                    self.data.clear();
                 }
                 None
             }
@@ -97,7 +86,27 @@ where
     }
 }
 
-impl<T> Iterator for GdbMessageReader<T>
+pub struct GdbMessageScanner<T>
+where
+    T: Read,
+{
+    source: T,
+    reader: GdbMessageReader,
+}
+
+impl<T> GdbMessageScanner<T>
+where
+    T: Read,
+{
+    pub fn new(source: T) -> Self {
+        GdbMessageScanner {
+            source,
+            reader: GdbMessageReader::new(),
+        }
+    }
+}
+
+impl<T> Iterator for GdbMessageScanner<T>
 where
     T: Read,
 {
@@ -112,9 +121,7 @@ where
                 Ok(_) => return None, // Also an error.
             }
 
-            let byte = bytes[0];
-
-            if let Some(r) = self.next_byte(bytes[0]) {
+            if let Some(r) = self.reader.next_byte(bytes[0]) {
                 return Some(r);
             }
         }
@@ -141,17 +148,12 @@ mod tests {
     #[test]
     fn bad_checksum_then_good() {
         let msg = Cursor::new(b"$g#66$g#67");
-        let mut messages = GdbMessageReader::new(msg);
+        let mut messages = GdbMessageScanner::new(msg);
 
         let result = messages.next().unwrap();
         assert!(result.is_err());
         let result = messages.next().unwrap();
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn read_regs() {
-        let msg = b"$g#67";
-        assert_eq!(handle_msg(&msg[..]).collect::<Vec<u8>>(), b"$0000#C0");
+        assert_eq!(result.unwrap().packet_data, b"g");
     }
 }
