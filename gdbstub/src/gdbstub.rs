@@ -149,21 +149,39 @@ where
     BackendError(G::Error),
 }
 
+/// Backend for a device with registers of type `Self::Register` and an error
+/// type of `Self::Error`.
+/// `Register` is normally u64 or u32.
 pub trait GdbBackend {
     type Error;
-    // TODO break up this to separate APIs for each message
-    fn handle_message(&mut self, message: &GdbMessage)
-        -> std::result::Result<Vec<u8>, Self::Error>;
+    type Register;
+
+    fn read_general_registers(&self) -> std::result::Result<Vec<Self::Register>, Self::Error>;
+    // TODO add other messages
 }
 
-pub fn run_gdb_stub<T, R, G>(
+fn handle_message<G>(
+    backend: &mut G,
+    message: &GdbMessage,
+) -> std::result::Result<Vec<u8>, Error<G>>
+where
+    G: GdbBackend,
+{
+    let reply = match message.packet_data[0] {
+        b'g' => Vec::new(),
+        _ => b"E00".to_vec(), // TODO - replace '00' with EINVAL or ENOTSUPP?
+    };
+    Ok(reply)
+}
+
+pub fn run_gdb_stub<S, T, G>(
     source: &mut T,
-    sink: &mut R,
+    sink: &mut S,
     backend: &mut G,
 ) -> std::result::Result<(), Error<G>>
 where
     T: Read,
-    R: Write,
+    S: Write,
     G: GdbBackend,
 {
     // read from source, write to the sink.
@@ -174,9 +192,9 @@ where
             Err(ReceiveError::ChecksumMismatch(_, _)) => {
                 sink.write(b"-").map_err(Error::WritingOutput)?;
             }
-            Ok(m) => {
+            Ok(message) => {
                 sink.write(b"+").map_err(Error::WritingOutput)?;
-                let reply = backend.handle_message(&m).map_err(Error::BackendError)?;
+                let reply = handle_message(backend, &message)?;
                 sink.write(&reply).map_err(Error::<G>::WritingOutput)?;
             }
         }
@@ -206,11 +224,10 @@ mod tests {
     struct TestBackend {}
     impl GdbBackend for TestBackend {
         type Error = std::io::Error;
-        fn handle_message(
-            &mut self,
-            message: &GdbMessage,
-        ) -> std::result::Result<Vec<u8>, Self::Error> {
-            Ok(b"".to_vec()) // TODO - this returns the wrong thing, should it take a better parsed message?
+        type Register = u64;
+
+        fn read_general_registers(&self) -> std::result::Result<Vec<Self::Register>, Self::Error> {
+            Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
         }
     }
 
