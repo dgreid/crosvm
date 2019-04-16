@@ -203,9 +203,7 @@ mod tests {
         assert_eq!(result.unwrap().packet_data, b"g");
     }
 
-    struct TestBackend {
-        output: Vec<u8>,
-    }
+    struct TestBackend {}
     impl GdbBackend for TestBackend {
         type Error = std::io::Error;
         fn handle_message(
@@ -220,9 +218,9 @@ mod tests {
     fn handle_message() {
         let mut input = Cursor::new(b"$g#66$g#67");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend { output: Vec::new() };
+        let mut backend = TestBackend {};
 
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
-        assert_eq!(backend.output, b"-+");
+        assert_eq!(output.get_ref(), b"-+TODO");
     }
 }
