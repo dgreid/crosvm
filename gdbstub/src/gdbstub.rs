@@ -1,6 +1,6 @@
 mod gdbreply;
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 
 pub use gdbreply::GdbReply;
 
@@ -9,11 +9,11 @@ pub struct GdbMessage {
 }
 
 #[derive(Debug)]
-pub enum Error {
+enum ReceiveError {
     ChecksumMismatch(u8, u8),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+type ReceiveResult<T> = std::result::Result<T, ReceiveError>;
 
 enum MessageState {
     Idle,
@@ -21,7 +21,7 @@ enum MessageState {
     ReceiveChecksum,
 }
 
-pub struct GdbMessageReader {
+struct GdbMessageReader {
     state: MessageState,
     checksum_calculated: u8,
     data: Vec<u8>,
@@ -29,7 +29,7 @@ pub struct GdbMessageReader {
 }
 
 impl GdbMessageReader {
-    pub fn new() -> Self {
+    fn new() -> Self {
         GdbMessageReader {
             state: MessageState::Idle,
             checksum_calculated: 0,
@@ -41,7 +41,7 @@ impl GdbMessageReader {
     /// Handles the next byte removed from the gdb client.
     /// Returns None if the message isn't yet complete.
     /// Returns a Result with either a valid message or an error on checksum failure.
-    pub fn next_byte(&mut self, byte: u8) -> Option<Result<GdbMessage>> {
+    fn next_byte(&mut self, byte: u8) -> Option<ReceiveResult<GdbMessage>> {
         use MessageState::*;
 
         match self.state {
@@ -77,7 +77,7 @@ impl GdbMessageReader {
                             packet_data: std::mem::replace(&mut self.data, Vec::new()),
                         }))
                     } else {
-                        Some(Err(Error::ChecksumMismatch(
+                        Some(Err(ReceiveError::ChecksumMismatch(
                             checksum_transmitted,
                             self.checksum_calculated,
                         )))
@@ -88,7 +88,7 @@ impl GdbMessageReader {
     }
 }
 
-pub struct GdbMessageScanner<T>
+struct GdbMessageScanner<T>
 where
     T: Read,
 {
@@ -100,7 +100,7 @@ impl<T> GdbMessageScanner<T>
 where
     T: Read,
 {
-    pub fn new(source: T) -> Self {
+    fn new(source: T) -> Self {
         GdbMessageScanner {
             source,
             reader: GdbMessageReader::new(),
@@ -112,7 +112,7 @@ impl<T> Iterator for GdbMessageScanner<T>
 where
     T: Read,
 {
-    type Item = Result<GdbMessage>;
+    type Item = ReceiveResult<GdbMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -141,34 +141,43 @@ fn from_ascii(digit: u8) -> u8 {
     }
 }
 
+pub enum Error<G>
+where
+    G: GdbBackend,
+{
+    WritingOutput(io::Error),
+    BackendError(G::Error),
+}
+
 pub trait GdbBackend {
     type Error;
-    fn handle_message(message: &GdbMessage) -> std::result::Result<GdbReply, Self::Error>;
+    // TODO break up this to separate APIs for each message
+    fn handle_message(&mut self, message: &GdbMessage)
+        -> std::result::Result<Vec<u8>, Self::Error>;
 }
 
 pub fn run_gdb_stub<T, R, G>(
     source: &mut T,
     sink: &mut R,
-    gdbbackend: &mut G,
-) -> std::result::Result<(), G::Error>
+    backend: &mut G,
+) -> std::result::Result<(), Error<G>>
 where
     T: Read,
     R: Write,
     G: GdbBackend,
 {
     // read from source, write to the sink.
-    let mut messages = GdbMessageScanner(source);
+    let messages = GdbMessageScanner::new(source);
 
     for message in messages {
         match message {
-            Err(Error::ChecksumMismatch(_, _)) => {
-                sink.write(b"-");
+            Err(ReceiveError::ChecksumMismatch(_, _)) => {
+                sink.write(b"-").map_err(Error::WritingOutput)?;
             }
             Ok(m) => {
-                sink.write(b"+");
-                handle_message(&message)
-                    .map(|reply| sink.write(reply))
-                    .map_err();
+                sink.write(b"+").map_err(Error::WritingOutput)?;
+                let reply = backend.handle_message(&m).map_err(Error::BackendError)?;
+                sink.write(&reply).map_err(Error::<G>::WritingOutput)?;
             }
         }
     }
@@ -192,5 +201,28 @@ mod tests {
         let result = messages.next().unwrap();
         assert!(result.is_ok());
         assert_eq!(result.unwrap().packet_data, b"g");
+    }
+
+    struct TestBackend {
+        output: Vec<u8>,
+    }
+    impl GdbBackend for TestBackend {
+        type Error = std::io::Error;
+        fn handle_message(
+            &mut self,
+            message: &GdbMessage,
+        ) -> std::result::Result<Vec<u8>, Self::Error> {
+            Ok(b"".to_vec()) // TODO - this returns the wrong thing, should it take a better parsed message?
+        }
+    }
+
+    #[test]
+    fn handle_message() {
+        let mut input = Cursor::new(b"$g#66$g#67");
+        let mut output = Cursor::new(Vec::new());
+        let mut backend = TestBackend { output: Vec::new() };
+
+        assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
+        assert_eq!(backend.output, b"-+");
     }
 }
