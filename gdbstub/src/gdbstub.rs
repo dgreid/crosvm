@@ -1,6 +1,8 @@
 mod gdbreply;
 
-use std::io::Read;
+use std::io::{Read, Write};
+
+pub use gdbreply::GdbReply;
 
 pub struct GdbMessage {
     packet_data: Vec<u8>, // TODO stupid extra allocation
@@ -139,6 +141,41 @@ fn from_ascii(digit: u8) -> u8 {
     }
 }
 
+pub trait GdbBackend {
+    type Error;
+    fn handle_message(message: &GdbMessage) -> std::result::Result<GdbReply, Self::Error>;
+}
+
+pub fn run_gdb_stub<T, R, G>(
+    source: &mut T,
+    sink: &mut R,
+    gdbbackend: &mut G,
+) -> std::result::Result<(), G::Error>
+where
+    T: Read,
+    R: Write,
+    G: GdbBackend,
+{
+    // read from source, write to the sink.
+    let mut messages = GdbMessageScanner(source);
+
+    for message in messages {
+        match message {
+            Err(Error::ChecksumMismatch(_, _)) => {
+                sink.write(b"-");
+            }
+            Ok(m) => {
+                sink.write(b"+");
+                handle_message(&message)
+                    .map(|reply| sink.write(reply))
+                    .map_err();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +183,7 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn bad_checksum_then_good() {
+    fn scanner_bad_checksum_then_good() {
         let msg = Cursor::new(b"$g#66$g#67");
         let mut messages = GdbMessageScanner::new(msg);
 
