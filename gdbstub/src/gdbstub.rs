@@ -330,7 +330,7 @@ mod tests {
         let mut output = Cursor::new(Vec::new());
         let mut backend = TestBackend { g_error: None };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
-        assert_eq!(output.get_ref(), b"+$S05#B8");
+        assert_eq!(output.get_ref(), b"+$T05#B9");
     }
 
     #[test]
@@ -339,6 +339,6 @@ mod tests {
         let mut output = Cursor::new(Vec::new());
         let mut backend = TestBackend { g_error: None };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
-        assert_eq!(output.get_ref(), b"+$S05#B8");
+        assert_eq!(output.get_ref(), b"+$T05#B9");
     }
 }

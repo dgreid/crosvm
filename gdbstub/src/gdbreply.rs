@@ -125,7 +125,7 @@ impl Iterator for GdbLastSignal {
     type Item = u8;
     fn next(&mut self) -> Option<u8> {
         let ret = match self.idx {
-            0 => Some(b'S'),
+            0 => Some(b'T'),
             1 => Some(hex_msn(self.signal)),
             2 => Some(hex_lsn(self.signal)),
             _ => None,
@@ -157,8 +157,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        assert_eq!(empty().collect::<Vec<u8>>(), b"$#00");
+    fn basic_replies() {
         assert_eq!(error(0x55).collect::<Vec<u8>>(), b"$E55#AF");
+        assert_eq!(signal(0xaa).collect::<Vec<u8>>(), b"$TAA#D6");
     }
 }
