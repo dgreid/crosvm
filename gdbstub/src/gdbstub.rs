@@ -141,14 +141,6 @@ fn from_ascii(digit: u8) -> u8 {
     }
 }
 
-// Returns the ascii code of the given nibble.
-fn to_ascii(nibble: u8) -> u8 {
-    match nibble & 0x0f {
-        n if n < 0xa => n + b'0',
-        n => n - 0xa + b'a',
-    }
-}
-
 /// Errors returned by the backend.
 /// `ErrorResponse` will send the u8 error code to the client.
 /// `ErrorFatal` will propigate up and terminate the gdb server.
@@ -177,34 +169,27 @@ pub trait GdbBackend {
 
     // Hack: because I can't figure out a trait for 'implements `to_ne_bytes`'
     // TODO - avoid this slew of allocations.
-    fn reg_to_ne_bytes(&self, r: Self::Register) -> Vec<u8>;
+    fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8>;
 }
 
 fn handle_message<G>(
     backend: &mut G,
     message: &GdbMessage,
-) -> std::result::Result<Vec<u8>, Error<G>>
+) -> std::result::Result<Box<dyn Iterator<Item = u8>>, Error<G>>
 where
     G: GdbBackend,
+    G::Register: 'static,
 {
-    let reply = match message.packet_data[0] {
+    Ok(match message.packet_data[0] {
         b'g' => match backend.read_general_registers() {
-            Err(BackendError::Response(e)) => error_reply(e),
+            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
-            Ok(regs) => regs
-                .into_iter()
-                .map(|b| backend.reg_to_ne_bytes(b))
-                .flatten()
-                .collect(),
+            Ok(regs) => Box::new(GdbReply::from_bytes(
+                regs.into_iter().map(|b| G::reg_to_ne_bytes(b)).flatten(),
+            )),
         },
-        _ => b"E00".to_vec(), // TODO - replace '00' with EINVAL or ENOTSUPP?
-    };
-    Ok(reply)
-}
-
-// Create an error response string from the given backend error code.
-fn error_reply(errno: u8) -> Vec<u8> {
-    vec![b'E', to_ascii(errno >> 4), to_ascii(errno & 0x0f)]
+        _ => Box::new(gdbreply::error(0x00)), // TODO - replace '00' with EINVAL or ENOTSUPP?
+    })
 }
 
 pub fn run_gdb_stub<S, T, G>(
@@ -216,6 +201,7 @@ where
     T: Read,
     S: Write,
     G: GdbBackend,
+    G::Register: 'static,
 {
     // read from source, write to the sink.
     let messages = GdbMessageScanner::new(source);
@@ -228,8 +214,7 @@ where
             Ok(message) => {
                 sink.write(b"+").map_err(Error::WritingOutput)?;
                 let reply = handle_message(backend, &message)?;
-                let gdb_reply = GdbReply::new(reply);
-                sink.write_all(&gdb_reply.collect::<Vec<u8>>())
+                sink.write_all(&reply.collect::<Vec<u8>>())
                     .map_err(Error::<G>::WritingOutput)?;
             }
         }
@@ -271,7 +256,7 @@ mod tests {
             }
         }
 
-        fn reg_to_ne_bytes(&self, r: Self::Register) -> Vec<u8> {
+        fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8> {
             r.to_ne_bytes().into_iter().cloned().collect()
         }
     }
