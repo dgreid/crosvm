@@ -25,7 +25,7 @@ struct GdbMessageReader {
     state: MessageState,
     checksum_calculated: u8,
     data: Vec<u8>,
-    msb: Option<u8>,
+    msn: Option<u8>,
 }
 
 impl GdbMessageReader {
@@ -34,7 +34,7 @@ impl GdbMessageReader {
             state: MessageState::Idle,
             checksum_calculated: 0,
             data: Vec::new(),
-            msb: None,
+            msn: None,
         }
     }
 
@@ -47,7 +47,7 @@ impl GdbMessageReader {
         match self.state {
             Idle => {
                 if byte == b'$' {
-                    self.msb = None;
+                    self.msn = None;
                     self.checksum_calculated = 0;
                     self.state = ReceivePacket;
                     self.data.clear();
@@ -64,14 +64,14 @@ impl GdbMessageReader {
                 }
                 None
             }
-            ReceiveChecksum => match self.msb {
+            ReceiveChecksum => match self.msn {
                 None => {
-                    self.msb = Some(byte);
+                    self.msn = Some(byte);
                     None
                 }
-                Some(msb) => {
+                Some(msn) => {
                     self.state = Idle;
-                    let checksum_transmitted = from_ascii(msb) << 4 | from_ascii(byte);
+                    let checksum_transmitted = from_ascii(msn) << 4 | from_ascii(byte);
                     if checksum_transmitted == self.checksum_calculated {
                         Some(Ok(GdbMessage {
                             packet_data: std::mem::replace(&mut self.data, Vec::new()),
@@ -130,7 +130,7 @@ where
     }
 }
 
-// Return a u8 value from an ascii digit.
+// Returns a u8 value from an ascii digit.
 fn from_ascii(digit: u8) -> u8 {
     // TODO - return an error if invalid?
     match digit {
@@ -141,23 +141,43 @@ fn from_ascii(digit: u8) -> u8 {
     }
 }
 
+// Returns the ascii code of the given nibble.
+fn to_ascii(nibble: u8) -> u8 {
+    match nibble & 0x0f {
+        n if n < 0xa => n + b'0',
+        n => n - 0xa + b'a',
+    }
+}
+
+/// Errors returned by the backend.
+/// `ErrorResponse` will send the u8 error code to the client.
+/// `ErrorFatal` will propigate up and terminate the gdb server.
+pub enum BackendError<E> {
+    Response(u8),
+    Fatal(E),
+}
+pub type BackendResult<T, E> = std::result::Result<T, BackendError<E>>;
+
 pub enum Error<G>
 where
     G: GdbBackend,
 {
     WritingOutput(io::Error),
-    BackendError(G::Error),
+    Backend(G::Error),
 }
 
-/// Backend for a device with registers of type `Self::Register` and an error
-/// type of `Self::Error`.
+/// Backend for a device with registers of type `Self::Register`.
 /// `Register` is normally u64 or u32.
 pub trait GdbBackend {
-    type Error;
     type Register;
+    type Error;
 
-    fn read_general_registers(&self) -> std::result::Result<Vec<Self::Register>, Self::Error>;
+    fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error>;
     // TODO add other messages
+
+    // Hack: because I can't figure out a trait for 'implements `to_ne_bytes`'
+    // TODO - avoid this slew of allocations.
+    fn reg_to_ne_bytes(&self, r: Self::Register) -> Vec<u8>;
 }
 
 fn handle_message<G>(
@@ -168,10 +188,23 @@ where
     G: GdbBackend,
 {
     let reply = match message.packet_data[0] {
-        b'g' => Vec::new(),
+        b'g' => match backend.read_general_registers() {
+            Err(BackendError::Response(e)) => error_reply(e),
+            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+            Ok(regs) => regs
+                .into_iter()
+                .map(|b| backend.reg_to_ne_bytes(b))
+                .flatten()
+                .collect(),
+        },
         _ => b"E00".to_vec(), // TODO - replace '00' with EINVAL or ENOTSUPP?
     };
     Ok(reply)
+}
+
+// Create an error response string from the given backend error code.
+fn error_reply(errno: u8) -> Vec<u8> {
+    vec![b'E', to_ascii(errno >> 4), to_ascii(errno & 0x0f)]
 }
 
 pub fn run_gdb_stub<S, T, G>(
@@ -221,13 +254,22 @@ mod tests {
         assert_eq!(result.unwrap().packet_data, b"g");
     }
 
-    struct TestBackend {}
+    struct TestBackend {
+        g_error: Option<u8>,
+    }
     impl GdbBackend for TestBackend {
-        type Error = std::io::Error;
         type Register = u64;
 
         fn read_general_registers(&self) -> std::result::Result<Vec<Self::Register>, Self::Error> {
-            Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
+            if let Some(e) = self.g_error {
+                Err(BackendError::ErrorResponse(e))
+            } else {
+                Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
+            }
+        }
+
+        fn reg_to_ne_bytes(&self, r: &Self::Register) -> Vec<u8> {
+            r.to_ne_bytes()
         }
     }
 
@@ -235,9 +277,13 @@ mod tests {
     fn handle_message() {
         let mut input = Cursor::new(b"$g#66$g#67");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend {};
+        let mut backend = TestBackend { g_error: None };
 
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(output.get_ref(), b"-+TODO");
+
+        input.seek(SeekFrom::Start(0)).unwrap();
+        output.seek(SeekFrom::Start(0)).unwrap();
+        backend.g_error = Some(0x33);
     }
 }
