@@ -240,7 +240,7 @@ where
 mod tests {
     use super::*;
 
-    use std::io::Cursor;
+    use std::io::{Cursor, Seek, SeekFrom};
 
     #[test]
     fn scanner_bad_checksum_then_good() {
@@ -259,31 +259,39 @@ mod tests {
     }
     impl GdbBackend for TestBackend {
         type Register = u64;
+        type Error = io::Error;
 
-        fn read_general_registers(&self) -> std::result::Result<Vec<Self::Register>, Self::Error> {
+        fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error> {
             if let Some(e) = self.g_error {
-                Err(BackendError::ErrorResponse(e))
+                Err(BackendError::Response(e))
             } else {
                 Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
             }
         }
 
-        fn reg_to_ne_bytes(&self, r: &Self::Register) -> Vec<u8> {
-            r.to_ne_bytes()
+        fn reg_to_ne_bytes(&self, r: Self::Register) -> Vec<u8> {
+            r.to_ne_bytes().into_iter().cloned().collect()
         }
     }
 
     #[test]
-    fn handle_message() {
+    fn checksum() {
         let mut input = Cursor::new(b"$g#66$g#67");
         let mut output = Cursor::new(Vec::new());
         let mut backend = TestBackend { g_error: None };
 
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
-        assert_eq!(output.get_ref(), b"-+TODO");
+        assert_eq!(&output.get_ref()[0..2], b"-+");
+    }
 
-        input.seek(SeekFrom::Start(0)).unwrap();
-        output.seek(SeekFrom::Start(0)).unwrap();
-        backend.g_error = Some(0x33);
+    #[test]
+    fn read_global_registers_error() {
+        let mut input = Cursor::new(b"$g#67");
+        let mut output = Cursor::new(Vec::new());
+        let mut backend = TestBackend {
+            g_error: Some(0x33),
+        };
+        assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
+        assert_eq!(output.get_ref(), b"+$E33#");
     }
 }
