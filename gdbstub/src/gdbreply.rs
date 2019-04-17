@@ -59,7 +59,7 @@ impl<T> GdbReply<T>
 where
     T: IntoIterator<Item = u8>,
 {
-    pub(crate) fn new(data: T) -> Self {
+    pub(crate) fn from_bytes(data: T) -> Self {
         GdbReply {
             data: data.into_iter(),
             state: IterState::Start,
@@ -69,7 +69,7 @@ where
 }
 
 pub fn empty() -> GdbReply<iter::Empty<u8>> {
-    GdbReply::new(iter::empty())
+    GdbReply::from_bytes(iter::empty())
 }
 
 pub struct GdbErrorData {
@@ -92,7 +92,7 @@ impl Iterator for GdbErrorData {
 }
 
 pub fn error(errno: u8) -> GdbReply<GdbErrorData> {
-    GdbReply::new(GdbErrorData { errno, idx: 0 })
+    GdbReply::from_bytes(GdbErrorData { errno, idx: 0 })
 }
 
 fn ascii_byte(digit: u8) -> u8 {
