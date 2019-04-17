@@ -116,6 +116,29 @@ pub fn okay() -> GdbReply<GdbOkData> {
     GdbReply::from_bytes(GdbOkData { idx: 0 })
 }
 
+pub struct GdbLastSignal {
+    idx: usize,
+    signal: u8,
+}
+
+impl Iterator for GdbLastSignal {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        let ret = match self.idx {
+            0 => Some(b'S'),
+            1 => Some(hex_msn(self.signal)),
+            2 => Some(hex_lsn(self.signal)),
+            _ => None,
+        };
+        self.idx = self.idx.saturating_add(1);
+        ret
+    }
+}
+
+pub fn signal(signal: u8) -> GdbReply<GdbLastSignal> {
+    GdbReply::from_bytes(GdbLastSignal { idx: 0, signal })
+}
+
 fn ascii_byte(digit: u8) -> u8 {
     match digit {
         d if d < 0xa => d + b'0',

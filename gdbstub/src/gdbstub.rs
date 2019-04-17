@@ -1,8 +1,10 @@
 mod gdbreply;
+mod gdbsignal;
 
 use std::io::{self, Read, Write};
 
 pub use gdbreply::GdbReply;
+pub use gdbsignal::GdbSignal;
 
 pub struct GdbMessage {
     packet_data: Vec<u8>, // TODO stupid extra allocation
@@ -166,6 +168,8 @@ pub trait GdbBackend {
 
     fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error>;
     fn write_general_registers(&mut self) -> BackendResult<(), Self::Error>;
+    fn cont(&mut self) -> BackendResult<GdbSignal, Self::Error>;
+    fn step(&mut self) -> BackendResult<GdbSignal, Self::Error>;
 
     // TODO add other messages
 
@@ -194,6 +198,16 @@ where
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
             Ok(()) => Box::new(gdbreply::okay()),
+        },
+        b'c' => match backend.cont() {
+            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+            Ok(s) => Box::new(gdbreply::signal(s as u8)),
+        },
+        b's' => match backend.step() {
+            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+            Ok(s) => Box::new(gdbreply::signal(s as u8)),
         },
         _ => Box::new(gdbreply::error(0x00)), // TODO - replace '00' with EINVAL or ENOTSUPP?
     })
@@ -267,6 +281,14 @@ mod tests {
             Ok(())
         }
 
+        fn cont(&mut self) -> BackendResult<GdbSignal, Self::Error> {
+            Ok(GdbSignal::SIGTRAP)
+        }
+
+        fn step(&mut self) -> BackendResult<GdbSignal, Self::Error> {
+            Ok(GdbSignal::SIGTRAP)
+        }
+
         fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8> {
             r.to_ne_bytes().into_iter().cloned().collect()
         }
@@ -300,5 +322,23 @@ mod tests {
         let mut backend = TestBackend { g_error: None };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(output.get_ref(), b"+$OK#9A");
+    }
+
+    #[test]
+    fn cont() {
+        let mut input = Cursor::new(b"$c#63");
+        let mut output = Cursor::new(Vec::new());
+        let mut backend = TestBackend { g_error: None };
+        assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
+        assert_eq!(output.get_ref(), b"+$S05#B8");
+    }
+
+    #[test]
+    fn step() {
+        let mut input = Cursor::new(b"$s#73");
+        let mut output = Cursor::new(Vec::new());
+        let mut backend = TestBackend { g_error: None };
+        assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
+        assert_eq!(output.get_ref(), b"+$S05#B8");
     }
 }
