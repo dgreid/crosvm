@@ -95,6 +95,27 @@ pub fn error(errno: u8) -> GdbReply<GdbErrorData> {
     GdbReply::from_bytes(GdbErrorData { errno, idx: 0 })
 }
 
+pub struct GdbOkData {
+    idx: usize,
+}
+
+impl Iterator for GdbOkData {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        let ret = match self.idx {
+            0 => Some(b'O'),
+            1 => Some(b'K'),
+            _ => None,
+        };
+        self.idx = self.idx.saturating_add(1);
+        ret
+    }
+}
+
+pub fn okay() -> GdbReply<GdbOkData> {
+    GdbReply::from_bytes(GdbOkData { idx: 0 })
+}
+
 fn ascii_byte(digit: u8) -> u8 {
     match digit {
         d if d < 0xa => d + b'0',

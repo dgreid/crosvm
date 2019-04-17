@@ -165,6 +165,8 @@ pub trait GdbBackend {
     type Error;
 
     fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error>;
+    fn write_general_registers(&mut self) -> BackendResult<(), Self::Error>;
+
     // TODO add other messages
 
     // Hack: because I can't figure out a trait for 'implements `to_ne_bytes`'
@@ -187,6 +189,11 @@ where
             Ok(regs) => Box::new(GdbReply::from_bytes(
                 regs.into_iter().map(|b| G::reg_to_ne_bytes(b)).flatten(),
             )),
+        },
+        b'G' => match backend.write_general_registers() {
+            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+            Ok(()) => Box::new(gdbreply::okay()),
         },
         _ => Box::new(gdbreply::error(0x00)), // TODO - replace '00' with EINVAL or ENOTSUPP?
     })
@@ -256,6 +263,10 @@ mod tests {
             }
         }
 
+        fn write_general_registers(&mut self) -> BackendResult<(), Self::Error> {
+            Ok(())
+        }
+
         fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8> {
             r.to_ne_bytes().into_iter().cloned().collect()
         }
@@ -280,5 +291,14 @@ mod tests {
         };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(output.get_ref(), b"+$E33#AB");
+    }
+
+    #[test]
+    fn write_global_registers_error() {
+        let mut input = Cursor::new(b"$G#47");
+        let mut output = Cursor::new(Vec::new());
+        let mut backend = TestBackend { g_error: None };
+        assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
+        assert_eq!(output.get_ref(), b"+$OK#9A");
     }
 }
