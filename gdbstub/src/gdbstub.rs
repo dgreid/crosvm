@@ -228,7 +228,9 @@ where
             Ok(message) => {
                 sink.write(b"+").map_err(Error::WritingOutput)?;
                 let reply = handle_message(backend, &message)?;
-                sink.write(&reply).map_err(Error::<G>::WritingOutput)?;
+                let gdb_reply = GdbReply::new(reply);
+                sink.write_all(&gdb_reply.collect::<Vec<u8>>())
+                    .map_err(Error::<G>::WritingOutput)?;
             }
         }
     }
@@ -240,7 +242,7 @@ where
 mod tests {
     use super::*;
 
-    use std::io::{Cursor, Seek, SeekFrom};
+    use std::io::Cursor;
 
     #[test]
     fn scanner_bad_checksum_then_good() {
@@ -292,6 +294,6 @@ mod tests {
             g_error: Some(0x33),
         };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
-        assert_eq!(output.get_ref(), b"+$E33#");
+        assert_eq!(output.get_ref(), b"+$E33#AB");
     }
 }
