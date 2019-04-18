@@ -170,12 +170,75 @@ pub trait GdbBackend {
     fn write_general_registers(&mut self) -> BackendResult<(), Self::Error>;
     fn cont(&mut self) -> BackendResult<GdbSignal, Self::Error>;
     fn step(&mut self) -> BackendResult<GdbSignal, Self::Error>;
+    fn last_signal(&self) -> BackendResult<GdbSignal, Self::Error>;
+    fn read_memory(&self, address: usize, buf: &mut [u8]) -> BackendResult<(), Self::Error>;
+    fn write_memory(&mut self, address: usize, buf: &[u8]) -> BackendResult<(), Self::Error>;
+    fn set_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error>;
+    fn clear_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error>;
+    fn detach(&mut self) -> BackendResult<(), Self::Error>;
 
-    // TODO add other messages
+    fn set_running(running: bool);
 
     // Hack: because I can't figure out a trait for 'implements `to_ne_bytes`'
     // TODO - avoid this slew of allocations.
     fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8>;
+}
+
+pub trait GdbStub<G>
+where
+    G: GdbBackend,
+    G::Register: 'static,
+{
+    fn backend_mut(&mut self) -> &mut G;
+    fn reader_mut(&mut self) -> &mut GdbMessageReader;
+
+    fn handle_message(
+        &mut self,
+        message: &GdbMessage,
+    ) -> std::result::Result<Box<dyn Iterator<Item = u8>>, Error<G>> {
+        Ok(match message.packet_data[0] {
+            b'g' => match self.backend_mut().read_general_registers() {
+                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+                Ok(regs) => Box::new(GdbReply::from_bytes(
+                    regs.into_iter().map(|b| G::reg_to_ne_bytes(b)).flatten(),
+                )),
+            },
+            b'G' => match self.backend_mut().write_general_registers() {
+                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+                Ok(()) => Box::new(gdbreply::okay()),
+            },
+            b'c' => match self.backend_mut().cont() {
+                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+                Ok(s) => Box::new(gdbreply::signal(s as u8)),
+            },
+            b's' => match self.backend_mut().step() {
+                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+                Ok(s) => Box::new(gdbreply::signal(s as u8)),
+            },
+            _ => Box::new(gdbreply::error(0x00)), // TODO - replace '00' with EINVAL or ENOTSUPP?
+        })
+    }
+
+    fn byte_from_client(
+        &mut self,
+        byte: u8,
+    ) -> Option<std::result::Result<Box<dyn Iterator<Item = u8>>, Error<G>>> {
+        let message_result = self.reader_mut().next_byte(byte)?;
+        Some(match message_result {
+            Ok(message) => {
+                sink.write(b"-").map_err(Error::WritingOutput)?;
+                self.handle_message(message)
+            }
+            Err(ReceiveError::ChecksumMismatch(_, _)) => {
+                sink.write(b"-").map_err(Error::WritingOutput)?;
+                Ok(Box::new(std::iter::empty()))
+            }
+        })
+    }
 }
 
 fn handle_message<G>(
@@ -289,6 +352,25 @@ mod tests {
             Ok(GdbSignal::SIGTRAP)
         }
 
+        fn last_signal(&self) -> BackendResult<GdbSignal, Self::Error> {
+            Ok(GdbSignal::SIGTRAP)
+        }
+        fn read_memory(&self, address: usize, buf: &mut [u8]) -> BackendResult<(), Self::Error> {
+            Ok(())
+        }
+        fn write_memory(&mut self, address: usize, buf: &[u8]) -> BackendResult<(), Self::Error> {
+            Ok(())
+        }
+        fn set_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error> {
+            Ok(())
+        }
+        fn clear_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error> {
+            Ok(())
+        }
+        fn detach(&mut self) -> BackendResult<(), Self::Error> {
+            Ok(())
+        }
+        fn set_running(running: bool) {}
         fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8> {
             r.to_ne_bytes().into_iter().cloned().collect()
         }
