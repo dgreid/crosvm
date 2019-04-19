@@ -231,6 +231,9 @@ where
     }
 }
 
+// Allow clippy lint to avoid
+// https://www.google.com/url?q=https://github.com/rust-lang/rust-clippy/issues/4002
+#[allow(clippy::redundant_closure)]
 fn handle_message<G>(
     backend: &mut G,
     message: &GdbMessage,
