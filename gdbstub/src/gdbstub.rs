@@ -244,7 +244,7 @@ where
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
             Ok(regs) => Box::new(GdbReply::from_bytes(
-                regs.into_iter().map(G::reg_to_ne_bytes).flatten(),
+                regs.into_iter().map(|r| G::reg_to_ne_bytes(r)).flatten(),
             )),
         },
         b'G' => match backend.write_general_registers() {
