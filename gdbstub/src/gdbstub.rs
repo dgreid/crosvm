@@ -145,7 +145,7 @@ fn from_ascii(digit: u8) -> u8 {
 
 /// Errors returned by the backend.
 /// `ErrorResponse` will send the u8 error code to the client.
-/// `ErrorFatal` will propigate up and terminate the gdb server.
+/// `ErrorFatal` will propagate up and terminate the gdb server.
 pub enum BackendError<E> {
     Response(u8),
     Fatal(E),
@@ -162,6 +162,7 @@ where
 
 /// Backend for a device with registers of type `Self::Register`.
 /// `Register` is normally u64 or u32.
+/// `Error` is the platform-specific error type to report.
 pub trait GdbBackend {
     type Register;
     type Error;
@@ -184,60 +185,49 @@ pub trait GdbBackend {
     fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8>;
 }
 
-pub trait GdbStub<G>
+pub struct GdbStub<G, W>
 where
     G: GdbBackend,
     G::Register: 'static,
+    W: Write,
 {
-    fn backend_mut(&mut self) -> &mut G;
-    fn reader_mut(&mut self) -> &mut GdbMessageReader;
+    reader: GdbMessageReader,
+    client_out: W,
+    backend: G,
+}
 
-    fn handle_message(
-        &mut self,
-        message: &GdbMessage,
-    ) -> std::result::Result<Box<dyn Iterator<Item = u8>>, Error<G>> {
-        Ok(match message.packet_data[0] {
-            b'g' => match self.backend_mut().read_general_registers() {
-                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
-                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
-                Ok(regs) => Box::new(GdbReply::from_bytes(
-                    regs.into_iter().map(|b| G::reg_to_ne_bytes(b)).flatten(),
-                )),
-            },
-            b'G' => match self.backend_mut().write_general_registers() {
-                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
-                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
-                Ok(()) => Box::new(gdbreply::okay()),
-            },
-            b'c' => match self.backend_mut().cont() {
-                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
-                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
-                Ok(s) => Box::new(gdbreply::signal(s as u8)),
-            },
-            b's' => match self.backend_mut().step() {
-                Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
-                Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
-                Ok(s) => Box::new(gdbreply::signal(s as u8)),
-            },
-            _ => Box::new(gdbreply::error(0x00)), // TODO - replace '00' with EINVAL or ENOTSUPP?
-        })
+impl<G, W> GdbStub<G, W>
+where
+    G: GdbBackend,
+    G::Register: 'static,
+    W: Write,
+{
+    pub fn new(backend: G, client_out: W) -> Self {
+        Self {
+            backend,
+            client_out,
+            reader: GdbMessageReader::new(),
+        }
     }
 
-    fn byte_from_client(
-        &mut self,
-        byte: u8,
-    ) -> Option<std::result::Result<Box<dyn Iterator<Item = u8>>, Error<G>>> {
-        let message_result = self.reader_mut().next_byte(byte)?;
-        Some(match message_result {
-            Ok(message) => {
-                sink.write(b"-").map_err(Error::WritingOutput)?;
-                self.handle_message(message)
+    /// Used to signal that a new byte has been received from the client.
+    /// Returns 'None' if a message is not yet complete.
+    pub fn byte_from_client(&mut self, byte: u8) -> std::result::Result<(), Error<G>> {
+        if let Some(message_result) = self.reader.next_byte(byte) {
+            match message_result {
+                Ok(message) => {
+                    self.client_out.write(b"+").map_err(Error::WritingOutput)?;
+                    let response = handle_message(&mut self.backend, &message)?;
+                    self.client_out
+                        .write_all(&response.collect::<Vec<u8>>())
+                        .map_err(Error::WritingOutput)?;
+                }
+                Err(ReceiveError::ChecksumMismatch(_, _)) => {
+                    self.client_out.write(b"-").map_err(Error::WritingOutput)?;
+                }
             }
-            Err(ReceiveError::ChecksumMismatch(_, _)) => {
-                sink.write(b"-").map_err(Error::WritingOutput)?;
-                Ok(Box::new(std::iter::empty()))
-            }
-        })
+        }
+        Ok(())
     }
 }
 
@@ -254,7 +244,7 @@ where
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
             Ok(regs) => Box::new(GdbReply::from_bytes(
-                regs.into_iter().map(|b| G::reg_to_ne_bytes(b)).flatten(),
+                regs.into_iter().map(G::reg_to_ne_bytes).flatten(),
             )),
         },
         b'G' => match backend.write_general_registers() {
