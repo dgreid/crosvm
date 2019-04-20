@@ -8,7 +8,7 @@ use std::error::Error as StdError;
 use std::ffi::CStr;
 use std::fmt::{self, Display};
 use std::fs::{File, OpenOptions};
-use std::io::{self, stdin, Read, Write};
+use std::io::{self, stdin, stdout, Read, Write};
 use std::mem;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -26,6 +26,7 @@ use audio_streams::DummyStreamSource;
 use byteorder::{ByteOrder, LittleEndian};
 use devices::virtio::{self, VirtioDevice};
 use devices::{self, HostBackendDeviceProvider, PciDevice, VirtioPciDevice, XhciController};
+use gdbstub::{DummyBackend, GdbStub};
 use io_jail::{self, Minijail};
 use kvm::*;
 use libcras::CrasClient;
@@ -1256,6 +1257,8 @@ fn run_control(
 
     let stdin_handle = stdin();
     let stdin_lock = stdin_handle.lock();
+    let stdout_handle = stdout();
+    let stdout_lock = stdout_handle.lock();
     //stdin_lock
     //.set_raw_mode()
     //.expect("failed to set terminal raw mode");
@@ -1344,6 +1347,7 @@ fn run_control(
         .write(true)
         .open("/tmp/gdbchars")
         .unwrap();
+    let mut gdb = GdbStub::new(DummyBackend {}, stdout_lock);
     'poll: loop {
         let events = {
             match poll_ctx.wait() {
@@ -1375,6 +1379,9 @@ fn run_control(
                         }
                         Ok(count) => {
                             file.write_all(&out[..count]).unwrap();
+                            for c in &out[..count] {
+                                let _ = gdb.byte_from_client(*c);
+                            }
                         }
                     }
                 }
