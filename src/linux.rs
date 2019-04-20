@@ -1428,9 +1428,9 @@ fn run_control(
 
     let stdin_handle = stdin();
     let stdin_lock = stdin_handle.lock();
-    stdin_lock
-        .set_raw_mode()
-        .expect("failed to set terminal raw mode");
+    //stdin_lock
+    //.set_raw_mode()
+    //.expect("failed to set terminal raw mode");
 
     let poll_ctx = PollContext::new().map_err(Error::CreatePollContext)?;
     poll_ctx
@@ -1781,9 +1781,9 @@ fn run_control(
         }
     }
 
-    stdin_lock
-        .set_canon_mode()
-        .expect("failed to restore canonical mode for terminal");
+    //stdin_lock
+    //   .set_canon_mode()
+    //  .expect("failed to restore canonical mode for terminal");
 
     Ok(())
 }

@@ -876,6 +876,7 @@ fn run_vm(args: std::env::Args) -> std::result::Result<(), ()> {
                           "File descriptor for configured tap device. A different virtual network card will be added each time this argument is given."),
           #[cfg(feature = "gpu")]
           Argument::flag("gpu", "(EXPERIMENTAL) enable virtio-gpu device"),
+          Argument::flag("gdb", "(EXPERIMENTAL) gdb on stdout"),
           #[cfg(feature = "tpm")]
           Argument::flag("software-tpm", "enable a software emulated trusted platform module device"),
           Argument::value("evdev", "PATH", "Path to an event device node. The device will be grabbed (unusable from the host) and made available to the guest with the same configuration it shows on the host"),
