@@ -168,7 +168,7 @@ impl Serial {
                     }
                 } else {
                     if let Some(out) = self.out.as_mut() {
-                        out.write_all(&[v])?;
+                        //out.write_all(&[v])?;
                         out.flush()?;
                     }
                     self.thr_empty()?;

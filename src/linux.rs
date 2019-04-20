@@ -8,7 +8,7 @@ use std::error::Error as StdError;
 use std::ffi::CStr;
 use std::fmt::{self, Display};
 use std::fs::{File, OpenOptions};
-use std::io::{self, stdin, Read};
+use std::io::{self, stdin, Read, Write};
 use std::mem;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -1256,9 +1256,9 @@ fn run_control(
 
     let stdin_handle = stdin();
     let stdin_lock = stdin_handle.lock();
-    stdin_lock
-        .set_raw_mode()
-        .expect("failed to set terminal raw mode");
+    //stdin_lock
+    //.set_raw_mode()
+    //.expect("failed to set terminal raw mode");
 
     let poll_ctx = PollContext::new().map_err(Error::CreatePollContext)?;
     poll_ctx
@@ -1338,6 +1338,12 @@ fn run_control(
     }
     vcpu_thread_barrier.wait();
 
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open("/tmp/gdbchars")
+        .unwrap();
     'poll: loop {
         let events = {
             match poll_ctx.wait() {
@@ -1368,11 +1374,7 @@ fn run_control(
                             let _ = poll_ctx.delete(&stdin_handle);
                         }
                         Ok(count) => {
-                            linux
-                                .stdio_serial
-                                .lock()
-                                .queue_input_bytes(&out[..count])
-                                .expect("failed to queue bytes into serial port");
+                            file.write_all(&out[..count]).unwrap();
                         }
                     }
                 }
@@ -1582,9 +1584,9 @@ fn run_control(
         }
     }
 
-    stdin_lock
-        .set_canon_mode()
-        .expect("failed to restore canonical mode for terminal");
+    //stdin_lock
+    //   .set_canon_mode()
+    //  .expect("failed to restore canonical mode for terminal");
 
     Ok(())
 }
