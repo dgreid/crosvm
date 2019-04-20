@@ -93,6 +93,7 @@ dependencies = [
  "data_model 0.1.0",
  "devices 0.1.0",
  "enumn 0.1.0",
+ "gdbstub 0.1.0",
  "gpu_buffer 0.1.0",
  "io_jail 0.1.0",
  "kernel_cmdline 0.1.0",
@@ -178,6 +179,10 @@ dependencies = [
  "quote 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "syn 0.15.26 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "gdbstub"
+version = "0.1.0"
 
 [[package]]
 name = "getopts"
