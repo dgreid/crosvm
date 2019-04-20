@@ -9,7 +9,7 @@ use std::error::Error as StdError;
 use std::ffi::CStr;
 use std::fmt::{self, Display};
 use std::fs::{File, OpenOptions};
-use std::io::{self, stdin, Read};
+use std::io::{self, stdin, stdout, Read};
 use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -25,6 +25,7 @@ use libc::{self, c_int, gid_t, uid_t};
 use audio_streams::DummyStreamSource;
 use devices::virtio::{self, VirtioDevice};
 use devices::{self, HostBackendDeviceProvider, PciDevice, VirtioPciDevice, XhciController};
+use gdbstub::{DummyBackend, GdbStub};
 use io_jail::{self, Minijail};
 use kvm::*;
 use libcras::CrasClient;
@@ -1428,6 +1429,8 @@ fn run_control(
 
     let stdin_handle = stdin();
     let stdin_lock = stdin_handle.lock();
+    let stdout_handle = stdout();
+    let stdout_lock = stdout_handle.lock();
     //stdin_lock
     //.set_raw_mode()
     //.expect("failed to set terminal raw mode");
@@ -1510,6 +1513,7 @@ fn run_control(
     }
     vcpu_thread_barrier.wait();
 
+    let mut gdb = GdbStub::new(DummyBackend {}, stdout_lock);
     'poll: loop {
         let events = {
             match poll_ctx.wait() {
@@ -1540,11 +1544,8 @@ fn run_control(
                             let _ = poll_ctx.delete(&stdin_handle);
                         }
                         Ok(count) => {
-                            if let Some(ref stdio_serial) = linux.stdio_serial {
-                                stdio_serial
-                                    .lock()
-                                    .queue_input_bytes(&out[..count])
-                                    .expect("failed to queue bytes into serial port");
+                            for c in &out[..count] {
+                                let _ = gdb.byte_from_client(*c);
                             }
                         }
                     }
