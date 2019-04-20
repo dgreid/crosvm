@@ -243,6 +243,7 @@ where
     G::Register: 'static,
 {
     Ok(match message.packet_data[0] {
+        b'q' => Box::new(GdbReply::from_bytes(b"".to_vec())), //TODO - actual response
         b'g' => match backend.read_general_registers() {
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
@@ -300,6 +301,50 @@ where
     Ok(())
 }
 
+pub struct DummyBackend {}
+impl GdbBackend for DummyBackend {
+    type Register = u64;
+    type Error = io::Error;
+
+    fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error> {
+        Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
+    }
+
+    fn write_general_registers(&mut self) -> BackendResult<(), Self::Error> {
+        Ok(())
+    }
+
+    fn cont(&mut self) -> BackendResult<GdbSignal, Self::Error> {
+        Ok(GdbSignal::SIGTRAP)
+    }
+
+    fn step(&mut self) -> BackendResult<GdbSignal, Self::Error> {
+        Ok(GdbSignal::SIGTRAP)
+    }
+
+    fn last_signal(&self) -> BackendResult<GdbSignal, Self::Error> {
+        Ok(GdbSignal::SIGTRAP)
+    }
+    fn read_memory(&self, address: usize, buf: &mut [u8]) -> BackendResult<(), Self::Error> {
+        Ok(())
+    }
+    fn write_memory(&mut self, address: usize, buf: &[u8]) -> BackendResult<(), Self::Error> {
+        Ok(())
+    }
+    fn set_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error> {
+        Ok(())
+    }
+    fn clear_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error> {
+        Ok(())
+    }
+    fn detach(&mut self) -> BackendResult<(), Self::Error> {
+        Ok(())
+    }
+    fn set_running(running: bool) {}
+    fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8> {
+        r.to_ne_bytes().into_iter().cloned().collect()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
