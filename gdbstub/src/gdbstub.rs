@@ -137,8 +137,8 @@ fn from_ascii(digit: u8) -> u8 {
     // TODO - return an error if invalid?
     match digit {
         d if d >= b'0' && d <= b'9' => d - b'0',
-        d if d >= b'a' && d <= b'f' => d - b'a',
-        d if d >= b'A' && d <= b'F' => d - b'A',
+        d if d >= b'a' && d <= b'f' => 0xa + d - b'a',
+        d if d >= b'A' && d <= b'F' => 0xa + d - b'A',
         _ => 0,
     }
 }
@@ -212,20 +212,33 @@ where
 
     /// Used to signal that a new byte has been received from the client.
     /// Returns 'None' if a message is not yet complete.
-    pub fn byte_from_client(&mut self, byte: u8) -> std::result::Result<(), Error<G>> {
+    pub fn byte_from_client(
+        &mut self,
+        byte: u8,
+        f: &mut std::fs::File,
+    ) -> std::result::Result<(), Error<G>> {
         if let Some(message_result) = self.reader.next_byte(byte) {
             match message_result {
                 Ok(message) => {
+                    //                    f.write_all(b"\n\ngot message\n").unwrap();
                     self.client_out.write(b"+").map_err(Error::WritingOutput)?;
+                    f.write(b"+").unwrap();
+                    self.client_out.flush();
+
                     let response = handle_message(&mut self.backend, &message)?;
+                    let response_vec = &response.collect::<Vec<u8>>();
                     self.client_out
-                        .write_all(&response.collect::<Vec<u8>>())
+                        .write_all(&response_vec)
                         .map_err(Error::WritingOutput)?;
+                    f.write_all(&response_vec).map_err(Error::WritingOutput)?;
                 }
-                Err(ReceiveError::ChecksumMismatch(_, _)) => {
+                Err(ReceiveError::ChecksumMismatch(t, c)) => {
+                    //write!(f, "\n\ngot bad checksum t:{:x} c:{:x}\n", t, c).unwrap();
                     self.client_out.write(b"-").map_err(Error::WritingOutput)?;
+                    f.write(b"-").unwrap();
                 }
             }
+            self.client_out.flush();
         }
         Ok(())
     }
@@ -266,7 +279,10 @@ where
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
             Ok(s) => Box::new(gdbreply::signal(s as u8)),
         },
-        _ => Box::new(gdbreply::error(0x00)), // TODO - replace '00' with EINVAL or ENOTSUPP?
+        _ => {
+            // The gdb spec seems to be to reply empty for unsupported commands.
+            Box::new(gdbreply::empty())
+        }
     })
 }
 
@@ -301,13 +317,25 @@ where
     Ok(())
 }
 
-pub struct DummyBackend {}
+pub struct DummyBackend {
+    g_error: Option<u8>,
+}
+impl DummyBackend {
+    pub fn new() -> DummyBackend {
+        DummyBackend { g_error: None }
+    }
+}
+
 impl GdbBackend for DummyBackend {
     type Register = u64;
     type Error = io::Error;
 
     fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error> {
-        Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
+        if let Some(e) = self.g_error {
+            Err(BackendError::Response(e))
+        } else {
+            Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
+        }
     }
 
     fn write_general_registers(&mut self) -> BackendResult<(), Self::Error> {
@@ -345,6 +373,7 @@ impl GdbBackend for DummyBackend {
         r.to_ne_bytes().into_iter().cloned().collect()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,62 +392,11 @@ mod tests {
         assert_eq!(result.unwrap().packet_data, b"g");
     }
 
-    struct TestBackend {
-        g_error: Option<u8>,
-    }
-    impl GdbBackend for TestBackend {
-        type Register = u64;
-        type Error = io::Error;
-
-        fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error> {
-            if let Some(e) = self.g_error {
-                Err(BackendError::Response(e))
-            } else {
-                Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
-            }
-        }
-
-        fn write_general_registers(&mut self) -> BackendResult<(), Self::Error> {
-            Ok(())
-        }
-
-        fn cont(&mut self) -> BackendResult<GdbSignal, Self::Error> {
-            Ok(GdbSignal::SIGTRAP)
-        }
-
-        fn step(&mut self) -> BackendResult<GdbSignal, Self::Error> {
-            Ok(GdbSignal::SIGTRAP)
-        }
-
-        fn last_signal(&self) -> BackendResult<GdbSignal, Self::Error> {
-            Ok(GdbSignal::SIGTRAP)
-        }
-        fn read_memory(&self, address: usize, buf: &mut [u8]) -> BackendResult<(), Self::Error> {
-            Ok(())
-        }
-        fn write_memory(&mut self, address: usize, buf: &[u8]) -> BackendResult<(), Self::Error> {
-            Ok(())
-        }
-        fn set_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error> {
-            Ok(())
-        }
-        fn clear_breakpoint(&mut self, address: usize) -> BackendResult<(), Self::Error> {
-            Ok(())
-        }
-        fn detach(&mut self) -> BackendResult<(), Self::Error> {
-            Ok(())
-        }
-        fn set_running(running: bool) {}
-        fn reg_to_ne_bytes(r: Self::Register) -> Vec<u8> {
-            r.to_ne_bytes().into_iter().cloned().collect()
-        }
-    }
-
     #[test]
     fn checksum() {
         let mut input = Cursor::new(b"$g#66$g#67");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend { g_error: None };
+        let mut backend = DummyBackend { g_error: None };
 
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(&output.get_ref()[0..2], b"-+");
@@ -428,7 +406,7 @@ mod tests {
     fn read_global_registers_error() {
         let mut input = Cursor::new(b"$g#67");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend {
+        let mut backend = DummyBackend {
             g_error: Some(0x33),
         };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
@@ -439,7 +417,7 @@ mod tests {
     fn write_global_registers_error() {
         let mut input = Cursor::new(b"$G#47");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend { g_error: None };
+        let mut backend = DummyBackend { g_error: None };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(output.get_ref(), b"+$OK#9A");
     }
@@ -448,7 +426,7 @@ mod tests {
     fn cont() {
         let mut input = Cursor::new(b"$c#63");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend { g_error: None };
+        let mut backend = DummyBackend { g_error: None };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(output.get_ref(), b"+$T05#B9");
     }
@@ -457,8 +435,18 @@ mod tests {
     fn step() {
         let mut input = Cursor::new(b"$s#73");
         let mut output = Cursor::new(Vec::new());
-        let mut backend = TestBackend { g_error: None };
+        let mut backend = DummyBackend { g_error: None };
         assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
         assert_eq!(output.get_ref(), b"+$T05#B9");
     }
+
+    #[test]
+    fn q_packet() {
+        let input =
+            Cursor::new(b"$qSupported:multiprocess+;swbreak+;hwbreak+;qRelocInsn+;fork-events+;vfork-events+;exec-events+;vContSupported+;QThreadEvents+;no-resumed+;xmlRegisters=i386#6a".to_vec());
+        let mut messages = GdbMessageScanner::new(input);
+        let result = messages.next().unwrap();
+        assert!(result.is_ok());
+    }
+
 }

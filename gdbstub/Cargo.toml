@@ -8,3 +8,7 @@ edition = "2018"
 path = "src/gdbstub.rs"
 
 [dependencies]
+
+[dev-dependencies]
+libc="*"
+sys_util = {path="../sys_util"}
