@@ -13,7 +13,7 @@ fn show_usage(arg0: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args[1] == "--help" || args[1] == "-h" {
+    if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
         show_usage(&args[0]);
         return;
     }
@@ -50,7 +50,7 @@ fn main() {
     for b in input.bytes() {
         match b {
             Ok(b) => {
-                //test_out.write_all(&[b]).unwrap();
+                test_out.write_all(&[b]).unwrap();
                 match stub.byte_from_client(b, &mut test_out) {
                     Ok(()) => (),
                     Err(_) => return,
