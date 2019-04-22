@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::io::StdinLock;
+use std::io::{StdinLock, StdoutLock};
 use std::mem::zeroed;
 use std::os::unix::io::RawFd;
 
 use libc::{
     c_int, fcntl, isatty, read, tcgetattr, tcsetattr, termios, ECHO, F_GETFL, F_SETFL, ICANON,
-    ISIG, O_NONBLOCK, STDIN_FILENO, TCSANOW,
+    ISIG, O_NONBLOCK, STDIN_FILENO, STDOUT_FILENO, TCSANOW,
 };
 
 use crate::{errno_result, Result};
@@ -110,5 +110,12 @@ pub unsafe trait Terminal {
 unsafe impl<'a> Terminal for StdinLock<'a> {
     fn tty_fd(&self) -> RawFd {
         STDIN_FILENO
+    }
+}
+
+// Safe because we return a genuine terminal fd that never changes and shares our lifetime.
+unsafe impl<'a> Terminal for StdoutLock<'a> {
+    fn tty_fd(&self) -> RawFd {
+        STDOUT_FILENO
     }
 }
