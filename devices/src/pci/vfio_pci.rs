@@ -291,14 +291,18 @@ impl PciDevice for VfioPciDevice {
     fn assign_irq(
         &mut self,
         irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_resample_evt: Option<EventFd>,
         irq_num: u32,
         irq_pin: PciInterruptPin,
     ) {
         self.config.write_config_byte(irq_num as u8, 0x3C);
         self.config.write_config_byte(irq_pin as u8 + 1, 0x3D);
         self.interrupt_evt = Some(irq_evt);
-        self.interrupt_resample_evt = Some(irq_resample_evt);
+        self.interrupt_resample_evt = irq_resample_evt;
+    }
+
+    fn need_resample_evt(&self) -> bool {
+        false
     }
 
     fn allocate_io_bars(

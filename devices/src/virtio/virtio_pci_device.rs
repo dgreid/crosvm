@@ -320,13 +320,13 @@ impl PciDevice for VirtioPciDevice {
     fn assign_irq(
         &mut self,
         irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_resample_evt: Option<EventFd>,
         irq_num: u32,
         irq_pin: PciInterruptPin,
     ) {
         self.config_regs.set_irq(irq_num as u8, irq_pin);
         self.interrupt_evt = Some(irq_evt);
-        self.interrupt_resample_evt = Some(irq_resample_evt);
+        self.interrupt_resample_evt = irq_resample_evt;
     }
 
     fn allocate_io_bars(

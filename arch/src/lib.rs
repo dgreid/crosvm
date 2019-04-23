@@ -169,7 +169,7 @@ pub fn generate_pci_root(
         syslog::push_fds(&mut keep_fds);
 
         let irqfd = EventFd::new().map_err(DeviceRegistrationError::EventFdCreate)?;
-        let irq_resample_fd = EventFd::new().map_err(DeviceRegistrationError::EventFdCreate)?;
+        let need_resample = device.need_resample_evt();
         let irq_num = resources
             .allocate_irq()
             .ok_or(DeviceRegistrationError::AllocateIrq)? as u32;
@@ -180,11 +180,18 @@ pub fn generate_pci_root(
             3 => PciInterruptPin::IntD,
             _ => panic!(""), // Obviously not possible, but the compiler is not smart enough.
         };
-        vm.register_irqfd_resample(&irqfd, &irq_resample_fd, irq_num)
-            .map_err(DeviceRegistrationError::RegisterIrqfd)?;
         keep_fds.push(irqfd.as_raw_fd());
-        keep_fds.push(irq_resample_fd.as_raw_fd());
-        device.assign_irq(irqfd, irq_resample_fd, irq_num, pci_irq_pin);
+        if need_resample {
+            let irq_resample_fd = EventFd::new().map_err(DeviceRegistrationError::EventFdCreate)?;
+            vm.register_irqfd_resample(&irqfd, &irq_resample_fd, irq_num)
+                .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+            keep_fds.push(irq_resample_fd.as_raw_fd());
+            device.assign_irq(irqfd, Some(irq_resample_fd), irq_num, pci_irq_pin);
+        } else {
+            vm.register_irqfd(&irqfd, irq_num)
+                .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+            device.assign_irq(irqfd, None, irq_num, pci_irq_pin);
+        }
         pci_irqs.push((dev_idx as u32, pci_irq_pin));
 
         let ranges = device

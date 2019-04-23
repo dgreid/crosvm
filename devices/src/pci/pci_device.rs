@@ -57,10 +57,14 @@ pub trait PciDevice: Send {
     fn assign_irq(
         &mut self,
         _irq_evt: EventFd,
-        _irq_resample_evt: EventFd,
+        _irq_resample_evt: Option<EventFd>,
         _irq_num: u32,
         _irq_pin: PciInterruptPin,
     ) {
+    }
+
+    fn need_resample_evt(&self) -> bool {
+        true
     }
     /// Allocates the needed IO BAR space using the `allocate` function which takes a size and
     /// returns an address. Returns a Vec of (address, length) tuples.
@@ -155,11 +159,14 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     fn assign_irq(
         &mut self,
         irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_resample_evt: Option<EventFd>,
         irq_num: u32,
         irq_pin: PciInterruptPin,
     ) {
         (**self).assign_irq(irq_evt, irq_resample_evt, irq_num, irq_pin)
+    }
+    fn need_resample_evt(&self) -> bool {
+        (**self).need_resample_evt()
     }
     fn allocate_io_bars(&mut self, resources: &mut SystemAllocator) -> Result<Vec<(u64, u64)>> {
         (**self).allocate_io_bars(resources)

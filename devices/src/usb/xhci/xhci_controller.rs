@@ -186,13 +186,14 @@ impl PciDevice for XhciController {
     fn assign_irq(
         &mut self,
         irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_resample_evt: Option<EventFd>,
         irq_num: u32,
         irq_pin: PciInterruptPin,
     ) {
         match mem::replace(&mut self.state, XhciControllerState::Unknown) {
             XhciControllerState::Created { device_provider } => {
                 self.config_regs.set_irq(irq_num as u8, irq_pin);
+                let irq_resample_evt = irq_resample_evt.expect("xhci need irq_resample_evt");
                 self.state = XhciControllerState::IrqAssigned {
                     device_provider,
                     irq_evt,
