@@ -968,9 +968,12 @@ impl WlVfd {
     }
 
     fn close(&mut self) -> WlResult<()> {
-        if let Some((slot, _, vm)) = self.slot.take() {
-            vm.request(VmMemoryRequest::UnregisterMemory(slot))?;
+        if let Some((slot, pfn, vm)) = self.slot.take() {
+            if let Some((size, _f)) = self.guest_shared_memory.take() {
+                vm.request(VmMemoryRequest::UnregisterMemory(slot, pfn, size as usize))?;
+            }
         }
+
         self.socket = None;
         self.remote_pipe = None;
         self.local_pipe = None;

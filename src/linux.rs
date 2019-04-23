@@ -54,7 +54,8 @@ use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket, DiskControlResult,
     UsbControlSocket, VfioDeviceRequestSocket, VfioDeviceResponseSocket, VfioDriverRequest,
-    VfioDriverResponse, VmControlResponseSocket, VmMemoryControlRequestSocket,
+    VfioDriverResponse, VfioServerRequest, VfioServerRequestSocket, VfioServerResponse,
+    VfioServerResponseSocket, VmControlResponseSocket, VmMemoryControlRequestSocket,
     VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse, VmRunMode,
 };
 
@@ -956,6 +957,7 @@ fn create_devices(
     disk_device_sockets: &mut Vec<DiskControlResponseSocket>,
     usb_provider: HostBackendDeviceProvider,
     vfio_device_socket: Option<VfioDeviceRequestSocket>,
+    vfio_server_socket: Option<VfioServerResponseSocket>,
 ) -> DeviceResult<Vec<(Box<dyn PciDevice>, Option<Minijail>)>> {
     let stubs = create_virtio_devices(
         &cfg,
@@ -1009,7 +1011,11 @@ fn create_devices(
         let vfiodevice = Box::new(
             VfioDevice::new(vfio_path, vm, (*mem).clone()).map_err(Error::CreateVfioDevice)?,
         );
-        let vfiopcidevice = Box::new(VfioPciDevice::new(vfiodevice, vfio_device_socket));
+        let vfiopcidevice = Box::new(VfioPciDevice::new(
+            vfiodevice,
+            vfio_device_socket,
+            vfio_server_socket,
+        ));
         pci_devices.push((vfiopcidevice, simple_jail(&cfg, "vfio_device.policy")?));
     }
 
@@ -1369,12 +1375,19 @@ pub fn run_config(cfg: Config) -> Result<()> {
     control_sockets.push(TaggedControlSocket::VmMemory(gpu_host_socket));
 
     let mut vfio_device_socket_opt: Option<VfioDeviceRequestSocket> = None;
+    let mut vfio_server_socket_opt: Option<VfioServerResponseSocket> = None;
+    let mut vfio_client_socket_opt: Option<VfioServerRequestSocket> = None;
     if cfg.vfio.is_some() {
         let (vfio_host_socket, vfio_device_socket) =
             msg_socket::pair::<VfioDriverResponse, VfioDriverRequest>()
                 .map_err(Error::CreateSocket)?;
         control_sockets.push(TaggedControlSocket::Vfio(vfio_host_socket));
         vfio_device_socket_opt = Some(vfio_device_socket);
+        let (vfio_server_socket, vfio_client_socket) =
+            msg_socket::pair::<VfioServerResponse, VfioServerRequest>()
+                .map_err(Error::CreateSocket)?;
+        vfio_server_socket_opt = Some(vfio_server_socket);
+        vfio_client_socket_opt = Some(vfio_client_socket);
     }
 
     let sandbox = cfg.sandbox;
@@ -1395,6 +1408,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
                 &mut disk_device_sockets,
                 usb_provider,
                 vfio_device_socket_opt,
+                vfio_server_socket_opt,
             )
         },
     )
@@ -1446,6 +1460,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
         balloon_host_socket,
         &disk_host_sockets,
         usb_control_socket,
+        vfio_client_socket_opt,
         sigchld_fd,
         _render_node_host,
         sandbox,
@@ -1459,6 +1474,7 @@ fn run_control(
     balloon_host_socket: BalloonControlRequestSocket,
     disk_host_sockets: &[DiskControlRequestSocket],
     usb_control_socket: UsbControlSocket,
+    vfio_client_socket: Option<VfioServerRequestSocket>,
     sigchld_fd: SignalFd,
     _render_node_host: RenderNodeHost,
     sandbox: bool,
@@ -1771,8 +1787,11 @@ fn run_control(
                             },
                             TaggedControlSocket::VmMemory(socket) => match socket.recv() {
                                 Ok(request) => {
-                                    let response =
-                                        request.execute(&mut linux.vm, &mut linux.resources);
+                                    let response = request.execute(
+                                        &mut linux.vm,
+                                        &mut linux.resources,
+                                        &vfio_client_socket,
+                                    );
                                     if let Err(e) = socket.send(&response) {
                                         error!("failed to send VmMemoryControlResponse: {}", e);
                                     }

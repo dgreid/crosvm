@@ -4,15 +4,21 @@
 
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
+use std::thread;
 use std::u32;
+
+use libc::EINVAL;
 
 use kvm::Datamatch;
 use msg_socket::{MsgReceiver, MsgSender};
 use resources::{AddressAllocator, Alloc, Error as ResErr, SystemAllocator};
-use sys_util::{error, EventFd};
+use sys_util::{error, Error as SysError, EventFd, PollContext, PollToken};
 
 use vfio_sys::*;
-use vm_control::{MaybeOwnedFd, VfioDeviceRequestSocket, VfioDriverRequest, VfioDriverResponse};
+use vm_control::{
+    MaybeOwnedFd, VfioDeviceRequestSocket, VfioDriverRequest, VfioDriverResponse,
+    VfioServerRequest, VfioServerResponse, VfioServerResponseSocket,
+};
 
 use crate::pci::pci_device::{Error as PciDeviceError, PciDevice};
 use crate::pci::PciInterruptPin;
@@ -245,11 +251,16 @@ pub struct VfioPciDevice {
     virq: u32,
     vm_socket: VfioDeviceRequestSocket,
     active: bool,
+    server_socket: Option<VfioServerResponseSocket>,
 }
 
 impl VfioPciDevice {
     /// Constructs a new Vfio Pci device for the give Vfio device
-    pub fn new(device: Box<VfioDevice>, vfio_device_socket: VfioDeviceRequestSocket) -> Self {
+    pub fn new(
+        device: Box<VfioDevice>,
+        vfio_device_socket: VfioDeviceRequestSocket,
+        vfio_server_socket: Option<VfioServerResponseSocket>,
+    ) -> Self {
         let dev = Arc::new(*device);
         let config = VfioPciConfig::new(Arc::clone(&dev));
         let msi_cap = VfioMsiCap::new(&config);
@@ -266,6 +277,7 @@ impl VfioPciDevice {
             virq: 0,
             vm_socket: vfio_device_socket,
             active: false,
+            server_socket: vfio_server_socket,
         }
     }
 
@@ -387,10 +399,98 @@ impl VfioPciDevice {
         }
     }
 
+    fn active_thread(&mut self, device: Arc<VfioDevice>) {
+        let server_socket: VfioServerResponseSocket;
+        match self.server_socket.take() {
+            Some(socket) => server_socket = socket,
+            None => return,
+        }
+
+        let thread_result = thread::Builder::new()
+            .name("vfio".to_string())
+            .spawn(move || {
+                #[derive(PollToken)]
+                enum Token {
+                    VfioRequest,
+                }
+
+                let poll_ctx: PollContext<Token> = match PollContext::new()
+                    .and_then(|pc| pc.add(&server_socket, Token::VfioRequest).and(Ok(pc)))
+                {
+                    Ok(pc) => pc,
+                    Err(e) => {
+                        error!("failed creating PollContext: {}", e);
+                        return;
+                    }
+                };
+
+                'poll: loop {
+                    let events = match poll_ctx.wait() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("failed polling for events: {}", e);
+                            break;
+                        }
+                    };
+
+                    for event in events.iter_readable() {
+                        match event.token() {
+                            Token::VfioRequest => {
+                                let req = match server_socket.recv() {
+                                    Ok(req) => req,
+                                    Err(e) => {
+                                        error!("server socket recv failure: {:?}", e);
+                                        if poll_ctx.delete(&server_socket).is_err() {
+                                            error!("failed to delete vfio server_socket from poll_context");
+                                        }
+                                        break;
+                                    }
+                                };
+
+                                let resp = match req {
+                                    VfioServerRequest::DmaMap(iova, size, host_addr) => {
+                                        // Safe because the given iova is valid guest address, and
+                                        // if it is overlap with others, this function return error
+                                        // the host pointer is correct and valid guaranteed by MemoryMapping
+                                        // interface.
+                                        match unsafe { device.vfio_dma_map(iova, size, host_addr) } {
+                                            Ok(()) => VfioServerResponse::Ok,
+                                            _ => VfioServerResponse::Err(SysError::new(EINVAL)),
+                                        }
+                                    }
+                                    VfioServerRequest::DmaUnmap(iova, size) => {
+                                        match device.vfio_dma_unmap(iova, size) {
+                                            Ok(()) => VfioServerResponse::Ok,
+                                            _ => VfioServerResponse::Err(SysError::new(EINVAL)),
+                                        }
+                                    }
+                                };
+
+                                if let Err(e) = server_socket.send(&resp) {
+                                    error!("server socket failed send: {:?}", e);
+                                    if poll_ctx.delete(&server_socket).is_err() {
+                                         error!("failed to delete vfio server_socket from poll_context");
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        if let Err(e) = thread_result {
+            error!("failed to spawn vfio thread: {}", e);
+            return;
+        }
+    }
+
     fn activate(&mut self) {
         for mmio_info in self.mmio_regions.iter() {
             self.add_bar_mmap(mmio_info.bar_index, mmio_info.start);
         }
+
+        let device = self.device.clone();
+        self.active_thread(device);
 
         self.active = true;
     }
@@ -414,6 +514,9 @@ impl PciDevice for VfioPciDevice {
             fds.push(interrupt_resample_evt.as_raw_fd());
         }
         fds.push(self.vm_socket.as_raw_fd());
+        if let Some(ref server_socket) = self.server_socket {
+            fds.push(server_socket.as_raw_fd());
+        }
         fds
     }
 
