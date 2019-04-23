@@ -53,7 +53,8 @@ use vhost;
 use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket, DiskControlResult,
-    UsbControlSocket, VmControlResponseSocket, VmMemoryControlRequestSocket,
+    UsbControlSocket, VfioDeviceRequestSocket, VfioDeviceResponseSocket, VfioDriverRequest,
+    VfioDriverResponse, VmControlResponseSocket, VmMemoryControlRequestSocket,
     VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse, VmRunMode,
 };
 
@@ -259,6 +260,7 @@ type Result<T> = std::result::Result<T, Error>;
 enum TaggedControlSocket {
     Vm(VmControlResponseSocket),
     VmMemory(VmMemoryControlResponseSocket),
+    Vfio(VfioDeviceResponseSocket),
 }
 
 impl AsRef<UnixSeqpacket> for TaggedControlSocket {
@@ -267,6 +269,7 @@ impl AsRef<UnixSeqpacket> for TaggedControlSocket {
         match &self {
             Vm(ref socket) => socket,
             VmMemory(ref socket) => socket,
+            Vfio(ref socket) => socket,
         }
     }
 }
@@ -952,6 +955,7 @@ fn create_devices(
     balloon_device_socket: BalloonControlResponseSocket,
     disk_device_sockets: &mut Vec<DiskControlResponseSocket>,
     usb_provider: HostBackendDeviceProvider,
+    vfio_device_socket: Option<VfioDeviceRequestSocket>,
 ) -> DeviceResult<Vec<(Box<dyn PciDevice>, Option<Minijail>)>> {
     let stubs = create_virtio_devices(
         &cfg,
@@ -1001,10 +1005,11 @@ fn create_devices(
 
     if cfg.vfio.is_some() {
         let vfio_path = cfg.vfio.as_ref().unwrap().as_path();
+        let vfio_device_socket = vfio_device_socket.unwrap();
         let vfiodevice = Box::new(
             VfioDevice::new(vfio_path, vm, (*mem).clone()).map_err(Error::CreateVfioDevice)?,
         );
-        let vfiopcidevice = Box::new(VfioPciDevice::new(vfiodevice));
+        let vfiopcidevice = Box::new(VfioPciDevice::new(vfiodevice, vfio_device_socket));
         pci_devices.push((vfiopcidevice, simple_jail(&cfg, "vfio_device.policy")?));
     }
 
@@ -1363,6 +1368,15 @@ pub fn run_config(cfg: Config) -> Result<()> {
         msg_socket::pair::<VmMemoryResponse, VmMemoryRequest>().map_err(Error::CreateSocket)?;
     control_sockets.push(TaggedControlSocket::VmMemory(gpu_host_socket));
 
+    let mut vfio_device_socket_opt: Option<VfioDeviceRequestSocket> = None;
+    if cfg.vfio.is_some() {
+        let (vfio_host_socket, vfio_device_socket) =
+            msg_socket::pair::<VfioDriverResponse, VfioDriverRequest>()
+                .map_err(Error::CreateSocket)?;
+        control_sockets.push(TaggedControlSocket::Vfio(vfio_host_socket));
+        vfio_device_socket_opt = Some(vfio_device_socket);
+    }
+
     let sandbox = cfg.sandbox;
     let linux = Arch::build_vm(
         components,
@@ -1380,6 +1394,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
                 balloon_device_socket,
                 &mut disk_device_sockets,
                 usb_provider,
+                vfio_device_socket_opt,
             )
         },
     )
@@ -1767,6 +1782,21 @@ fn run_control(
                                         vm_control_indices_to_remove.push(index);
                                     } else {
                                         error!("failed to recv VmMemoryControlRequest: {}", e);
+                                    }
+                                }
+                            },
+                            TaggedControlSocket::Vfio(socket) => match socket.recv() {
+                                Ok(request) => {
+                                    let response = request.execute(&mut linux.vm);
+                                    if let Err(e) = socket.send(&response) {
+                                        error!("failed to send VfioDeviceResponse: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    if let MsgError::BadRecvSize { actual: 0, .. } = e {
+                                        vm_control_indices_to_remove.push(index);
+                                    } else {
+                                        error!("failed to recv VfioDeviceRequest: {}", e);
                                     }
                                 }
                             },

@@ -17,7 +17,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use libc::{EINVAL, EIO, ENODEV};
 
-use kvm::Vm;
+use kvm::{IrqRoute, IrqSource, Vm};
 use msg_socket::{MsgOnSocket, MsgReceiver, MsgResult, MsgSender, MsgSocket};
 use resources::{GpuMemoryDesc, SystemAllocator};
 use sys_util::{error, Error as SysError, GuestAddress, MemoryMapping, MmapError, Result};
@@ -273,6 +273,45 @@ pub enum VmMemoryResponse {
     Err(SysError),
 }
 
+#[derive(MsgOnSocket, Debug)]
+pub enum VfioDriverRequest {
+    /// Add one msi route entry into kvm
+    AddMsiRoute(u32, u64, u32),
+}
+
+impl VfioDriverRequest {
+    /// Executes this request on the given Vm.
+    ///
+    /// # Arguments
+    /// * `vm` - The `Vm` to perform the request on.
+    ///
+    /// This does not return a result, instead encapsulating the success or failure in a
+    /// `VfioDriverResponse` with the intended purpose of sending the response back over the socket
+    /// that received this `VfioDriverResponse`.
+    pub fn execute(&self, vm: &mut Vm) -> VfioDriverResponse {
+        use self::VfioDriverRequest::*;
+        match *self {
+            AddMsiRoute(gsi, address, data) => {
+                let route = IrqRoute {
+                    gsi,
+                    source: IrqSource::Msi { address, data },
+                };
+
+                match vm.add_irq_route_entry(route) {
+                    Ok(_) => VfioDriverResponse::Ok,
+                    Err(e) => VfioDriverResponse::Err(e),
+                }
+            }
+        }
+    }
+}
+
+#[derive(MsgOnSocket, Debug)]
+pub enum VfioDriverResponse {
+    Ok,
+    Err(SysError),
+}
+
 pub type BalloonControlRequestSocket = MsgSocket<BalloonControlCommand, ()>;
 pub type BalloonControlResponseSocket = MsgSocket<(), BalloonControlCommand>;
 
@@ -283,6 +322,9 @@ pub type UsbControlSocket = MsgSocket<UsbControlCommand, UsbControlResult>;
 
 pub type VmMemoryControlRequestSocket = MsgSocket<VmMemoryRequest, VmMemoryResponse>;
 pub type VmMemoryControlResponseSocket = MsgSocket<VmMemoryResponse, VmMemoryRequest>;
+
+pub type VfioDeviceRequestSocket = MsgSocket<VfioDriverRequest, VfioDriverResponse>;
+pub type VfioDeviceResponseSocket = MsgSocket<VfioDriverResponse, VfioDriverRequest>;
 
 pub type VmControlRequestSocket = MsgSocket<VmRequest, VmResponse>;
 pub type VmControlResponseSocket = MsgSocket<VmResponse, VmRequest>;

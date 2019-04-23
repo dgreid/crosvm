@@ -7,10 +7,12 @@ use std::sync::Arc;
 use std::u32;
 
 use kvm::Datamatch;
+use msg_socket::{MsgReceiver, MsgSender};
 use resources::{Alloc, SystemAllocator};
 use sys_util::{error, EventFd};
 
 use vfio_sys::*;
+use vm_control::{VfioDeviceRequestSocket, VfioDriverRequest, VfioDriverResponse};
 
 use crate::pci::pci_device::{Error as PciDeviceError, PciDevice};
 use crate::pci::PciInterruptPin;
@@ -210,6 +212,14 @@ impl VfioMsiCap {
     fn is_msi_enabled(&self) -> bool {
         self.ctl & PCI_MSI_FLAGS_ENABLE == PCI_MSI_FLAGS_ENABLE
     }
+
+    fn get_msi_address(&self) -> u64 {
+        self.address
+    }
+
+    fn get_msi_data(&self) -> u16 {
+        self.data
+    }
 }
 
 struct MmioInfo {
@@ -232,11 +242,13 @@ pub struct VfioPciDevice {
     mmio_regions: Vec<MmioInfo>,
     io_regions: Vec<IoInfo>,
     msi_cap: VfioMsiCap,
+    virq: u32,
+    vm_socket: VfioDeviceRequestSocket,
 }
 
 impl VfioPciDevice {
     /// Constructs a new Vfio Pci device for the give Vfio device
-    pub fn new(device: Box<VfioDevice>) -> Self {
+    pub fn new(device: Box<VfioDevice>, vfio_device_socket: VfioDeviceRequestSocket) -> Self {
         let dev = Arc::new(*device);
         let config = VfioPciConfig::new(Arc::clone(&dev));
         let msi_cap = VfioMsiCap::new(&config);
@@ -250,6 +262,8 @@ impl VfioPciDevice {
             mmio_regions: Vec::new(),
             io_regions: Vec::new(),
             msi_cap,
+            virq: 0,
+            vm_socket: vfio_device_socket,
         }
     }
 
@@ -265,6 +279,20 @@ impl VfioPciDevice {
         }
 
         None
+    }
+
+    fn add_msi_routing(&self, address: u64, data: u32) {
+        if let Err(e) = self
+            .vm_socket
+            .send(&VfioDriverRequest::AddMsiRoute(self.virq, address, data))
+        {
+            error!("failed to send AddMsiRoute request at {:?}", e);
+        }
+        match self.vm_socket.recv() {
+            Ok(VfioDriverResponse::Ok) => return,
+            Ok(VfioDriverResponse::Err(e)) => error!("failed to call AddMsiRoute request {:?}", e),
+            Err(e) => error!("failed to receive AddMsiRoute response {:?}", e),
+        }
     }
 }
 
@@ -285,6 +313,7 @@ impl PciDevice for VfioPciDevice {
         if let Some(ref interrupt_resample_evt) = self.interrupt_resample_evt {
             fds.push(interrupt_resample_evt.as_raw_fd());
         }
+        fds.push(self.vm_socket.as_raw_fd());
         fds
     }
 
@@ -299,6 +328,7 @@ impl PciDevice for VfioPciDevice {
         self.config.write_config_byte(irq_pin as u8 + 1, 0x3D);
         self.interrupt_evt = Some(irq_evt);
         self.interrupt_resample_evt = irq_resample_evt;
+        self.virq = irq_num;
     }
 
     fn need_resample_evt(&self) -> bool {
@@ -433,6 +463,9 @@ impl PciDevice for VfioPciDevice {
                         if let Err(e) = self.device.msi_enable(interrupt_evt) {
                             error!("{}", e);
                         }
+                        let address = self.msi_cap.get_msi_address();
+                        let data = self.msi_cap.get_msi_data();
+                        self.add_msi_routing(address, data.into());
                     }
                     Some(VfioMsiChange::Disable) => {
                         if let Err(e) = self.device.msi_disable() {
