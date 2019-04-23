@@ -270,15 +270,20 @@ impl AsRawFd for VfioGroup {
 }
 
 struct VfioRegion {
+    // flags for this region: read/write/mmap
     flags: u32,
     size: u64,
+    // region offset used to read/write with vfio device fd
     offset: u64,
+    // mmap offset and size
+    mmap: (u64, u64),
 }
 
 /// Vfio device for exposing regions which could be read/write to kernel vfio device.
 pub struct VfioDevice {
     dev: File,
     group: VfioGroup,
+    // vec for vfio device's regions
     regions: Vec<VfioRegion>,
     guest_mem: GuestMemory,
 }
@@ -374,8 +379,9 @@ impl VfioDevice {
         }
 
         for i in VFIO_PCI_BAR0_REGION_INDEX..dev_info.num_regions {
+            let argsz = mem::size_of::<vfio_region_info>() as u32;
             let mut reg_info = vfio_region_info {
-                argsz: mem::size_of::<vfio_region_info>() as u32,
+                argsz,
                 flags: 0,
                 index: i,
                 cap_offset: 0,
@@ -389,10 +395,61 @@ impl VfioDevice {
                 return Err(VfioError::VfioDeviceGetRegionInfo(get_error()));
             }
 
+            let mut mmap_size: u64 = 0;
+            let mut mmap_offset: u64 = 0;
+            if reg_info.argsz > argsz {
+                let cap_len: usize = (reg_info.argsz - argsz) as usize;
+                let mut region_with_cap =
+                    vec_with_array_field::<vfio_region_info_with_cap, u8>(cap_len);
+                region_with_cap[0].region_info.argsz = reg_info.argsz;
+                region_with_cap[0].region_info.flags = 0;
+                region_with_cap[0].region_info.index = i;
+                region_with_cap[0].region_info.cap_offset = 0;
+                region_with_cap[0].region_info.size = 0;
+                region_with_cap[0].region_info.offset = 0;
+                // Safe as we are the owner of dev and region_info which are valid value,
+                // and we verify the return value.
+                ret = unsafe {
+                    ioctl_with_mut_ref(
+                        dev,
+                        VFIO_DEVICE_GET_REGION_INFO(),
+                        &mut (region_with_cap[0].region_info),
+                    )
+                };
+                if ret < 0 {
+                    return Err(VfioError::VfioDeviceGetRegionInfo(get_error()));
+                }
+                // region_with_cap[0].cap_info may contain vfio_region_info_cap_sparse_mmap
+                // struct or vfio_region_info_cap_type struct. Both of them begin with
+                // vfio_info_cap_header.
+                // so safe to convert cap_info into vfio_info_cap_header pointer first, and
+                // safe to access its elments through this poiner.
+                let cap_header =
+                    unsafe { region_with_cap[0].cap_info.as_ptr() as *const vfio_info_cap_header };
+                if unsafe { (*cap_header).id as u32 } == VFIO_REGION_INFO_CAP_SPARSE_MMAP {
+                    // cap_info is vfio_region_sparse_mmap here
+                    // so safe to convert cap_info into vfio_info_region_sparse_mmap pointer, and
+                    // safe to access its elements through this pointer.
+                    let sparse_mmap = unsafe {
+                        region_with_cap[0].cap_info.as_ptr()
+                            as *const vfio_region_info_cap_sparse_mmap
+                    };
+                    let mmap_area = unsafe {
+                        (*sparse_mmap).areas.as_ptr() as *const vfio_region_sparse_mmap_area
+                    };
+                    mmap_size = unsafe { (*mmap_area).size };
+                    mmap_offset = unsafe { (*mmap_area).offset };
+                }
+            } else if reg_info.flags & VFIO_REGION_INFO_FLAG_MMAP != 0 {
+                mmap_size = reg_info.size;
+                mmap_offset = 0;
+            }
+
             let region = VfioRegion {
                 flags: reg_info.flags,
                 size: reg_info.size,
                 offset: reg_info.offset,
+                mmap: (mmap_offset, mmap_size),
             };
             regions.push(region);
         }
@@ -407,6 +464,28 @@ impl VfioDevice {
             None => {
                 warn!("get_region_flags() with invalid index: {}", index);
                 0
+            }
+        }
+    }
+
+    /// get a region's offset
+    pub fn get_region_offset(&self, index: u32) -> u64 {
+        match self.regions.get(index as usize) {
+            Some(v) => v.offset,
+            None => {
+                warn!("get_region_offset with invalid index: {}", index);
+                0
+            }
+        }
+    }
+
+    /// get a region's mmap info
+    pub fn get_region_mmap(&self, index: u32) -> (u64, u64) {
+        match self.regions.get(index as usize) {
+            Some(v) => v.mmap,
+            None => {
+                warn!("get_region_mmap with invalid index: {}", index);
+                (0, 0)
             }
         }
     }

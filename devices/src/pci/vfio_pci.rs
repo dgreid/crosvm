@@ -12,7 +12,7 @@ use resources::{AddressAllocator, Alloc, Error as ResErr, SystemAllocator};
 use sys_util::{error, EventFd};
 
 use vfio_sys::*;
-use vm_control::{VfioDeviceRequestSocket, VfioDriverRequest, VfioDriverResponse};
+use vm_control::{MaybeOwnedFd, VfioDeviceRequestSocket, VfioDriverRequest, VfioDriverResponse};
 
 use crate::pci::pci_device::{Error as PciDeviceError, PciDevice};
 use crate::pci::PciInterruptPin;
@@ -244,6 +244,7 @@ pub struct VfioPciDevice {
     msi_cap: VfioMsiCap,
     virq: u32,
     vm_socket: VfioDeviceRequestSocket,
+    active: bool,
 }
 
 impl VfioPciDevice {
@@ -264,6 +265,7 @@ impl VfioPciDevice {
             msi_cap,
             virq: 0,
             vm_socket: vfio_device_socket,
+            active: false,
         }
     }
 
@@ -289,8 +291,8 @@ impl VfioPciDevice {
             error!("failed to send AddMsiRoute request at {:?}", e);
         }
         match self.vm_socket.recv() {
-            Ok(VfioDriverResponse::Ok) => return,
             Ok(VfioDriverResponse::Err(e)) => error!("failed to call AddMsiRoute request {:?}", e),
+            Ok(_) => return,
             Err(e) => error!("failed to receive AddMsiRoute response {:?}", e),
         }
     }
@@ -339,6 +341,58 @@ impl VfioPciDevice {
             .map_err(|e| PciDeviceError::IoAllocationFailed(size, e))?;
 
         Ok(bar_addr)
+    }
+
+    fn add_bar_mmap(&self, index: u32, bar_addr: u64) -> Option<u32> {
+        if self.device.get_region_flags(index) & VFIO_REGION_INFO_FLAG_MMAP != 0 {
+            let (mmap_offset, mmap_size) = self.device.get_region_mmap(index);
+            if mmap_size == 0 {
+                return None;
+            }
+
+            let guest_map_start = bar_addr + mmap_offset;
+            let region_offset = self.device.get_region_offset(index);
+            if self
+                .vm_socket
+                .send(&VfioDriverRequest::RegisterMmapMemory(
+                    MaybeOwnedFd::Borrowed(self.device.as_raw_fd()),
+                    mmap_size as usize,
+                    (region_offset + mmap_offset) as usize,
+                    guest_map_start,
+                ))
+                .is_err()
+            {
+                return None;
+            }
+            let response = match self.vm_socket.recv() {
+                Ok(res) => res,
+                Err(_) => return None,
+            };
+            match response {
+                VfioDriverResponse::RegisterMmapMemory { slot, host } => {
+                    // Safe because the given guest_map_start is valid guest bar address. and
+                    // the host pointer is correct and valid guaranteed by MemoryMapping interface.
+                    match unsafe { self.device.vfio_dma_map(guest_map_start, mmap_size, host) } {
+                        Ok(_) => Some(slot),
+                        Err(e) => {
+                            error!("{}", e);
+                            return None;
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        } else {
+            None
+        }
+    }
+
+    fn activate(&mut self) {
+        for mmio_info in self.mmio_regions.iter() {
+            self.add_bar_mmap(mmio_info.bar_index, mmio_info.start);
+        }
+
+        self.active = true;
     }
 }
 
@@ -487,6 +541,10 @@ impl PciDevice for VfioPciDevice {
     }
 
     fn write_config_register(&mut self, reg_idx: usize, offset: u64, data: &[u8]) {
+        if !self.active {
+            self.activate();
+        }
+
         let start = (reg_idx * 4) as u64 + offset;
 
         if self.msi_cap.is_msi_reg(start, data.len()) {

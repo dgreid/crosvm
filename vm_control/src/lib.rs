@@ -277,6 +277,10 @@ pub enum VmMemoryResponse {
 pub enum VfioDriverRequest {
     /// Add one msi route entry into kvm
     AddMsiRoute(u32, u64, u32),
+    /// Register mmaped memory into kvm's EPT.
+    RegisterMmapMemory(MaybeOwnedFd, usize, usize, u64),
+    /// Unregister the given memory slot that was previously registereed with `RegisterMmapMemory`.
+    UnregisterMmapMemory(u32),
 }
 
 impl VfioDriverRequest {
@@ -302,12 +306,28 @@ impl VfioDriverRequest {
                     Err(e) => VfioDriverResponse::Err(e),
                 }
             }
+            RegisterMmapMemory(ref fd, size, offset, guest_addr) => {
+                let mmap = match MemoryMapping::from_fd_offset(fd, size, offset) {
+                    Ok(v) => v,
+                    Err(_e) => return VfioDriverResponse::Err(SysError::new(EINVAL)),
+                };
+                let host = mmap.as_ptr() as u64;
+                match vm.add_device_memory(GuestAddress(guest_addr), mmap, false, false) {
+                    Ok(v) => VfioDriverResponse::RegisterMmapMemory { slot: v, host },
+                    Err(e) => VfioDriverResponse::Err(e),
+                }
+            }
+            UnregisterMmapMemory(slot) => match vm.remove_device_memory(slot) {
+                Ok(_) => VfioDriverResponse::Ok,
+                Err(e) => VfioDriverResponse::Err(e),
+            },
         }
     }
 }
 
 #[derive(MsgOnSocket, Debug)]
 pub enum VfioDriverResponse {
+    RegisterMmapMemory { slot: u32, host: u64 },
     Ok,
     Err(SysError),
 }
