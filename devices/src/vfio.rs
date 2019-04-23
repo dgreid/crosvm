@@ -400,6 +400,17 @@ impl VfioDevice {
         Ok(regions)
     }
 
+    /// get a region's flag
+    pub fn get_region_flags(&self, index: u32) -> u32 {
+        match self.regions.get(index as usize) {
+            Some(v) => v.flags,
+            None => {
+                warn!("get_region_flags() with invalid index: {}", index);
+                0
+            }
+        }
+    }
+
     /// Read region's data from VFIO device into buf
     /// index: region num
     /// buf: data destination and buf length is read size

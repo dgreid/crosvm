@@ -64,16 +64,9 @@ impl AddressAllocator {
         })
     }
 
-    /// Allocates a range of addresses from the managed region with an optional tag
-    /// and minimal alignment. Returns allocated_address. (allocated_address, size, tag)
-    /// can be retrieved through the `get` method.
-    pub fn allocate_with_align(
-        &mut self,
-        size: u64,
-        alloc: Alloc,
-        tag: String,
-        alignment: u64,
-    ) -> Result<u64> {
+    /// Try to allocate a range of addresses from the managed region
+    /// and minimal alignment. Returns supposed allocated address.
+    pub fn try_allocate_with_align(&self, size: u64, alloc: Alloc, alignment: u64) -> Result<u64> {
         let alignment = cmp::max(self.alignment, alignment);
 
         if self.allocs.contains_key(&alloc) {
@@ -99,6 +92,22 @@ impl AddressAllocator {
             return Err(Error::OutOfSpace);
         }
 
+        Ok(addr)
+    }
+
+    /// Allocates a range of addresses from the managed region with an optional tag
+    /// and minimal alignment. Returns allocated_address. (allocated_address, size, tag)
+    /// can be retrieved through the `get` method.
+    pub fn allocate_with_align(
+        &mut self,
+        size: u64,
+        alloc: Alloc,
+        tag: String,
+        alignment: u64,
+    ) -> Result<u64> {
+        let addr = self.try_allocate_with_align(size, alloc.clone(), alignment)?;
+
+        let end_addr = addr.checked_add(size - 1).ok_or(Error::OutOfSpace)?;
         // TODO(dgreid): Use a smarter allocation strategy. The current strategy is just
         // bumping this pointer, meaning it will eventually exhaust available addresses.
         self.next_addr = end_addr.saturating_add(1);

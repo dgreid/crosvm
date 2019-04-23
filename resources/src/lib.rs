@@ -23,7 +23,7 @@ mod gpu_allocator;
 mod system_allocator;
 
 /// Used to tag SystemAllocator allocations.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Alloc {
     /// An anonymous resource allocation.
     /// Should only be instantiated through `SystemAllocator::get_anon_alloc()`.

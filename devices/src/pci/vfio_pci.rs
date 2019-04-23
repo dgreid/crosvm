@@ -8,7 +8,7 @@ use std::u32;
 
 use kvm::Datamatch;
 use msg_socket::{MsgReceiver, MsgSender};
-use resources::{Alloc, SystemAllocator};
+use resources::{AddressAllocator, Alloc, Error as ResErr, SystemAllocator};
 use sys_util::{error, EventFd};
 
 use vfio_sys::*;
@@ -294,6 +294,52 @@ impl VfioPciDevice {
             Err(e) => error!("failed to receive AddMsiRoute response {:?}", e),
         }
     }
+
+    fn allocate_bar_addr(
+        &self,
+        resources: &mut SystemAllocator,
+        size: u64,
+        bar: u32,
+        is_64bit: bool,
+    ) -> Result<u64, PciDeviceError> {
+        let (bus, dev) = self
+            .pci_bus_dev
+            .expect("assign_bus_dev must be called prior to allocate_io_bars");
+        let pci_bar = Alloc::PciBar {
+            bus,
+            dev,
+            bar: bar as u8,
+        };
+        let mut allocator: &mut AddressAllocator;
+        if self.device.get_region_flags(bar) & VFIO_REGION_INFO_FLAG_MMAP != 0 {
+            allocator = resources.device_allocator();
+            match allocator.try_allocate_with_align(size, pci_bar.clone(), size) {
+                Ok(bar_addr) => {
+                    if bar_addr >= 1 << 32 && !is_64bit {
+                        allocator = resources.mmio_allocator();
+                    }
+                }
+                Err(ResErr::OutOfSpace) => allocator = resources.mmio_allocator(),
+                Err(e) => return Err(PciDeviceError::IoAllocationFailed(size, e)),
+            }
+        } else {
+            allocator = resources.mmio_allocator();
+            match allocator.try_allocate_with_align(size, pci_bar.clone(), size) {
+                Ok(bar_addr) => {
+                    if bar_addr >= 1 << 32 && !is_64bit {
+                        allocator = resources.device_allocator();
+                    }
+                }
+                Err(ResErr::OutOfSpace) => allocator = resources.device_allocator(),
+                Err(e) => return Err(PciDeviceError::IoAllocationFailed(size, e)),
+            }
+        }
+        let bar_addr = allocator
+            .allocate_with_align(size, pci_bar, "vfio_bar".to_string(), size)
+            .map_err(|e| PciDeviceError::IoAllocationFailed(size, e))?;
+
+        Ok(bar_addr)
+    }
 }
 
 impl PciDevice for VfioPciDevice {
@@ -341,9 +387,6 @@ impl PciDevice for VfioPciDevice {
     ) -> Result<Vec<(u64, u64)>, PciDeviceError> {
         let mut ranges = Vec::new();
         let mut i = VFIO_PCI_BAR0_REGION_INDEX;
-        let (bus, dev) = self
-            .pci_bus_dev
-            .expect("assign_bus_dev must be called prior to allocate_io_bars");
 
         while i <= VFIO_PCI_ROM_REGION_INDEX {
             let mut low: u32 = 0xffffffff;
@@ -373,19 +416,9 @@ impl PciDevice for VfioPciDevice {
                 size <<= 32;
                 size |= u64::from(low);
                 size = !size + 1;
-                let bar_addr = resources
-                    .mmio_allocator()
-                    .allocate_with_align(
-                        size,
-                        Alloc::PciBar {
-                            bus,
-                            dev,
-                            bar: i as u8,
-                        },
-                        "vfio_bar".to_string(),
-                        size,
-                    )
-                    .map_err(|e| PciDeviceError::IoAllocationFailed(size, e))?;
+
+                let bar_addr = self.allocate_bar_addr(resources, size, i, is_64bit)?;
+
                 ranges.push((bar_addr, size));
                 self.mmio_regions.push(MmioInfo {
                     bar_index: i,
