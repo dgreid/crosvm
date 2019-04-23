@@ -146,10 +146,10 @@ fn ascii_byte(digit: u8) -> u8 {
         _ => b'0',
     }
 }
-fn hex_lsn(num: u8) -> u8 {
+pub fn hex_lsn(num: u8) -> u8 {
     ascii_byte(num & 0x0f)
 }
-fn hex_msn(num: u8) -> u8 {
+pub fn hex_msn(num: u8) -> u8 {
     ascii_byte((num >> 4) & 0x0f)
 }
 #[cfg(test)]

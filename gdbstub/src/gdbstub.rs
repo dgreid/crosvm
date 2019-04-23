@@ -2,8 +2,9 @@ mod gdbreply;
 mod gdbsignal;
 
 use std::io::{self, Read, Write};
+use std::iter;
 
-pub use gdbreply::GdbReply;
+pub use gdbreply::{hex_lsn, hex_msn, GdbReply};
 pub use gdbsignal::GdbSignal;
 
 pub struct GdbMessage {
@@ -256,12 +257,17 @@ where
     G::Register: 'static,
 {
     Ok(match message.packet_data[0] {
+        b'?' => handle_reason_stopped(backend, message),
         b'q' => Box::new(GdbReply::from_bytes(b"".to_vec())), //TODO - actual response
+        b'H' => handle_commandH(backend, message),
         b'g' => match backend.read_general_registers() {
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
             Ok(regs) => Box::new(GdbReply::from_bytes(
-                regs.into_iter().map(|r| G::reg_to_ne_bytes(r)).flatten(),
+                regs.into_iter()
+                    .map(|r| G::reg_to_ne_bytes(r))
+                    .flatten()
+                    .flat_map(|r| iter::once(hex_msn(r)).chain(iter::once(hex_lsn(r)))),
             )),
         },
         b'G' => match backend.write_general_registers() {
@@ -284,6 +290,28 @@ where
             Box::new(gdbreply::empty())
         }
     })
+}
+
+fn handle_reason_stopped<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
+where
+    G: GdbBackend,
+    G::Register: 'static,
+{
+    // if is stopped
+    Box::new(GdbReply::from_bytes(b"S05".to_vec()))
+    // else when running...
+}
+
+fn handle_commandH<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
+where
+    G: GdbBackend,
+    G::Register: 'static,
+{
+    let message_data = &message.packet_data[1..];
+    match message_data[0] {
+        b'g' => Box::new(gdbreply::okay()),
+        _ => Box::new(gdbreply::empty()),
+    }
 }
 
 pub fn run_gdb_stub<S, T, G>(
@@ -327,14 +355,14 @@ impl DummyBackend {
 }
 
 impl GdbBackend for DummyBackend {
-    type Register = u64;
+    type Register = u32;
     type Error = io::Error;
 
     fn read_general_registers(&self) -> BackendResult<Vec<Self::Register>, Self::Error> {
         if let Some(e) = self.g_error {
             Err(BackendError::Response(e))
         } else {
-            Ok(Vec::new()) // TODO - this returns the wrong thing, should it take a better parsed message?
+            Ok(vec![0; 16])
         }
     }
 
@@ -449,4 +477,15 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn g_packet() {
+        let mut input = Cursor::new(b"$g#67".to_vec());
+        let mut output = Cursor::new(Vec::new());
+        let mut backend = DummyBackend { g_error: None };
+        assert!(run_gdb_stub(&mut input, &mut output, &mut backend).is_ok());
+        assert_eq!(
+            output.get_ref(),
+            &b"+$00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000#00".to_vec()
+        );
+    }
 }
