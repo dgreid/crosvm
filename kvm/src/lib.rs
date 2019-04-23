@@ -256,6 +256,48 @@ impl PartialOrd for MemSlot {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn ioapic_routing_entry(irq_num: u32) -> IrqRoute {
+    IrqRoute {
+        gsi: irq_num,
+        source: IrqSource::Irqchip {
+            chip: KVM_IRQCHIP_IOAPIC,
+            pin: irq_num,
+        },
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn kvm_default_irq_routing_table() -> Vec<IrqRoute> {
+    let mut routes: Vec<IrqRoute> = Vec::new();
+
+    for i in 0..8 {
+        routes.push(IrqRoute {
+            gsi: i,
+            source: IrqSource::Irqchip {
+                chip: KVM_IRQCHIP_PIC_MASTER,
+                pin: i % 8,
+            },
+        });
+        routes.push(ioapic_routing_entry(i));
+    }
+    for i in 8..16 {
+        routes.push(IrqRoute {
+            gsi: i,
+            source: IrqSource::Irqchip {
+                chip: KVM_IRQCHIP_PIC_SLAVE,
+                pin: i % 8,
+            },
+        });
+        routes.push(ioapic_routing_entry(i));
+    }
+    for i in 16..24 {
+        routes.push(ioapic_routing_entry(i));
+    }
+
+    routes
+}
+
 /// A wrapper around creating and using a VM.
 pub struct Vm {
     vm: File,
@@ -263,6 +305,8 @@ pub struct Vm {
     device_memory: HashMap<u32, MemoryMapping>,
     mmap_arenas: HashMap<u32, MemoryMappingArena>,
     mem_slot_gaps: BinaryHeap<MemSlot>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    routes: Vec<IrqRoute>,
 }
 
 impl Vm {
@@ -295,6 +339,8 @@ impl Vm {
                 device_memory: HashMap::new(),
                 mmap_arenas: HashMap::new(),
                 mem_slot_gaps: BinaryHeap::new(),
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                routes: kvm_default_irq_routing_table(),
             })
         } else {
             errno_result()
@@ -915,6 +961,20 @@ impl Vm {
         } else {
             errno_result()
         }
+    }
+
+    /// Add one IrqRoute into vm's irq routing table
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn add_irq_route_entry(&mut self, route: IrqRoute) -> Result<()> {
+        self.routes.retain(|r| r.gsi != route.gsi);
+
+        self.routes.push(route);
+
+        self.set_gsi_routing(&self.routes)
+    }
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub fn add_irq_route_entry(&mut self, _route: IrqRoute) -> Result<()> {
+        Ok(())
     }
 
     /// Sets the GSI routing table, replacing any table set with previous calls to
