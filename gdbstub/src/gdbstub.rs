@@ -136,13 +136,12 @@ where
 }
 
 // Returns a u8 value from an ascii digit.
-fn from_ascii(digit: u8) -> ReceiveResult<u8> {
-    // TODO - return an error if invalid?
+fn from_ascii(digit: u8) -> Option<u8> {
     match digit {
-        d if d >= b'0' && d <= b'9' => Ok(d - b'0'),
-        d if d >= b'a' && d <= b'f' => Ok(0xa + d - b'a'),
-        d if d >= b'A' && d <= b'F' => Ok(0xa + d - b'A'),
-        _ => Err(ReceiveError::InvalidDigit),
+        d if d >= b'0' && d <= b'9' => Some(d - b'0'),
+        d if d >= b'a' && d <= b'f' => Some(0xa + d - b'a'),
+        d if d >= b'A' && d <= b'F' => Some(0xa + d - b'A'),
+        _ => None,
     }
 }
 
@@ -286,7 +285,11 @@ where
             Ok(()) => Box::new(gdbreply::okay()),
         },
         b'H' => handle_commandH(backend, message),
-        b'm' => handle_read_memory(backend, message),
+        b'm' => match handle_read_memory(backend, message) {
+            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+            Ok(r) => r,
+        },
         b'q' => Box::new(GdbReply::from_bytes(b"".to_vec())), //TODO - actual response
         b's' => match backend.step() {
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
@@ -300,38 +303,53 @@ where
     })
 }
 
-fn hex_to_u64<T>(bytes: T) -> ReceiveResult<u64>
+fn hex_to_u64<T>(bytes: T) -> Option<u64>
 where
     T: IntoIterator<Item = u8>,
 {
     bytes
         .into_iter()
         .map(|addr_byte| from_ascii(addr_byte))
-        .collect::<ReceiveResult<Vec<_>>>()
-        .map(|nibbles| {
-            nibbles
-                .iter()
-                .take(16) // Max of 16 hex digits in a u64.
-                .fold(0u64, |a, n| (a << 4) | (u64::from(*n) & 0x0f))
+        .take(16)
+        .fold(Some(0u64), |a, n| {
+            a.and_then(|a| n.map(|n| (a << 4) | (u64::from(n) & 0x0f)))
         })
 }
 
-fn handle_read_memory<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
+// parses a comma-separated "address,length" to a tuple of (address, length).
+fn parse_address_length(input: &[u8]) -> Option<(u64, u64)> {
+    let mut bytes = input.iter().peekable();
+    let address = hex_to_u64(bytes.by_ref().take_while(|b| **b != b',').cloned())?;
+    if bytes.peek().is_none() {
+        // No length included.
+        return None;
+    }
+    let length = hex_to_u64(bytes.cloned())?;
+    Some((address, length))
+}
+
+fn handle_read_memory<G>(
+    backend: &mut G,
+    message: &GdbMessage,
+) -> BackendResult<Box<dyn Iterator<Item = u8>>, G::Error>
 where
     G: GdbBackend,
     G::Register: 'static,
 {
     // The format for read-memory is "mAA..AA,LL..LL" where AA..AA is the address to read from, and
     // LL..LL is the length to read in bytes.
-    let message_data = &message.packet_data[1..];
-    let message_bytes = message_data.iter();
-
-    let address = match hex_to_u64(message_bytes.take_while(|b| **b != b',').cloned()) {
-        Ok(a) => a,
-        Err(_) => return Box::new(gdbreply::error(1)),
+    let (address, length) = match parse_address_length(&message.packet_data[1..]) {
+        Some(al) => al,
+        None => return Ok(Box::new(gdbreply::error(1))),
     };
 
-    Box::new(gdbreply::okay())
+    let mut memory = vec![0u8; length as usize];
+
+    backend.read_memory(address as usize, &mut memory)?;
+
+    Ok(Box::new(GdbReply::from_bytes(memory.into_iter().flat_map(
+        |d| iter::once(hex_msn(d)).chain(iter::once(hex_lsn(d))),
+    ))))
 }
 
 fn handle_reason_stopped<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
@@ -537,10 +555,25 @@ mod tests {
         assert_eq!(0x0123_4567_89ab_cdef, hex_to_u64(input).unwrap());
 
         let invalid = b"2q2".to_vec();
-        assert!(hex_to_u64(invalid).is_err());
+        assert!(hex_to_u64(invalid).is_none());
 
         // consume at most a u64 worth of digits.
         let too_long = b"12341234123412345".to_vec();
         assert_eq!(0x1234_1234_1234_1234, hex_to_u64(too_long).unwrap());
+    }
+
+    #[test]
+    fn addr_len() {
+        let input = b"12345678,10005555".to_vec();
+        assert_eq!(
+            Some((0x1234_5678, 0x1000_5555)),
+            parse_address_length(&input)
+        );
+
+        let missing_comma = b"1234567810005555".to_vec();
+        assert_eq!(None, parse_address_length(&missing_comma));
+
+        let invalid_char = b"123456h810005555".to_vec();
+        assert_eq!(None, parse_address_length(&invalid_char));
     }
 }
