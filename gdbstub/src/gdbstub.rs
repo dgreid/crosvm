@@ -14,6 +14,7 @@ pub struct GdbMessage {
 #[derive(Debug)]
 enum ReceiveError {
     ChecksumMismatch(u8, u8),
+    InvalidDigit,
 }
 
 type ReceiveResult<T> = std::result::Result<T, ReceiveError>;
@@ -74,7 +75,8 @@ impl GdbMessageReader {
                 }
                 Some(msn) => {
                     self.state = Idle;
-                    let checksum_transmitted = from_ascii(msn) << 4 | from_ascii(byte);
+                    let checksum_transmitted =
+                        from_ascii(msn).unwrap_or(0) << 4 | from_ascii(byte).unwrap_or(0);
                     if checksum_transmitted == self.checksum_calculated {
                         Some(Ok(GdbMessage {
                             packet_data: std::mem::replace(&mut self.data, Vec::new()),
@@ -134,13 +136,13 @@ where
 }
 
 // Returns a u8 value from an ascii digit.
-fn from_ascii(digit: u8) -> u8 {
+fn from_ascii(digit: u8) -> ReceiveResult<u8> {
     // TODO - return an error if invalid?
     match digit {
-        d if d >= b'0' && d <= b'9' => d - b'0',
-        d if d >= b'a' && d <= b'f' => 0xa + d - b'a',
-        d if d >= b'A' && d <= b'F' => 0xa + d - b'A',
-        _ => 0,
+        d if d >= b'0' && d <= b'9' => Ok(d - b'0'),
+        d if d >= b'a' && d <= b'f' => Ok(0xa + d - b'a'),
+        d if d >= b'A' && d <= b'F' => Ok(0xa + d - b'A'),
+        _ => Err(ReceiveError::InvalidDigit),
     }
 }
 
@@ -238,6 +240,11 @@ where
                     self.client_out.write(b"-").map_err(Error::WritingOutput)?;
                     f.write(b"-").unwrap();
                 }
+                Err(ReceiveError::InvalidDigit) => {
+                    //write!(f, "\n\ngot bad digit t:{:x} c:{:x}\n", t, c).unwrap();
+                    self.client_out.write(b"-").map_err(Error::WritingOutput)?;
+                    f.write(b"-").unwrap();
+                }
             }
             self.client_out.flush();
         }
@@ -258,8 +265,11 @@ where
 {
     Ok(match message.packet_data[0] {
         b'?' => handle_reason_stopped(backend, message),
-        b'q' => Box::new(GdbReply::from_bytes(b"".to_vec())), //TODO - actual response
-        b'H' => handle_commandH(backend, message),
+        b'c' => match backend.cont() {
+            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
+            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
+            Ok(s) => Box::new(gdbreply::signal(s as u8)),
+        },
         b'g' => match backend.read_general_registers() {
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
@@ -275,11 +285,9 @@ where
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
             Ok(()) => Box::new(gdbreply::okay()),
         },
-        b'c' => match backend.cont() {
-            Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
-            Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
-            Ok(s) => Box::new(gdbreply::signal(s as u8)),
-        },
+        b'H' => handle_commandH(backend, message),
+        b'm' => handle_read_memory(backend, message),
+        b'q' => Box::new(GdbReply::from_bytes(b"".to_vec())), //TODO - actual response
         b's' => match backend.step() {
             Err(BackendError::Response(e)) => Box::new(gdbreply::error(e)),
             Err(BackendError::Fatal(e)) => return Err(Error::Backend(e)),
@@ -290,6 +298,40 @@ where
             Box::new(gdbreply::empty())
         }
     })
+}
+
+fn hex_to_u64<T>(bytes: T) -> ReceiveResult<u64>
+where
+    T: IntoIterator<Item = u8>,
+{
+    bytes
+        .into_iter()
+        .map(|addr_byte| from_ascii(addr_byte))
+        .collect::<ReceiveResult<Vec<u8>>>()
+        .map(|nibbles| {
+            nibbles
+                .iter()
+                .take(16) // Max of 16 hex digits in a u64.
+                .fold(0u64, |a, n| (a << 4) | (u64::from(*n) & 0x0f))
+        })
+}
+
+fn handle_read_memory<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
+where
+    G: GdbBackend,
+    G::Register: 'static,
+{
+    // The format for read-memory is "mAA..AA,LL..LL" where AA..AA is the address to read from, and
+    // LL..LL is the length to read in bytes.
+    let message_data = &message.packet_data[1..];
+    let message_bytes = message_data.iter();
+
+    let address = match hex_to_u64(message_bytes.take_while(|b| **b != b',').cloned()) {
+        Ok(a) => a,
+        Err(_) => return Box::new(gdbreply::error(1)),
+    };
+
+    Box::new(gdbreply::okay())
 }
 
 fn handle_reason_stopped<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
@@ -330,7 +372,7 @@ where
 
     for message in messages {
         match message {
-            Err(ReceiveError::ChecksumMismatch(_, _)) => {
+            Err(ReceiveError::InvalidDigit) | Err(ReceiveError::ChecksumMismatch(_, _)) => {
                 sink.write(b"-").map_err(Error::WritingOutput)?;
             }
             Ok(message) => {
@@ -487,5 +529,18 @@ mod tests {
             output.get_ref(),
             &b"+$00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000#00".to_vec()
         );
+    }
+
+    #[test]
+    fn receive_bytes() {
+        let input = b"0123456789abcdef".to_vec();
+        assert_eq!(0x0123_4567_89ab_cdef, hex_to_u64(input).unwrap());
+
+        let invalid = b"2q2".to_vec();
+        assert!(hex_to_u64(invalid).is_err());
+
+        // consume at most a u64 worth of digits.
+        let too_long = b"12341234123412345".to_vec();
+        assert_eq!(0x1234_1234_1234_1234, hex_to_u64(too_long).unwrap());
     }
 }
