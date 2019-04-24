@@ -307,7 +307,7 @@ where
     bytes
         .into_iter()
         .map(|addr_byte| from_ascii(addr_byte))
-        .collect::<ReceiveResult<Vec<u8>>>()
+        .collect::<ReceiveResult<Vec<_>>>()
         .map(|nibbles| {
             nibbles
                 .iter()
