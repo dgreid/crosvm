@@ -51,7 +51,7 @@ fn main() {
         match b {
             Ok(b) => {
                 test_out.write_all(&[b]).unwrap();
-                match stub.byte_from_client(b, &mut test_out) {
+                match stub.byte_from_client(b) {
                     Ok(()) => (),
                     Err(_) => return,
                 }

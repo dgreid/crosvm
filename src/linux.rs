@@ -1347,7 +1347,7 @@ fn run_control(
         .write(true)
         .open("/tmp/gdbchars")
         .unwrap();
-    let mut gdb = GdbStub::new(DummyBackend {}, stdout_lock);
+    let mut gdb = GdbStub::new(DummyBackend::new(), stdout_lock);
     'poll: loop {
         let events = {
             match poll_ctx.wait() {
