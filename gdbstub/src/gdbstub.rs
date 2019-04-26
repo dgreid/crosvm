@@ -214,17 +214,11 @@ where
 
     /// Used to signal that a new byte has been received from the client.
     /// Returns 'None' if a message is not yet complete.
-    pub fn byte_from_client(
-        &mut self,
-        byte: u8,
-        f: &mut std::fs::File,
-    ) -> std::result::Result<(), Error<G>> {
+    pub fn byte_from_client(&mut self, byte: u8) -> std::result::Result<(), Error<G>> {
         if let Some(message_result) = self.reader.next_byte(byte) {
             match message_result {
                 Ok(message) => {
-                    //                    f.write_all(b"\n\ngot message\n").unwrap();
                     self.client_out.write(b"+").map_err(Error::WritingOutput)?;
-                    f.write(b"+").unwrap();
                     self.client_out.flush();
 
                     let response = handle_message(&mut self.backend, &message)?;
@@ -232,17 +226,12 @@ where
                     self.client_out
                         .write_all(&response_vec)
                         .map_err(Error::WritingOutput)?;
-                    f.write_all(&response_vec).map_err(Error::WritingOutput)?;
                 }
                 Err(ReceiveError::ChecksumMismatch(t, c)) => {
-                    //write!(f, "\n\ngot bad checksum t:{:x} c:{:x}\n", t, c).unwrap();
                     self.client_out.write(b"-").map_err(Error::WritingOutput)?;
-                    f.write(b"-").unwrap();
                 }
                 Err(ReceiveError::InvalidDigit) => {
-                    //write!(f, "\n\ngot bad digit t:{:x} c:{:x}\n", t, c).unwrap();
                     self.client_out.write(b"-").map_err(Error::WritingOutput)?;
-                    f.write(b"-").unwrap();
                 }
             }
             self.client_out.flush();

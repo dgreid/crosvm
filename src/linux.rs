@@ -1513,7 +1513,7 @@ fn run_control(
     }
     vcpu_thread_barrier.wait();
 
-    let mut gdb = GdbStub::new(DummyBackend {}, stdout_lock);
+    let mut gdb = GdbStub::new(DummyBackend::new(), stdout_lock);
     'poll: loop {
         let events = {
             match poll_ctx.wait() {
