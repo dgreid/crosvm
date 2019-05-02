@@ -8,11 +8,11 @@ use std::{mem, result};
 
 use assertions::const_assert;
 use kvm;
-use kvm_sys::kvm_fpu;
-use kvm_sys::kvm_msr_entry;
-use kvm_sys::kvm_msrs;
-use kvm_sys::kvm_regs;
-use kvm_sys::kvm_sregs;
+use kvm_bindings::kvm_fpu;
+use kvm_bindings::kvm_msr_entry;
+use kvm_bindings::kvm_msrs;
+use kvm_bindings::kvm_regs;
+use kvm_bindings::kvm_sregs;
 use sys_util::{self, GuestAddress, GuestMemory, LayoutAllocation};
 
 use crate::gdt;

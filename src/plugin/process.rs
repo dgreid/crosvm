@@ -24,7 +24,7 @@ use protobuf::Message;
 
 use io_jail::Minijail;
 use kvm::{dirty_log_bitmap_size, Datamatch, IoeventAddress, IrqRoute, IrqSource, PicId, Vm};
-use kvm_sys::{kvm_clock_data, kvm_ioapic_state, kvm_pic_state, kvm_pit_state2};
+use kvm_bindings::{kvm_clock_data, kvm_ioapic_state, kvm_pic_state, kvm_pit_state2};
 use protos::plugin::*;
 use sync::Mutex;
 use sys_util::{

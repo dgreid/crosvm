@@ -19,7 +19,7 @@ use protobuf::Message;
 use assertions::const_assert;
 use data_model::DataInit;
 use kvm::{CpuId, Vcpu};
-use kvm_sys::{
+use kvm_bindings::{
     kvm_debugregs, kvm_fpu, kvm_lapic_state, kvm_mp_state, kvm_msr_entry, kvm_msrs, kvm_regs,
     kvm_sregs, kvm_vcpu_events, kvm_xcrs, KVM_CPUID_FLAG_SIGNIFCANT_INDEX,
 };

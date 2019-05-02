@@ -6,6 +6,7 @@ edition = "2018"
 
 [dependencies]
 kvm_sys = { path = "../kvm_sys" }
+kvm-bindings = "*"
 libc = "*"
 msg_socket = { path = "../msg_socket" }
 sys_util = { path = "../sys_util" }

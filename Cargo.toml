@@ -54,6 +54,7 @@ io_jail = { path = "io_jail" }
 kernel_cmdline = { path = "kernel_cmdline" }
 kernel_loader = { path = "kernel_loader" }
 kvm = { path = "kvm" }
+kvm-bindings = "=0.1.1"
 kvm_sys = { path = "kvm_sys" }
 libc = "=0.2.44"
 libcras = "*"

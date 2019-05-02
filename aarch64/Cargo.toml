@@ -11,6 +11,7 @@ devices = { path = "../devices" }
 io_jail = { path = "../io_jail" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 kvm = { path = "../kvm" }
+kvm-bindings = "*"
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
 remain = "*"

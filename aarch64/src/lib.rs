@@ -23,7 +23,7 @@ use sync::Mutex;
 use sys_util::{EventFd, GuestAddress, GuestMemory, GuestMemoryError};
 
 use kvm::*;
-use kvm_sys::kvm_device_attr;
+use kvm_bindings::kvm_device_attr;
 
 mod fdt;
 
@@ -72,7 +72,7 @@ macro_rules! arm64_core_reg {
         KVM_REG_ARM64
             | KVM_REG_SIZE_U64
             | KVM_REG_ARM_CORE
-            | ((offset__of!(kvm_sys::user_pt_regs, $reg) / 4) as u64)
+            | ((offset__of!(kvm_bindings::user_pt_regs, $reg) / 4) as u64)
     };
 }
 
@@ -423,19 +423,19 @@ impl AArch64 {
         let raw_dist_if_addr = &dist_if_addr as *const u64;
 
         let cpu_if_attr = kvm_device_attr {
-            group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_ADDR,
-            attr: kvm_sys::KVM_VGIC_V2_ADDR_TYPE_CPU as u64,
+            group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ADDR,
+            attr: kvm_bindings::KVM_VGIC_V2_ADDR_TYPE_CPU as u64,
             addr: raw_cpu_if_addr as u64,
             flags: 0,
         };
         let dist_attr = kvm_device_attr {
-            group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_ADDR,
-            attr: kvm_sys::KVM_VGIC_V2_ADDR_TYPE_DIST as u64,
+            group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ADDR,
+            attr: kvm_bindings::KVM_VGIC_V2_ADDR_TYPE_DIST as u64,
             addr: raw_dist_if_addr as u64,
             flags: 0,
         };
-        let mut kcd = kvm_sys::kvm_create_device {
-            type_: kvm_sys::kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V2,
+        let mut kcd = kvm_bindings::kvm_create_device {
+            type_: kvm_bindings::kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V2,
             fd: 0,
             flags: 0,
         };
@@ -448,7 +448,7 @@ impl AArch64 {
 
         // Safe because we allocated the struct that's being passed in
         let ret = unsafe {
-            sys_util::ioctl_with_ref(&vgic_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &cpu_if_attr)
+            sys_util::ioctl_with_ref(&vgic_fd, kvm_bindings::KVM_SET_DEVICE_ATTR(), &cpu_if_attr)
         };
         if ret != 0 {
             return Err(Error::CreateGICFailure(sys_util::Error::new(ret)));
@@ -456,7 +456,7 @@ impl AArch64 {
 
         // Safe because we allocated the struct that's being passed in
         let ret = unsafe {
-            sys_util::ioctl_with_ref(&vgic_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &dist_attr)
+            sys_util::ioctl_with_ref(&vgic_fd, kvm_bindings::KVM_SET_DEVICE_ATTR(), &dist_attr)
         };
         if ret != 0 {
             return Err(Error::CreateGICFailure(sys_util::Error::new(ret)));
@@ -466,7 +466,7 @@ impl AArch64 {
         let nr_irqs: u32 = AARCH64_GIC_NR_IRQS;
         let nr_irqs_ptr = &nr_irqs as *const u32;
         let nr_irqs_attr = kvm_device_attr {
-            group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
+            group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
             attr: 0,
             addr: nr_irqs_ptr as u64,
             flags: 0,
@@ -481,8 +481,8 @@ impl AArch64 {
 
         // Finalize the GIC
         let init_gic_attr = kvm_device_attr {
-            group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_CTRL,
-            attr: kvm_sys::KVM_DEV_ARM_VGIC_CTRL_INIT as u64,
+            group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_CTRL,
+            attr: kvm_bindings::KVM_DEV_ARM_VGIC_CTRL_INIT as u64,
             addr: 0,
             flags: 0,
         };
@@ -505,8 +505,8 @@ impl AArch64 {
         cpu_id: u64,
         _num_cpus: u64,
     ) -> Result<()> {
-        let mut kvi = kvm_sys::kvm_vcpu_init {
-            target: kvm_sys::KVM_ARM_TARGET_GENERIC_V8,
+        let mut kvi = kvm_bindings::kvm_vcpu_init {
+            target: kvm_bindings::KVM_ARM_TARGET_GENERIC_V8,
             features: [0; 7],
         };
 
@@ -515,11 +515,11 @@ impl AArch64 {
             .map_err(Error::ReadPreferredTarget)?;
 
         // TODO(sonnyrao): need to verify this feature is supported by host kernel
-        kvi.features[0] |= 1 << kvm_sys::KVM_ARM_VCPU_PSCI_0_2;
+        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PSCI_0_2;
 
         // Non-boot cpus are powered off initially
         if cpu_id > 0 {
-            kvi.features[0] |= 1 << kvm_sys::KVM_ARM_VCPU_POWER_OFF;
+            kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_POWER_OFF;
         }
         vcpu.arm_vcpu_init(&kvi).map_err(Error::VcpuInit)?;
 

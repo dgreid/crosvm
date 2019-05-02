@@ -14,7 +14,7 @@ io_jail = { path = "../io_jail" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 kernel_loader = { path = "../kernel_loader" }
 kvm = { path = "../kvm" }
-kvm_sys = { path = "../kvm_sys" }
+kvm-bindings = "*"
 libc = "*"
 remain = "*"
 resources = { path = "../resources" }

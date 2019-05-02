@@ -38,7 +38,7 @@ use sys_util::ScmSocket;
 
 use kvm::dirty_log_bitmap_size;
 
-use kvm_sys::{
+use kvm_bindings::{
     kvm_clock_data, kvm_cpuid_entry2, kvm_debugregs, kvm_fpu, kvm_ioapic_state, kvm_lapic_state,
     kvm_mp_state, kvm_msr_entry, kvm_pic_state, kvm_pit_state2, kvm_regs, kvm_sregs,
     kvm_vcpu_events, kvm_xcrs,

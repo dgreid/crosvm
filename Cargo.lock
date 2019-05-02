@@ -10,6 +10,7 @@ dependencies = [
  "io_jail 0.1.0",
  "kernel_cmdline 0.1.0",
  "kvm 0.1.0",
+ "kvm-bindings 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "kvm_sys 0.1.0",
  "libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)",
  "remain 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -98,6 +99,7 @@ dependencies = [
  "kernel_cmdline 0.1.0",
  "kernel_loader 0.1.0",
  "kvm 0.1.0",
+ "kvm-bindings 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "kvm_sys 0.1.0",
  "libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)",
  "libcras 0.1.0",
@@ -123,7 +125,7 @@ name = "crosvm_plugin"
 version = "0.17.0"
 dependencies = [
  "kvm 0.1.0",
- "kvm_sys 0.1.0",
+ "kvm-bindings 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)",
  "protobuf 2.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "protos 0.1.0",
@@ -256,6 +258,7 @@ dependencies = [
 name = "kvm"
 version = "0.1.0"
 dependencies = [
+ "kvm-bindings 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "kvm_sys 0.1.0",
  "libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)",
  "msg_socket 0.1.0",
@@ -612,7 +615,7 @@ dependencies = [
  "kernel_cmdline 0.1.0",
  "kernel_loader 0.1.0",
  "kvm 0.1.0",
- "kvm_sys 0.1.0",
+ "kvm-bindings 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)",
  "remain 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "resources 0.1.0",
