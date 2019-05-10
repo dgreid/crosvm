@@ -341,6 +341,30 @@ where
     ))))
 }
 
+fn handle_write_memory<G>(
+    backend: &mut G,
+    message: &GdbMessage,
+) -> BackendResult<Box<dyn Iterator<Item = u8>>, G::Error>
+where
+    G: GdbBackend,
+    G::Register: 'static,
+{
+    // The format for write-memory is "MAA..AA,LL..LL:XX..XX" where AA..AA is the address to read from,
+    // LL..LL is the length to read in bytes, and XX..XX is the data to write.
+    let (address, length) = match parse_address_length(&message.packet_data[1..]) {
+        Some(al) => al,
+        None => return Ok(Box::new(gdbreply::error(1))),
+    };
+
+    let mut memory = vec![0u8; length as usize];
+
+    backend.read_memory(address as usize, &mut memory)?;
+
+    Ok(Box::new(GdbReply::from_bytes(memory.into_iter().flat_map(
+        |d| iter::once(hex_msn(d)).chain(iter::once(hex_lsn(d))),
+    ))))
+}
+
 fn handle_reason_stopped<G>(backend: &mut G, message: &GdbMessage) -> Box<dyn Iterator<Item = u8>>
 where
     G: GdbBackend,
