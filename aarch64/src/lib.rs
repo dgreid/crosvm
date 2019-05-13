@@ -23,6 +23,7 @@ use sync::Mutex;
 use sys_util::{EventFd, GuestAddress, GuestMemory, GuestMemoryError};
 
 use kvm::*;
+use kvm_bindings;
 use kvm_bindings::kvm_device_attr;
 
 mod fdt;
@@ -448,7 +449,7 @@ impl AArch64 {
 
         // Safe because we allocated the struct that's being passed in
         let ret = unsafe {
-            sys_util::ioctl_with_ref(&vgic_fd, kvm_bindings::KVM_SET_DEVICE_ATTR(), &cpu_if_attr)
+            sys_util::ioctl_with_ref(&vgic_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &cpu_if_attr)
         };
         if ret != 0 {
             return Err(Error::CreateGICFailure(sys_util::Error::new(ret)));
@@ -456,7 +457,7 @@ impl AArch64 {
 
         // Safe because we allocated the struct that's being passed in
         let ret = unsafe {
-            sys_util::ioctl_with_ref(&vgic_fd, kvm_bindings::KVM_SET_DEVICE_ATTR(), &dist_attr)
+            sys_util::ioctl_with_ref(&vgic_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &dist_attr)
         };
         if ret != 0 {
             return Err(Error::CreateGICFailure(sys_util::Error::new(ret)));
