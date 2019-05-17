@@ -15,7 +15,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::str;
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
+
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -34,7 +35,7 @@ use qcow::{self, ImageType, QcowFile};
 use rand_ish::SimpleRng;
 use remain::sorted;
 use resources::{Alloc, SystemAllocator};
-use sync::{Condvar, Mutex};
+use sync::Mutex;
 use sys_util::net::{UnixSeqpacket, UnixSeqpacketListener, UnlinkUnixSeqpacketListener};
 
 use sys_util::{
@@ -1037,19 +1038,6 @@ fn setup_vcpu_signal_handler() -> Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
-struct VcpuRunMode {
-    mtx: Mutex<VmRunMode>,
-    cvar: Condvar,
-}
-
-impl VcpuRunMode {
-    fn set_and_notify(&self, new_mode: VmRunMode) {
-        *self.mtx.lock() = new_mode;
-        self.cvar.notify_all();
-    }
-}
-
 fn run_vcpu(
     vcpu: Vcpu,
     cpu_id: u32,
@@ -1059,7 +1047,7 @@ fn run_vcpu(
     mmio_bus: devices::Bus,
     exit_evt: EventFd,
     requires_kvmclock_ctrl: bool,
-    run_mode_arc: Arc<VcpuRunMode>,
+    from_main_channel: mpsc::Receiver<VmRunMode>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
@@ -1083,19 +1071,55 @@ fn run_vcpu(
                     }
                 }
                 Err(e) => {
-                    error!(
-                        "Failed to retrieve signal mask for vcpu {} : {}",
-                        cpu_id, e
-                    );
+                    error!("Failed to retrieve signal mask for vcpu {} : {}", cpu_id, e);
                     sig_ok = false;
                 }
             };
 
             start_barrier.wait();
 
+            let mut run_mode = VmRunMode::Running;
+            let mut interrupted_by_signal = false;
+
             if sig_ok {
                 'vcpu_loop: loop {
-                    let mut interrupted_by_signal = false;
+                    // Start by checking for messages to process and the run state of the CPU.
+                    // An extra check here for Running so there isn't a need to call recv unless a
+                    // message is likely to be ready because a signal was sent.
+                    if interrupted_by_signal || run_mode != VmRunMode::Running {
+                        'state_loop: loop {
+                            match from_main_channel.recv_timeout(Duration::from_millis(0)) {
+                                Ok(msg) => run_mode = msg,
+                                Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change
+                                Err(e) => {
+                                    error!("Failed to read from main channel in vcpu: {}", e);
+                                    break 'vcpu_loop;
+                                }
+                            };
+                            match run_mode {
+                                VmRunMode::Running => break 'state_loop,
+                                VmRunMode::Suspending => {
+                                    // On KVM implementations that use a paravirtualized clock (e.g.
+                                    // x86), a flag must be set to indicate to the guest kernel that
+                                    // a VCPU was suspended. The guest kernel will use this flag to
+                                    // prevent the soft lockup detection from triggering when this
+                                    // VCPU resumes, which could happen days later in realtime.
+                                    if requires_kvmclock_ctrl {
+                                        if let Err(e) = vcpu.kvmclock_ctrl() {
+                                            error!(
+                                            "failed to signal to kvm that vcpu {} is suspended: {}",
+                                            cpu_id, e
+                                        );
+                                        }
+                                    }
+                                }
+                                VmRunMode::Exiting => break 'vcpu_loop,
+                            }
+                        }
+                    }
+
+                    interrupted_by_signal = false;
+
                     match vcpu.run() {
                         Ok(VcpuExit::IoIn { port, mut size }) => {
                             let mut data = [0; 8];
@@ -1145,36 +1169,12 @@ fn run_vcpu(
                             }
                         },
                     }
-
                     if interrupted_by_signal {
                         // Try to clear the signal that we use to kick VCPU if it is pending before
                         // attempting to handle pause requests.
                         if let Err(e) = clear_signal(SIGRTMIN() + 0) {
                             error!("failed to clear pending signal: {}", e);
                             break;
-                        }
-                        let mut run_mode_lock = run_mode_arc.mtx.lock();
-                        loop {
-                            match *run_mode_lock {
-                                VmRunMode::Running => break,
-                                VmRunMode::Suspending => {
-                                    // On KVM implementations that use a paravirtualized clock (e.g.
-                                    // x86), a flag must be set to indicate to the guest kernel that
-                                    // a VCPU was suspended. The guest kernel will use this flag to
-                                    // prevent the soft lockup detection from triggering when this
-                                    // VCPU resumes, which could happen days later in realtime.
-                                    if requires_kvmclock_ctrl {
-                                        if let Err(e) = vcpu.kvmclock_ctrl() {
-                                            error!("failed to signal to kvm that vcpu {} is being suspended: {}", cpu_id, e);
-                                        }
-                                    }
-                                }
-                                VmRunMode::Exiting => break 'vcpu_loop,
-                            }
-                            // Give ownership of our exclusive lock to the condition variable that
-                            // will block. When the condition variable is notified, `wait` will
-                            // unblock and return a new exclusive lock.
-                            run_mode_lock = run_mode_arc.cvar.wait(run_mode_lock);
                         }
                     }
                 }
@@ -1475,9 +1475,9 @@ fn run_control(
 
     let mut vcpu_handles = Vec::with_capacity(linux.vcpus.len());
     let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpus.len() + 1));
-    let run_mode_arc = Arc::new(VcpuRunMode::default());
     setup_vcpu_signal_handler()?;
     for (cpu_id, vcpu) in linux.vcpus.into_iter().enumerate() {
+        let (to_vcpu_channel, from_main_channel) = mpsc::channel();
         let handle = run_vcpu(
             vcpu,
             cpu_id as u32,
@@ -1487,9 +1487,9 @@ fn run_control(
             linux.mmio_bus.clone(),
             linux.exit_evt.try_clone().map_err(Error::CloneEventFd)?,
             linux.vm.check_extension(Cap::KvmclockCtrl),
-            run_mode_arc.clone(),
+            from_main_channel,
         )?;
-        vcpu_handles.push(handle);
+        vcpu_handles.push((handle, to_vcpu_channel));
     }
     vcpu_thread_barrier.wait();
 
@@ -1668,8 +1668,10 @@ fn run_control(
                                                 break 'poll;
                                             }
                                             other => {
-                                                run_mode_arc.set_and_notify(other);
-                                                for handle in &vcpu_handles {
+                                                for (handle, channel) in &vcpu_handles {
+                                                    if let Err(e) = channel.send(other.clone()) {
+                                                        error!("failed to send VmRunMode: {}", e);
+                                                    }
                                                     let _ = handle.kill(SIGRTMIN() + 0);
                                                 }
                                             }
@@ -1751,9 +1753,11 @@ fn run_control(
         }
     }
 
-    // VCPU threads MUST see the VmRunMode flag, otherwise they may re-enter the VM.
-    run_mode_arc.set_and_notify(VmRunMode::Exiting);
-    for handle in vcpu_handles {
+    for (handle, channel) in vcpu_handles {
+        // VCPU threads MUST see the VmRunMode flag, otherwise they may re-enter the VM.
+        if let Err(e) = channel.send(VmRunMode::Exiting) {
+            error!("failed to send VmRunMode: {}", e);
+        }
         match handle.kill(SIGRTMIN() + 0) {
             Ok(_) => {
                 if let Err(e) = handle.join() {
