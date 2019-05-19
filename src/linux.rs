@@ -255,6 +255,10 @@ enum TaggedControlSocket {
     VmMemory(VmMemoryControlResponseSocket),
 }
 
+enum VCpuControl {
+    RunState(VmRunMode),
+}
+
 impl AsRef<UnixSeqpacket> for TaggedControlSocket {
     fn as_ref(&self) -> &UnixSeqpacket {
         use self::TaggedControlSocket::*;
@@ -1047,7 +1051,7 @@ fn run_vcpu(
     mmio_bus: devices::Bus,
     exit_evt: EventFd,
     requires_kvmclock_ctrl: bool,
-    from_main_channel: mpsc::Receiver<VmRunMode>,
+    from_main_channel: mpsc::Receiver<VCpuControl>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
@@ -1089,7 +1093,9 @@ fn run_vcpu(
                     if interrupted_by_signal || run_mode != VmRunMode::Running {
                         'state_loop: loop {
                             match from_main_channel.recv_timeout(Duration::from_millis(0)) {
-                                Ok(msg) => run_mode = msg,
+                                Ok(msg) => match msg {
+                                    VCpuControl::RunState(new_mode) => run_mode = new_mode,
+                                },
                                 Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change
                                 Err(e) => {
                                     error!("Failed to read from main channel in vcpu: {}", e);
@@ -1669,7 +1675,9 @@ fn run_control(
                                             }
                                             other => {
                                                 for (handle, channel) in &vcpu_handles {
-                                                    if let Err(e) = channel.send(other.clone()) {
+                                                    if let Err(e) = channel
+                                                        .send(VCpuControl::RunState(other.clone()))
+                                                    {
                                                         error!("failed to send VmRunMode: {}", e);
                                                     }
                                                     let _ = handle.kill(SIGRTMIN() + 0);
@@ -1755,7 +1763,7 @@ fn run_control(
 
     for (handle, channel) in vcpu_handles {
         // VCPU threads MUST see the VmRunMode flag, otherwise they may re-enter the VM.
-        if let Err(e) = channel.send(VmRunMode::Exiting) {
+        if let Err(e) = channel.send(VCpuControl::RunState(VmRunMode::Exiting)) {
             error!("failed to send VmRunMode: {}", e);
         }
         match handle.kill(SIGRTMIN() + 0) {
