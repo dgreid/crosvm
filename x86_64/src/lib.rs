@@ -397,19 +397,6 @@ impl arch::LinuxArch for X8664arch {
             }
         }
 
-        let gdb_stub: Option<Arc<Mutex<dyn GdbControl + Send>>> =
-            if let Some((port, gdb_socket)) = components.gdb {
-                Some(Arc::new(Mutex::new(GdbStub::new(
-                    mem.clone(),
-                    vcpu_count as usize,
-                    port,
-                    gdb_socket,
-                    GdbX86::new(),
-                ))))
-            } else {
-                None
-            };
-
         Ok(RunnableLinuxVm {
             vm,
             kvm,
@@ -422,7 +409,7 @@ impl arch::LinuxArch for X8664arch {
             io_bus,
             mmio_bus,
             pid_debug_label_map,
-            gdb_stub,
+            gdb: components.gdb,
         })
     }
 }

@@ -3,6 +3,9 @@
 // found in the LICENSE file.
 
 use std::io::{Cursor, Write};
+use std::sync::mpsc;
+
+// add contol messages, send from read gen regs.
 
 use gdb_remote_protocol::Error as ProtoError;
 use gdb_remote_protocol::StopReason as GdbStopReason;
@@ -13,7 +16,7 @@ use gdb_remote_protocol::{
 use msg_socket::{MsgReceiver, MsgSender};
 use sync::Mutex;
 use sys_util::{GuestAddress, GuestMemory};
-use vm_control::{VmControlRequestSocket, VmRequest};
+use vm_control::{VCpuControl, VCpuDebug, VmControlRequestSocket, VmRequest};
 
 /// Architecture specific parts of handling GDB. Must be implemented for any architecture that
 /// supports gdb debugging.
@@ -37,29 +40,22 @@ pub trait GdbControl {
 }
 
 /// A Gdb Stub implementation that can be used to debug code running in a VM.
-pub struct GdbStub<T>
-where
-    T: GdbArch,
-{
-    handler: GdbHandler<T>,
+pub struct GdbStub {
+    handler: GdbHandler,
     reader: GdbMessageReader,
     output: Option<Box<dyn Write + Send>>,
     port: u32,
 }
 
-impl<T> GdbStub<T>
-where
-    T: GdbArch,
-{
+impl GdbStub {
     pub fn new(
         mem: GuestMemory,
-        num_cpus: usize,
         port: u32,
-        control_socket: VmControlRequestSocket,
-        arch: T,
+        vm_socket: VmControlRequestSocket,
+        vcpu_com: Vec<mpsc::Sender<VCpuControl>>,
     ) -> Self {
         GdbStub {
-            handler: GdbHandler::new(mem, num_cpus, control_socket, arch),
+            handler: GdbHandler::new(mem, vm_socket, vcpu_com),
             reader: GdbMessageReader::new(),
             output: None,
             port,
@@ -67,10 +63,7 @@ where
     }
 }
 
-impl<T> GdbControl for GdbStub<T>
-where
-    T: GdbArch,
-{
+impl GdbControl for GdbStub {
     fn cpu_stopped(&mut self, cpu_id: usize, signal: Option<GdbStopReason>) {
         self.handler.cpu_states[cpu_id] = signal;
         // TODO - update all the register states.
@@ -93,56 +86,58 @@ where
     }
 }
 
-struct GdbHandler<T>
-where
-    T: GdbArch,
-{
+struct GdbHandler {
     mem: GuestMemory,
+    current_cpu: usize,
     cpu_states: Vec<Option<StopReason>>,
-    control_socket: Mutex<VmControlRequestSocket>,
-    arch: T,
+    vm_socket: Mutex<VmControlRequestSocket>,
+    vcpu_com: Vec<mpsc::Sender<VCpuControl>>,
 }
 
-impl<T> GdbHandler<T>
-where
-    T: GdbArch,
-{
+impl GdbHandler {
     pub fn new(
         mem: GuestMemory,
-        num_cpus: usize,
-        control_socket: VmControlRequestSocket,
-        arch: T,
+        vm_socket: VmControlRequestSocket,
+        vcpu_com: Vec<mpsc::Sender<VCpuControl>>,
     ) -> Self {
-        let states = (0..num_cpus).map(|_| Default::default()).collect();
+        let states = (0..vcpu_com.len()).map(|_| Default::default()).collect();
         GdbHandler {
             mem,
+            current_cpu: 0,
             cpu_states: states,
-            control_socket: Mutex::new(control_socket),
-            arch,
+            vm_socket: Mutex::new(vm_socket),
+            vcpu_com,
         }
     }
 
     fn stop_all(&self) -> Result<(), ProtoError> {
-        self.send_request(VmRequest::Suspend);
+        self.vm_request(VmRequest::Suspend);
         Ok(())
     }
 
     fn resume(&self) -> Result<(), ProtoError> {
-        self.send_request(VmRequest::Resume);
+        self.vm_request(VmRequest::Resume);
         Ok(())
     }
 
-    fn send_request(&self, request: VmRequest) {
-        let vm_socket = self.control_socket.lock();
-        vm_socket.send(&request).unwrap();
-        vm_socket.recv().unwrap();
+    // Note that this will only work if the vcpu is stopped. Otherwise a signal must be sent to the
+    // vcpu thread, causing it to service the channel.
+    fn vcpu_request(&self, cpu: usize, request: VCpuControl) -> Result<(), ProtoError> {
+        self.vcpu_com[cpu]
+            .send(request)
+            .map_err(|_| ProtoError::Error(1))?;
+        Ok(())
+    }
+
+    fn vm_request(&self, request: VmRequest) -> Result<(), ProtoError> {
+        let vm_socket = self.vm_socket.lock();
+        vm_socket.send(&request).map_err(|_| ProtoError::Error(1))?;
+        vm_socket.recv().map_err(|_| ProtoError::Error(1))?;
+        Ok(())
     }
 }
 
-impl<T> Handler for GdbHandler<T>
-where
-    T: GdbArch,
-{
+impl Handler for GdbHandler {
     fn attached(&self, _pid: Option<u64>) -> Result<ProcessType, ProtoError> {
         Ok(ProcessType::Attached)
     }
@@ -177,6 +172,8 @@ where
     }
 
     fn read_general_registers(&self) -> Result<Vec<u8>, ProtoError> {
-        self.arch.read_general_registers()
+        self.vcpu_request(self.current_cpu, VCpuControl::Debug(VCpuDebug::ReadRegs))
+            .map_err(|_| ProtoError::Error(1))?;
+        Ok(vec![0; 64])
     }
 }

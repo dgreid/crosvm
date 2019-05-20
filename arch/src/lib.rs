@@ -26,8 +26,6 @@ use sync::Mutex;
 use sys_util::{syslog, EventFd, GuestAddress, GuestMemory, GuestMemoryError};
 use vm_control::VmControlRequestSocket;
 
-use gdb::GdbControl;
-
 pub enum VmImage {
     Kernel(File),
     Bios(File),
@@ -60,7 +58,7 @@ pub struct RunnableLinuxVm {
     pub io_bus: Bus,
     pub mmio_bus: Bus,
     pub pid_debug_label_map: BTreeMap<u32, String>,
-    pub gdb_stub: Option<Arc<Mutex<dyn GdbControl + Send>>>,
+    pub gdb: Option<(u32, VmControlRequestSocket)>,
 }
 
 /// The device and optional jail.

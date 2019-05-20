@@ -27,7 +27,6 @@ use libc::{self, c_int, gid_t, uid_t};
 use audio_streams::DummyStreamSource;
 use devices::virtio::{self, VirtioDevice};
 use devices::{self, HostBackendDeviceProvider, PciDevice, VirtioPciDevice, XhciController};
-use gdb_remote_protocol::StopReason as GdbStopReason;
 use io_jail::{self, Minijail};
 use kvm::*;
 use libcras::CrasClient;
@@ -51,14 +50,14 @@ use vhost;
 use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket, DiskControlResult,
-    UsbControlSocket, VmControlResponseSocket, VmMemoryControlRequestSocket,
-    VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse, VmRequest, VmResponse,
-    VmRunMode,
+    UsbControlSocket, VCpuControl, VCpuDebug, VmControlResponseSocket,
+    VmMemoryControlRequestSocket, VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse,
+    VmRequest, VmResponse, VmRunMode,
 };
 
 use crate::{Config, DiskOption, Executable, TouchDeviceOption};
 
-use arch::gdb::GdbControl;
+use arch::gdb::{GdbControl, GdbStub};
 use arch::{self, LinuxArch, RunnableLinuxVm, VirtioDeviceStub, VmComponents, VmImage};
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -259,10 +258,6 @@ type Result<T> = std::result::Result<T, Error>;
 enum TaggedControlSocket {
     Vm(VmControlResponseSocket),
     VmMemory(VmMemoryControlResponseSocket),
-}
-
-enum VCpuControl {
-    RunState(VmRunMode),
 }
 
 impl AsRef<UnixSeqpacket> for TaggedControlSocket {
@@ -1048,6 +1043,12 @@ fn setup_vcpu_signal_handler() -> Result<()> {
     Ok(())
 }
 
+fn handle_debug_msg(d: VCpuDebug) {
+    match d {
+        VCpuDebug::ReadRegs => (),
+    }
+}
+
 fn run_vcpu(
     vcpu: Vcpu,
     cpu_id: u32,
@@ -1058,7 +1059,6 @@ fn run_vcpu(
     exit_evt: EventFd,
     requires_kvmclock_ctrl: bool,
     from_main_channel: mpsc::Receiver<VCpuControl>,
-    gdb_stub: Option<Arc<Mutex<dyn GdbControl + Send>>>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
@@ -1102,6 +1102,7 @@ fn run_vcpu(
                             match from_main_channel.recv_timeout(Duration::from_millis(0)) {
                                 Ok(msg) => match msg {
                                     VCpuControl::RunState(new_mode) => run_mode = new_mode,
+                                    VCpuControl::Debug(d) => handle_debug_msg(d),
                                 },
                                 Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change
                                 Err(e) => {
@@ -1126,18 +1127,7 @@ fn run_vcpu(
                                         }
                                     }
                                 }
-                                VmRunMode::Breakpoint => {
-                                    if let Some(gdb_stub) = &gdb_stub {
-                                        // Wait for action from the debugger.
-                                        let mut gdb = gdb_stub.lock();
-                                        gdb.cpu_stopped(
-                                            cpu_id as usize,
-                                            Some(GdbStopReason::Signal(5)),
-                                        );
-                                    } else {
-                                        error!("Hit breakpoint but not debugging.");
-                                    }
-                                }
+                                VmRunMode::Breakpoint => {}
                                 VmRunMode::Exiting => break 'vcpu_loop,
                             }
                         }
@@ -1481,19 +1471,6 @@ fn run_control(
         .set_raw_mode()
         .expect("failed to set terminal raw mode");
 
-    let gdb_handle = if let Some(gdb_stub) = linux.gdb_stub.clone() {
-        Some(
-            thread::Builder::new()
-                .name("gdb".to_owned())
-                .spawn(move || {
-                    gdb_thread(gdb_stub);
-                })
-                .map_err(Error::SpawnGdbServer)?,
-        )
-    } else {
-        None
-    };
-
     let poll_ctx = PollContext::new().map_err(Error::CreatePollContext)?;
     poll_ctx
         .add(&linux.exit_evt, Token::Exit)
@@ -1567,10 +1544,34 @@ fn run_control(
             linux.exit_evt.try_clone().map_err(Error::CloneEventFd)?,
             linux.vm.check_extension(Cap::KvmclockCtrl),
             from_main_channel,
-            linux.gdb_stub.clone(),
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
+
+    let gdb_handle = if let Some((gdb_port_num, gdb_control_socket)) = linux.gdb {
+        let gdb_channels = vcpu_handles
+            .iter()
+            .map(|(_handle, channel)| channel.clone())
+            .collect();
+        let gdb_stub = GdbStub::new(
+            linux.vm.get_memory().clone(),
+            gdb_port_num,
+            gdb_control_socket,
+            gdb_channels,
+        );
+
+        Some(
+            thread::Builder::new()
+                .name("gdb".to_owned())
+                .spawn(move || {
+                    gdb_thread(Arc::new(Mutex::new(gdb_stub)));
+                })
+                .map_err(Error::SpawnGdbServer)?,
+        )
+    } else {
+        None
+    };
+
     vcpu_thread_barrier.wait();
 
     'poll: loop {

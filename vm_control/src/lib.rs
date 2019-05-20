@@ -22,6 +22,17 @@ use msg_socket::{MsgOnSocket, MsgReceiver, MsgResult, MsgSender, MsgSocket};
 use resources::{GpuMemoryDesc, SystemAllocator};
 use sys_util::{error, Error as SysError, GuestAddress, MemoryMapping, MmapError, Result};
 
+/// Messages that can be sent to a VCpu to set/get its state from the debugger.
+pub enum VCpuDebug {
+    ReadRegs,
+}
+
+/// Control the state of a particular VM CPU.
+pub enum VCpuControl {
+    Debug(VCpuDebug),
+    RunState(VmRunMode),
+}
+
 /// A file descriptor either borrowed or owned by this.
 #[derive(Debug)]
 pub enum MaybeOwnedFd {
