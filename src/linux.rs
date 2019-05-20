@@ -1548,26 +1548,29 @@ fn run_control(
         vcpu_handles.push((handle, to_vcpu_channel));
     }
 
-    let gdb_handle = if let Some((gdb_port_num, gdb_control_socket)) = linux.gdb {
-        let gdb_channels = vcpu_handles
+    let gdb_thread = if let Some((gdb_port_num, gdb_control_socket)) = linux.gdb {
+        let to_vcpu_channels = vcpu_handles
             .iter()
             .map(|(_handle, channel)| channel.clone())
             .collect();
+        let (to_gdb_channel, from_vcpu_channel) = mpsc::channel();
         let gdb_stub = GdbStub::new(
             linux.vm.get_memory().clone(),
             gdb_port_num,
             gdb_control_socket,
-            gdb_channels,
+            to_vcpu_channels,
+            from_vcpu_channel,
         );
 
-        Some(
+        Some((
             thread::Builder::new()
                 .name("gdb".to_owned())
                 .spawn(move || {
                     gdb_thread(Arc::new(Mutex::new(gdb_stub)));
                 })
                 .map_err(Error::SpawnGdbServer)?,
-        )
+            to_gdb_channel,
+        ))
     } else {
         None
     };
@@ -1851,7 +1854,7 @@ fn run_control(
         }
     }
 
-    if let Some(gdb_handle) = gdb_handle {
+    if let Some((gdb_handle, _)) = gdb_thread {
         //if let Err(e) = gdb_handle.join() {
         // error!("failed to join gdb thread: {:?}", e);
         // }

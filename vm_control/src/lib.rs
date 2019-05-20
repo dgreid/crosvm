@@ -27,6 +27,11 @@ pub enum VCpuDebug {
     ReadRegs,
 }
 
+/// Messages that can be sent from a VCpu to update the state to the debugger.
+pub enum VCpuDebugStatus {
+    RegValues(Vec<u8>),
+}
+
 /// Control the state of a particular VM CPU.
 pub enum VCpuControl {
     Debug(VCpuDebug),
