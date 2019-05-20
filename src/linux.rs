@@ -1045,17 +1045,17 @@ fn setup_vcpu_signal_handler() -> Result<()> {
 
 fn handle_debug_msg(
     cpu_id: u32,
+    vcpu: &Vcpu,
     d: VCpuDebug,
     reply_channel: &mpsc::Sender<VCpuDebugStatusMessage>,
 ) {
     match d {
         VCpuDebug::ReadRegs => {
-            reply_channel
-                .send(VCpuDebugStatusMessage {
-                    cpu: cpu_id as usize,
-                    msg:VCpuDebugStatus::RegValues(vec![0; 64]),
-                }) // TODO - get from vcpu
-                .unwrap();
+            let msg = VCpuDebugStatusMessage {
+                cpu: cpu_id as usize,
+                msg: VCpuDebugStatus::RegValues(Arch::read_general_registers(vcpu)),
+            };
+            reply_channel.send(msg).unwrap();
         }
     }
 }
@@ -1115,7 +1115,7 @@ fn run_vcpu(
                                 Ok(msg) => match msg {
                                     VCpuControl::RunState(new_mode) => run_mode = new_mode,
                                     VCpuControl::Debug(d) => {
-                                        handle_debug_msg(cpu_id, d, &to_gdb_channel)
+                                        handle_debug_msg(cpu_id, &vcpu, d, &to_gdb_channel)
                                     }
                                 },
                                 Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change

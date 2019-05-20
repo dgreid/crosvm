@@ -94,6 +94,10 @@ pub trait LinuxArch {
             &EventFd,
         ) -> Result<Vec<(Box<dyn PciDevice>, Option<Minijail>)>, E>,
         E: StdError + 'static;
+
+    /// Returns a byte array representing the state of the current CPU's registers. Used to provide
+    /// gdb with the register information that it needs.
+    fn read_general_registers(_vcpu: &Vcpu) -> Vec<u8>;
 }
 
 /// Errors for device manager.

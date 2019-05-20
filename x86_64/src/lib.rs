@@ -412,6 +412,10 @@ impl arch::LinuxArch for X8664arch {
             gdb: components.gdb,
         })
     }
+
+    fn read_general_registers(_vcpu: &Vcpu) -> Vec<u8> {
+        vec![0u8; 64]
+    }
 }
 
 impl X8664arch {
