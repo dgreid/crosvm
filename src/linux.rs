@@ -50,7 +50,7 @@ use vhost;
 use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket, DiskControlResult,
-    UsbControlSocket, VCpuControl, VCpuDebug, VmControlResponseSocket,
+    UsbControlSocket, VCpuControl, VCpuDebug, VCpuDebugStatus, VmControlResponseSocket,
     VmMemoryControlRequestSocket, VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse,
     VmRequest, VmResponse, VmRunMode,
 };
@@ -1043,9 +1043,13 @@ fn setup_vcpu_signal_handler() -> Result<()> {
     Ok(())
 }
 
-fn handle_debug_msg(d: VCpuDebug) {
+fn handle_debug_msg(d: VCpuDebug, reply_channel: &mpsc::Sender<VCpuDebugStatus>) {
     match d {
-        VCpuDebug::ReadRegs => (),
+        VCpuDebug::ReadRegs => {
+            reply_channel
+                .send(VCpuDebugStatus::RegValues(vec![0; 64])) // TODO - get from vcpu
+                .unwrap();
+        }
     }
 }
 
@@ -1059,6 +1063,7 @@ fn run_vcpu(
     exit_evt: EventFd,
     requires_kvmclock_ctrl: bool,
     from_main_channel: mpsc::Receiver<VCpuControl>,
+    to_gdb_channel: mpsc::Sender<VCpuDebugStatus>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
@@ -1102,7 +1107,7 @@ fn run_vcpu(
                             match from_main_channel.recv_timeout(Duration::from_millis(0)) {
                                 Ok(msg) => match msg {
                                     VCpuControl::RunState(new_mode) => run_mode = new_mode,
-                                    VCpuControl::Debug(d) => handle_debug_msg(d),
+                                    VCpuControl::Debug(d) => handle_debug_msg(d, &to_gdb_channel),
                                 },
                                 Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change
                                 Err(e) => {
@@ -1529,6 +1534,8 @@ fn run_control(
         drop_capabilities().map_err(Error::DropCapabilities)?;
     }
 
+    let (to_gdb_channel, from_vcpu_channel) = mpsc::channel();
+
     let mut vcpu_handles = Vec::with_capacity(linux.vcpus.len());
     let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpus.len() + 1));
     setup_vcpu_signal_handler()?;
@@ -1544,6 +1551,7 @@ fn run_control(
             linux.exit_evt.try_clone().map_err(Error::CloneEventFd)?,
             linux.vm.check_extension(Cap::KvmclockCtrl),
             from_main_channel,
+            to_gdb_channel.clone(),
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
@@ -1553,7 +1561,6 @@ fn run_control(
             .iter()
             .map(|(_handle, channel)| channel.clone())
             .collect();
-        let (to_gdb_channel, from_vcpu_channel) = mpsc::channel();
         let gdb_stub = GdbStub::new(
             linux.vm.get_memory().clone(),
             gdb_port_num,
@@ -1562,15 +1569,14 @@ fn run_control(
             from_vcpu_channel,
         );
 
-        Some((
+        Some(
             thread::Builder::new()
                 .name("gdb".to_owned())
                 .spawn(move || {
                     gdb_thread(Arc::new(Mutex::new(gdb_stub)));
                 })
                 .map_err(Error::SpawnGdbServer)?,
-            to_gdb_channel,
-        ))
+        )
     } else {
         None
     };
@@ -1854,7 +1860,7 @@ fn run_control(
         }
     }
 
-    if let Some((gdb_handle, _)) = gdb_thread {
+    if let Some(gdb_handle) = gdb_thread {
         //if let Err(e) = gdb_handle.join() {
         // error!("failed to join gdb thread: {:?}", e);
         // }

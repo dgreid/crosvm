@@ -178,6 +178,12 @@ impl Handler for GdbHandler {
     fn read_general_registers(&self) -> Result<Vec<u8>, ProtoError> {
         self.vcpu_request(self.current_cpu, VCpuControl::Debug(VCpuDebug::ReadRegs))
             .map_err(|_| ProtoError::Error(1))?;
-        Ok(vec![0; 64])
+        //TODO(dgreid) - allow timeout.
+        match self.from_vcpu.recv() {
+            Ok(msg) => match msg {
+                VCpuDebugStatus::RegValues(r) => Ok(r),
+            },
+            Err(e) => Err(ProtoError::Error(1)),
+        }
     }
 }
