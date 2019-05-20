@@ -1049,11 +1049,12 @@ fn handle_debug_msg(
     d: VCpuDebug,
     reply_channel: &mpsc::Sender<VCpuDebugStatusMessage>,
 ) {
+    // TODO -handle errors
     match d {
         VCpuDebug::ReadRegs => {
             let msg = VCpuDebugStatusMessage {
                 cpu: cpu_id as usize,
-                msg: VCpuDebugStatus::RegValues(Arch::read_general_registers(vcpu)),
+                msg: VCpuDebugStatus::RegValues(Arch::read_general_registers(vcpu).unwrap()),
             };
             reply_channel.send(msg).unwrap();
         }

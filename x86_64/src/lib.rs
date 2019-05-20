@@ -90,6 +90,7 @@ pub enum Error {
     LoadCmdline(kernel_loader::Error),
     LoadInitrd(arch::LoadImageError),
     LoadKernel(kernel_loader::Error),
+    ReadRegs(sys_util::Error),
     RegisterIrqfd(sys_util::Error),
     RegisterVsock(arch::DeviceRegistrationError),
     SetLint(interrupts::Error),
@@ -135,6 +136,7 @@ impl Display for Error {
             LoadCmdline(e) => write!(f, "error loading command line: {}", e),
             LoadInitrd(e) => write!(f, "error loading initrd: {}", e),
             LoadKernel(e) => write!(f, "error loading Kernel: {}", e),
+            ReadRegs(e) => write!(f, "error reading CPU registers {}", e),
             RegisterIrqfd(e) => write!(f, "error registering an IrqFd: {}", e),
             RegisterVsock(e) => write!(f, "error registering virtual socket device: {}", e),
             SetLint(e) => write!(f, "failed to set interrupts: {}", e),
@@ -413,8 +415,28 @@ impl arch::LinuxArch for X8664arch {
         })
     }
 
-    fn read_general_registers(_vcpu: &Vcpu) -> Vec<u8> {
-        vec![0u8; 64]
+    fn read_general_registers(vcpu: &Vcpu) -> Result<Vec<u8>> {
+        let regs = vcpu.get_regs().map_err(Error::ReadRegs)?;
+        let mut reg_bytes = Vec::with_capacity(128);
+        reg_bytes.extend_from_slice(&regs.rax.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rcx.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rdx.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rbx.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rsp.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rbp.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rsi.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rdi.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r8.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r9.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r10.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r11.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r12.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r13.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r14.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.r15.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rip.to_ne_bytes());
+        reg_bytes.extend_from_slice(&regs.rflags.to_ne_bytes());
+        Ok(reg_bytes)
     }
 }
 

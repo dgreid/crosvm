@@ -153,6 +153,8 @@ impl Handler for GdbHandler {
         Ok(StopReason::Signal(5))
     }
 
+    // TODO(dgreid) - read and write are given guest virtual addresses, they need to translate to
+    // physical address.
     fn read_memory(&self, region: MemoryRegion) -> Result<Vec<u8>, ProtoError> {
         let len = region.length as usize;
         let mut buf = Cursor::new(Vec::with_capacity(len));
