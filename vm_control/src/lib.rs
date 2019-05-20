@@ -32,6 +32,11 @@ pub enum VCpuDebugStatus {
     RegValues(Vec<u8>),
 }
 
+pub struct VCpuDebugStatusMessage {
+    pub cpu: usize,
+    pub msg: VCpuDebugStatus,
+}
+
 /// Control the state of a particular VM CPU.
 pub enum VCpuControl {
     Debug(VCpuDebug),

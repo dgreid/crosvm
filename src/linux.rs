@@ -50,9 +50,9 @@ use vhost;
 use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket, DiskControlResult,
-    UsbControlSocket, VCpuControl, VCpuDebug, VCpuDebugStatus, VmControlResponseSocket,
-    VmMemoryControlRequestSocket, VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse,
-    VmRequest, VmResponse, VmRunMode,
+    UsbControlSocket, VCpuControl, VCpuDebug, VCpuDebugStatus, VCpuDebugStatusMessage,
+    VmControlResponseSocket, VmMemoryControlRequestSocket, VmMemoryControlResponseSocket,
+    VmMemoryRequest, VmMemoryResponse, VmRequest, VmResponse, VmRunMode,
 };
 
 use crate::{Config, DiskOption, Executable, TouchDeviceOption};
@@ -1043,11 +1043,18 @@ fn setup_vcpu_signal_handler() -> Result<()> {
     Ok(())
 }
 
-fn handle_debug_msg(d: VCpuDebug, reply_channel: &mpsc::Sender<VCpuDebugStatus>) {
+fn handle_debug_msg(
+    cpu_id: u32,
+    d: VCpuDebug,
+    reply_channel: &mpsc::Sender<VCpuDebugStatusMessage>,
+) {
     match d {
         VCpuDebug::ReadRegs => {
             reply_channel
-                .send(VCpuDebugStatus::RegValues(vec![0; 64])) // TODO - get from vcpu
+                .send(VCpuDebugStatusMessage {
+                    cpu: cpu_id as usize,
+                    msg:VCpuDebugStatus::RegValues(vec![0; 64]),
+                }) // TODO - get from vcpu
                 .unwrap();
         }
     }
@@ -1063,7 +1070,7 @@ fn run_vcpu(
     exit_evt: EventFd,
     requires_kvmclock_ctrl: bool,
     from_main_channel: mpsc::Receiver<VCpuControl>,
-    to_gdb_channel: mpsc::Sender<VCpuDebugStatus>,
+    to_gdb_channel: mpsc::Sender<VCpuDebugStatusMessage>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
@@ -1107,7 +1114,9 @@ fn run_vcpu(
                             match from_main_channel.recv_timeout(Duration::from_millis(0)) {
                                 Ok(msg) => match msg {
                                     VCpuControl::RunState(new_mode) => run_mode = new_mode,
-                                    VCpuControl::Debug(d) => handle_debug_msg(d, &to_gdb_channel),
+                                    VCpuControl::Debug(d) => {
+                                        handle_debug_msg(cpu_id, d, &to_gdb_channel)
+                                    }
                                 },
                                 Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change
                                 Err(e) => {

@@ -16,7 +16,10 @@ use gdb_remote_protocol::{
 use msg_socket::{MsgReceiver, MsgSender};
 use sync::Mutex;
 use sys_util::{GuestAddress, GuestMemory};
-use vm_control::{VCpuControl, VCpuDebug, VCpuDebugStatus, VmControlRequestSocket, VmRequest};
+use vm_control::{
+    VCpuControl, VCpuDebug, VCpuDebugStatus, VCpuDebugStatusMessage, VmControlRequestSocket,
+    VmRequest,
+};
 
 /// Architecture specific parts of handling GDB. Must be implemented for any architecture that
 /// supports gdb debugging.
@@ -53,7 +56,7 @@ impl GdbStub {
         port: u32,
         vm_socket: VmControlRequestSocket,
         vcpu_com: Vec<mpsc::Sender<VCpuControl>>,
-        from_vcpu: mpsc::Receiver<VCpuDebugStatus>,
+        from_vcpu: mpsc::Receiver<VCpuDebugStatusMessage>,
     ) -> Self {
         GdbStub {
             handler: GdbHandler::new(mem, vm_socket, vcpu_com, from_vcpu),
@@ -93,7 +96,7 @@ struct GdbHandler {
     cpu_states: Vec<Option<StopReason>>,
     vm_socket: Mutex<VmControlRequestSocket>,
     vcpu_com: Vec<mpsc::Sender<VCpuControl>>,
-    from_vcpu: mpsc::Receiver<VCpuDebugStatus>,
+    from_vcpu: mpsc::Receiver<VCpuDebugStatusMessage>,
 }
 
 impl GdbHandler {
@@ -101,7 +104,7 @@ impl GdbHandler {
         mem: GuestMemory,
         vm_socket: VmControlRequestSocket,
         vcpu_com: Vec<mpsc::Sender<VCpuControl>>,
-        from_vcpu: mpsc::Receiver<VCpuDebugStatus>,
+        from_vcpu: mpsc::Receiver<VCpuDebugStatusMessage>,
     ) -> Self {
         let states = (0..vcpu_com.len()).map(|_| Default::default()).collect();
         GdbHandler {
@@ -180,7 +183,7 @@ impl Handler for GdbHandler {
             .map_err(|_| ProtoError::Error(1))?;
         //TODO(dgreid) - allow timeout.
         match self.from_vcpu.recv() {
-            Ok(msg) => match msg {
+            Ok(msg) => match msg.msg {
                 VCpuDebugStatus::RegValues(r) => Ok(r),
             },
             Err(e) => Err(ProtoError::Error(1)),
