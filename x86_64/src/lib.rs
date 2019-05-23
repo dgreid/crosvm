@@ -90,6 +90,7 @@ pub enum Error {
     LoadCmdline(kernel_loader::Error),
     LoadInitrd(arch::LoadImageError),
     LoadKernel(kernel_loader::Error),
+    PageNotPresent,
     ReadRegs(sys_util::Error),
     RegisterIrqfd(sys_util::Error),
     RegisterVsock(arch::DeviceRegistrationError),
@@ -103,6 +104,7 @@ pub enum Error {
     SetupRegs(regs::Error),
     SetupSmbios(smbios::Error),
     SetupSregs(regs::Error),
+    TranslatingVirtAddr,
     ZeroPagePastRamEnd,
     ZeroPageSetup,
 }
@@ -136,6 +138,7 @@ impl Display for Error {
             LoadCmdline(e) => write!(f, "error loading command line: {}", e),
             LoadInitrd(e) => write!(f, "error loading initrd: {}", e),
             LoadKernel(e) => write!(f, "error loading Kernel: {}", e),
+            PageNotPresent => write!(f, "error translating address: Page not present"),
             ReadRegs(e) => write!(f, "error reading CPU registers {}", e),
             RegisterIrqfd(e) => write!(f, "error registering an IrqFd: {}", e),
             RegisterVsock(e) => write!(f, "error registering virtual socket device: {}", e),
@@ -149,6 +152,7 @@ impl Display for Error {
             SetupRegs(e) => write!(f, "failed to set up registers: {}", e),
             SetupSmbios(e) => write!(f, "failed to set up SMBIOS: {}", e),
             SetupSregs(e) => write!(f, "failed to set up sregs: {}", e),
+            TranslatingVirtAddr => write!(f, "failed to translate virtual address"),
             ZeroPagePastRamEnd => write!(f, "the zero page extends past the end of guest_mem"),
             ZeroPageSetup => write!(f, "error writing the zero page of guest memory"),
         }
@@ -438,6 +442,59 @@ impl arch::LinuxArch for X8664arch {
         reg_bytes.extend_from_slice(&regs.rflags.to_ne_bytes());
         Ok(reg_bytes)
     }
+}
+
+fn phys_addr(mem: &GuestMemory, vaddr: u64, cr: &[u64; 5], msr_efer: u32) -> Result<u64> {
+    const CR0_PG_MASK: u64 = 1 << 31;
+    const CR4_PAE_MASK: u64 = 1 << 5;
+    const CR4_LA57_MASK: u64 = 1 << 12;
+    const MSR_EFER_LMA: u32 = 1 << 10;
+    // bits 12 through 51 are the address in a PTE.
+    const PTE_ADDR_MASK: u64 = ((1 << 52) - 1) & !0x0fff;
+    const PAGE_PRESENT: u64 = 0x1;
+
+    fn next_pte(mem: &GuestMemory, curr_table_addr: u64, vaddr: u64, level: usize) -> Result<u64> {
+        let ent: u64 = mem
+            .read_obj_from_addr(GuestAddress(
+                (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, 4),
+            ))
+            .map_err(|_| Error::TranslatingVirtAddr)?;
+        if ent & PAGE_PRESENT == 0 {
+            return Err(Error::PageNotPresent);
+        }
+        Ok(ent & PTE_ADDR_MASK)
+    }
+
+    // Get the offset in to the page of `vaddr`.
+    fn page_offset(vaddr: u64) -> u64 {
+        vaddr & 0x0fff
+    }
+
+    // Get the offset in to the page table of the given `level` specified by the virtual `address`.
+    // `level` is 1 through 5 in x86_64 to handle the five levels of paging.
+    fn page_table_offset(addr: u64, level: usize) -> u64 {
+        let offset = (level - 1) * 9 + 12;
+        let mask = 0x1ff << offset;
+        (addr & mask) >> offset
+    }
+
+    if cr[0] & CR0_PG_MASK == 0 {
+        return Ok(vaddr);
+    }
+
+    if msr_efer & MSR_EFER_LMA != 0 {
+        // TODO - check LA57
+        let p4_ent = next_pte(mem, cr[3], vaddr, 4)?;
+        let p3_ent = next_pte(mem, p4_ent, vaddr, 3)?;
+        let p2_ent = next_pte(mem, p3_ent, vaddr, 2)?;
+        let p1_ent = next_pte(mem, p2_ent, vaddr, 1)?;
+        if p1_ent & PAGE_PRESENT == 0 {
+            return Err(Error::PageNotPresent);
+        }
+        let paddr = p1_ent | page_offset(vaddr);
+        return Ok(paddr);
+    }
+    Err(Error::TranslatingVirtAddr)
 }
 
 impl X8664arch {
