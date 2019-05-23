@@ -55,9 +55,9 @@ use vm_control::{
     VmMemoryRequest, VmMemoryResponse, VmRequest, VmResponse, VmRunMode,
 };
 
+use crate::gdb::{GdbControl, GdbStub};
 use crate::{Config, DiskOption, Executable, TouchDeviceOption};
 
-use arch::gdb::{GdbControl, GdbStub};
 use arch::{self, LinuxArch, RunnableLinuxVm, VirtioDeviceStub, VmComponents, VmImage};
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -1055,6 +1055,15 @@ fn handle_debug_msg(
             let msg = VCpuDebugStatusMessage {
                 cpu: cpu_id as usize,
                 msg: VCpuDebugStatus::RegValues(Arch::read_general_registers(vcpu).unwrap()),
+            };
+            reply_channel.send(msg).unwrap();
+        }
+        VCpuDebug::ReadMem(vaddr, len) => {
+            let msg = VCpuDebugStatusMessage {
+                cpu: cpu_id as usize,
+                msg: VCpuDebugStatus::MemoryRegion(
+                    Arch::debug_read_memory(vcpu, vaddr, len).unwrap(),
+                ),
             };
             reply_channel.send(msg).unwrap();
         }

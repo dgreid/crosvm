@@ -24,12 +24,14 @@ use sys_util::{error, Error as SysError, GuestAddress, MemoryMapping, MmapError,
 
 /// Messages that can be sent to a VCpu to set/get its state from the debugger.
 pub enum VCpuDebug {
+    ReadMem(GuestAddress, usize),
     ReadRegs,
 }
 
 /// Messages that can be sent from a VCpu to update the state to the debugger.
 pub enum VCpuDebugStatus {
     RegValues(Vec<u8>),
+    MemoryRegion(Vec<u8>),
 }
 
 pub struct VCpuDebugStatusMessage {

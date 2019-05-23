@@ -37,7 +37,6 @@ unsafe impl data_model::DataInit for mpspec::mpf_intel {}
 
 mod bzimage;
 mod cpuid;
-mod gdbstub;
 mod gdt;
 mod interrupts;
 mod mptable;
@@ -49,17 +48,16 @@ use std::error::Error as StdError;
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
 use std::fs::File;
-use std::io::{self, Seek};
+use std::io::{self, Cursor, Seek};
 use std::mem;
 use std::sync::Arc;
 
 use crate::bootparam::boot_params;
-use arch::gdb::{GdbControl, GdbStub};
 use arch::{RunnableLinuxVm, VmComponents, VmImage};
 use devices::{get_serial_tty_string, PciConfigIo, PciDevice, PciInterruptPin, SerialParameters};
-use gdbstub::GdbX86;
 use io_jail::Minijail;
 use kvm::*;
+use kvm_sys::kvm_sregs;
 use remain::sorted;
 use resources::SystemAllocator;
 use sync::Mutex;
@@ -91,6 +89,7 @@ pub enum Error {
     LoadInitrd(arch::LoadImageError),
     LoadKernel(kernel_loader::Error),
     PageNotPresent,
+    ReadingGuestMemory(GuestMemoryError),
     ReadRegs(sys_util::Error),
     RegisterIrqfd(sys_util::Error),
     RegisterVsock(arch::DeviceRegistrationError),
@@ -139,6 +138,7 @@ impl Display for Error {
             LoadInitrd(e) => write!(f, "error loading initrd: {}", e),
             LoadKernel(e) => write!(f, "error loading Kernel: {}", e),
             PageNotPresent => write!(f, "error translating address: Page not present"),
+            ReadingGuestMemory(e) => write!(f, "error reading guest memory {}", e),
             ReadRegs(e) => write!(f, "error reading CPU registers {}", e),
             RegisterIrqfd(e) => write!(f, "error registering an IrqFd: {}", e),
             RegisterVsock(e) => write!(f, "error registering virtual socket device: {}", e),
@@ -444,26 +444,41 @@ impl arch::LinuxArch for X8664arch {
     }
 
     fn debug_read_memory(vcpu: &Vcpu, vaddr: GuestAddress, len: usize) -> Result<Vec<u8>> {
-        Err(Error::TranslatingVirtAddr)
+        let sregs = vcpu.get_sregs().map_err(Error::ReadRegs)?;
+        let paddr = phys_addr(vcpu.get_memory(), vaddr.0, &sregs)?;
+        let mut buf = Cursor::new(Vec::with_capacity(len));
+        // TODO -handle reads across page boundaries.
+        vcpu.get_memory()
+            .write_from_memory(GuestAddress(paddr), &mut buf, len)
+            .map_err(Error::ReadingGuestMemory)?;
+        Ok(buf.into_inner())
     }
 }
 
-fn phys_addr(mem: &GuestMemory, vaddr: u64, cr: &[u64; 5], msr_efer: u32) -> Result<u64> {
+fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
     const CR0_PG_MASK: u64 = 1 << 31;
     const CR4_PAE_MASK: u64 = 1 << 5;
     const CR4_LA57_MASK: u64 = 1 << 12;
-    const MSR_EFER_LMA: u32 = 1 << 10;
+    const MSR_EFER_LMA: u64 = 1 << 10;
     // bits 12 through 51 are the address in a PTE.
     const PTE_ADDR_MASK: u64 = ((1 << 52) - 1) & !0x0fff;
     const PAGE_PRESENT: u64 = 0x1;
 
     fn next_pte(mem: &GuestMemory, curr_table_addr: u64, vaddr: u64, level: usize) -> Result<u64> {
+        println!(
+            "read from {:x}",
+            (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, level)
+        );
         let ent: u64 = mem
             .read_obj_from_addr(GuestAddress(
-                (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, 4),
+                (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, level),
             ))
             .map_err(|_| Error::TranslatingVirtAddr)?;
         if ent & PAGE_PRESENT == 0 {
+            println!(
+                "no page present level {} vaddr {:x} table-addr {:x} mask {:x} ent {:x}",
+                level, vaddr, curr_table_addr, PTE_ADDR_MASK, ent
+            );
             return Err(Error::PageNotPresent);
         }
         Ok(ent & PTE_ADDR_MASK)
@@ -478,26 +493,35 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, cr: &[u64; 5], msr_efer: u32) -> Res
     // `level` is 1 through 5 in x86_64 to handle the five levels of paging.
     fn page_table_offset(addr: u64, level: usize) -> u64 {
         let offset = (level - 1) * 9 + 12;
-        let mask = 0x1ff << offset;
-        (addr & mask) >> offset
+        ((addr >> offset) & 0x1ff) << 3
     }
 
-    if cr[0] & CR0_PG_MASK == 0 {
+    if sregs.cr0 & CR0_PG_MASK == 0 {
         return Ok(vaddr);
     }
 
-    if msr_efer & MSR_EFER_LMA != 0 {
+    if sregs.cr4 & CR4_PAE_MASK == 0 {
+        println!("not pae");
+        return Err(Error::TranslatingVirtAddr);
+    }
+
+    if sregs.efer & MSR_EFER_LMA != 0 {
         // TODO - check LA57
-        let p4_ent = next_pte(mem, cr[3], vaddr, 4)?;
+        if sregs.cr4 & CR4_LA57_MASK != 0 {
+            println!("in la57");
+        }
+        let p4_ent = next_pte(mem, sregs.cr3, vaddr, 4)?;
         let p3_ent = next_pte(mem, p4_ent, vaddr, 3)?;
         let p2_ent = next_pte(mem, p3_ent, vaddr, 2)?;
         let p1_ent = next_pte(mem, p2_ent, vaddr, 1)?;
         if p1_ent & PAGE_PRESENT == 0 {
+            println!("no page present level {}", 0);
             return Err(Error::PageNotPresent);
         }
         let paddr = p1_ent | page_offset(vaddr);
         return Ok(paddr);
     }
+    println!("not lma");
     Err(Error::TranslatingVirtAddr)
 }
 

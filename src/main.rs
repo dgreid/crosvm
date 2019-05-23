@@ -5,6 +5,7 @@
 //! Runs a virtual machine under KVM
 
 pub mod argument;
+pub mod gdb;
 pub mod linux;
 pub mod panic_hook;
 #[cfg(feature = "plugin")]

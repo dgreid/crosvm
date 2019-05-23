@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::io::{Cursor, Write};
+use std::io::Write;
 use std::sync::mpsc;
 
 // add contol messages, send from read gen regs.
@@ -20,12 +20,6 @@ use vm_control::{
     VCpuControl, VCpuDebug, VCpuDebugStatus, VCpuDebugStatusMessage, VmControlRequestSocket,
     VmRequest,
 };
-
-/// Architecture specific parts of handling GDB. Must be implemented for any architecture that
-/// supports gdb debugging.
-pub trait GdbArch {
-    fn read_general_registers(&self) -> Result<Vec<u8>, ProtoError>;
-}
 
 pub trait GdbControl {
     /// Notify the stub that the CPU has stopped and why or that it has resumed if `reason` in
@@ -157,11 +151,19 @@ impl Handler for GdbHandler {
     // physical address.
     fn read_memory(&self, region: MemoryRegion) -> Result<Vec<u8>, ProtoError> {
         let len = region.length as usize;
-        let mut buf = Cursor::new(Vec::with_capacity(len));
-        self.mem
-            .write_from_memory(GuestAddress(region.address), &mut buf, len)
-            .map_err(|_| ProtoError::Error(1))?;
-        Ok(buf.into_inner())
+        self.vcpu_request(
+            self.current_cpu,
+            VCpuControl::Debug(VCpuDebug::ReadMem(GuestAddress(region.address), len)),
+        )
+        .map_err(|_| ProtoError::Error(1))?;
+        //TODO(dgreid) - allow timeout.
+        match self.from_vcpu.recv() {
+            Ok(msg) => match msg.msg {
+                VCpuDebugStatus::MemoryRegion(r) => Ok(r),
+                _ => Err(ProtoError::Error(1)),
+            },
+            Err(e) => Err(ProtoError::Error(1)),
+        }
     }
 
     fn write_memory(&self, address: u64, bytes: &[u8]) -> Result<(), ProtoError> {
@@ -187,6 +189,7 @@ impl Handler for GdbHandler {
         match self.from_vcpu.recv() {
             Ok(msg) => match msg.msg {
                 VCpuDebugStatus::RegValues(r) => Ok(r),
+                _ => Err(ProtoError::Error(1)),
             },
             Err(e) => Err(ProtoError::Error(1)),
         }

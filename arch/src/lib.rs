@@ -4,7 +4,6 @@
 
 pub mod android;
 pub mod fdt;
-pub mod gdb;
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
