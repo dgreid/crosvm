@@ -463,6 +463,7 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
     // bits 12 through 51 are the address in a PTE.
     const PTE_ADDR_MASK: u64 = ((1 << 52) - 1) & !0x0fff;
     const PAGE_PRESENT: u64 = 0x1;
+    const PAGE_PSE_MASK: u64 = 0x1 << 7;
 
     fn next_pte(mem: &GuestMemory, curr_table_addr: u64, vaddr: u64, level: usize) -> Result<u64> {
         println!(
@@ -474,14 +475,20 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
                 (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, level),
             ))
             .map_err(|_| Error::TranslatingVirtAddr)?;
+        println!(
+            "level {} vaddr {:x} table-addr {:x} mask {:x} ent {:x} offset {:x}",
+            level,
+            vaddr,
+            curr_table_addr,
+            PTE_ADDR_MASK,
+            ent,
+            page_table_offset(vaddr, level)
+        );
         if ent & PAGE_PRESENT == 0 {
-            println!(
-                "no page present level {} vaddr {:x} table-addr {:x} mask {:x} ent {:x}",
-                level, vaddr, curr_table_addr, PTE_ADDR_MASK, ent
-            );
+            println!("not present");
             return Err(Error::PageNotPresent);
         }
-        Ok(ent & PTE_ADDR_MASK)
+        Ok(ent)
     }
 
     // Get the offset in to the page of `vaddr`.
@@ -512,13 +519,15 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
         }
         let p4_ent = next_pte(mem, sregs.cr3, vaddr, 4)?;
         let p3_ent = next_pte(mem, p4_ent, vaddr, 3)?;
+        // TODO check if it's a 1G page with the PSE bit in p2_ent
         let p2_ent = next_pte(mem, p3_ent, vaddr, 2)?;
-        let p1_ent = next_pte(mem, p2_ent, vaddr, 1)?;
-        if p1_ent & PAGE_PRESENT == 0 {
-            println!("no page present level {}", 0);
-            return Err(Error::PageNotPresent);
+        if p2_ent & PAGE_PSE_MASK != 0 {
+            // It's a 2M page with the PSE bit in p2_ent
+            return Ok(p2_ent & PTE_ADDR_MASK | page_offset(vaddr));
         }
-        let paddr = p1_ent | page_offset(vaddr);
+        let p1_ent = next_pte(mem, p2_ent, vaddr, 1)?;
+        let paddr = p1_ent & PTE_ADDR_MASK | page_offset(vaddr);
+        println!("paddr {:x}", paddr);
         return Ok(paddr);
     }
     println!("not lma");
