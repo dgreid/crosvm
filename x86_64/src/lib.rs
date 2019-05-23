@@ -442,6 +442,10 @@ impl arch::LinuxArch for X8664arch {
         reg_bytes.extend_from_slice(&regs.rflags.to_ne_bytes());
         Ok(reg_bytes)
     }
+
+    fn debug_read_memory(vcpu: &Vcpu, vaddr: GuestAddress, len: usize) -> Result<Vec<u8>> {
+        Err(Error::TranslatingVirtAddr)
+    }
 }
 
 fn phys_addr(mem: &GuestMemory, vaddr: u64, cr: &[u64; 5], msr_efer: u32) -> Result<u64> {

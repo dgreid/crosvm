@@ -98,6 +98,12 @@ pub trait LinuxArch {
     /// Returns a byte array representing the state of the current CPU's registers. Used to provide
     /// gdb with the register information that it needs.
     fn read_general_registers(vcpu: &Vcpu) -> Result<Vec<u8>, Self::Error>;
+
+    fn debug_read_memory(
+        vcpu: &Vcpu,
+        vaddr: GuestAddress,
+        len: usize,
+    ) -> Result<Vec<u8>, Self::Error>;
 }
 
 /// Errors for device manager.
