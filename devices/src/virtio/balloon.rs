@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::thread;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use data_model::Le32;
 use msg_socket::MsgReceiver;
 use sys_util::{
     self, error, info, warn, EventFd, GuestAddress, GuestMemory, PollContext, PollToken,
@@ -19,7 +20,7 @@ use sys_util::{
 use vm_control::{BalloonControlCommand, BalloonControlResponseSocket};
 
 use super::{
-    DescriptorChain, Queue, VirtioDevice, INTERRUPT_STATUS_CONFIG_CHANGED,
+    DescriptorChain, Queue, Reader, VirtioDevice, INTERRUPT_STATUS_CONFIG_CHANGED,
     INTERRUPT_STATUS_USED_RING, TYPE_BALLOON, VIRTIO_F_VERSION_1,
 };
 
@@ -86,19 +87,28 @@ impl Worker {
 
         let mut needs_interrupt = false;
         while let Some(avail_desc) = queue.pop(&self.mem) {
+            let index = avail_desc.index;
+
             if inflate && valid_inflate_desc(&avail_desc) {
-                let num_addrs = avail_desc.len / 4;
-                for i in 0..num_addrs as usize {
-                    let addr = match avail_desc.addr.checked_add((i * 4) as u64) {
-                        Some(a) => a,
-                        None => break,
-                    };
-                    let guest_input: u32 = match self.mem.read_obj_from_addr(addr) {
-                        Ok(a) => a,
-                        Err(_) => continue,
+                let mut reader = Reader::new(&self.mem, avail_desc);
+                let data_length = reader.available_bytes();
+
+                if data_length % 4 != 0 {
+                    error!("invalid inflate buffer size: {}", data_length);
+                    continue;
+                }
+
+                let num_addrs = data_length / 4;
+                for _ in 0..num_addrs as usize {
+                    let guest_input = match reader.read_obj::<Le32>() {
+                        Ok(a) => a.to_native(),
+                        Err(err) => {
+                            error!("error while reading unused pages: {}", err);
+                            break;
+                        }
                     };
                     let guest_address =
-                        GuestAddress((guest_input as u64) << VIRTIO_BALLOON_PFN_SHIFT);
+                        GuestAddress((u64::from(guest_input)) << VIRTIO_BALLOON_PFN_SHIFT);
 
                     if self
                         .mem
@@ -111,7 +121,7 @@ impl Worker {
                 }
             }
 
-            queue.add_used(&self.mem, avail_desc.index, 0);
+            queue.add_used(&self.mem, index, 0);
             needs_interrupt = true;
         }
 

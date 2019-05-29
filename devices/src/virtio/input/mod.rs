@@ -16,8 +16,7 @@ use data_model::{DataInit, Le16, Le32};
 use sys_util::{error, warn, EventFd, GuestMemory, PollContext, PollToken};
 
 use self::event_source::{input_event, EvdevEventSource, EventSource, SocketEventSource};
-use super::{Queue, VirtioDevice, INTERRUPT_STATUS_USED_RING, TYPE_INPUT};
-use std::cmp::min;
+use super::{Queue, Reader, VirtioDevice, Writer, INTERRUPT_STATUS_USED_RING, TYPE_INPUT};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 use std::io::Read;
@@ -411,23 +410,23 @@ impl<T: EventSource> Worker<T> {
                     break;
                 }
                 Some(avail_desc) => {
-                    if !avail_desc.is_write_only() {
-                        panic!("Received a read only descriptor on event queue");
-                    }
+                    let index = avail_desc.index;
+                    let mut writer = Writer::new(&self.guest_memory, avail_desc);
                     let avail_events_size =
                         self.event_source.available_events_count() * virtio_input_event::EVENT_SIZE;
-                    let len = min(avail_desc.len as usize, avail_events_size);
-                    if let Err(e) =
-                        self.guest_memory
-                            .read_to_memory(avail_desc.addr, &self.event_source, len)
-                    {
-                        // Read is guaranteed to succeed here, so the only possible failure would be
-                        // writing outside the guest memory region, which would mean the address and
-                        // length given in the queue descriptor are wrong.
-                        panic!("failed reading events into guest memory: {}", e);
+                    match writer.write_from(&self.event_source, avail_events_size) {
+                        Ok(n) => {
+                            if n == 0 {
+                                // Could happen if the guest gives a read desciptor accidentally.
+                                warn!("No input events writable to the guest");
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Error writing input events to the guest: {}", e);
+                        }
                     }
 
-                    queue.add_used(&self.guest_memory, avail_desc.index, len as u32);
+                    queue.add_used(&self.guest_memory, index, writer.bytes_written() as u32);
                     needs_interrupt = true;
                 }
             }
@@ -441,22 +440,24 @@ impl<T: EventSource> Worker<T> {
 
         let mut needs_interrupt = false;
         while let Some(avail_desc) = queue.pop(&self.guest_memory) {
-            if !avail_desc.is_read_only() {
-                panic!("Received a writable descriptor on status queue");
-            }
-            let len = avail_desc.len as usize;
+            let index = avail_desc.index;
+            let mut reader = Reader::new(&self.guest_memory, avail_desc);
+            let len = reader.available_bytes();
             if len % virtio_input_event::EVENT_SIZE != 0 {
                 warn!(
                     "Ignoring buffer of unexpected size on status queue: {:0}",
                     len
                 );
             } else {
-                self.guest_memory
-                    .write_from_memory(avail_desc.addr, &self.event_source, len)
+                let n = reader
+                    .read_to(&self.event_source, len)
                     .map_err(InputError::EventsWriteError)?;
+                if n == 0 {
+                    warn!("Read 0 bytes from the status queue");
+                }
             }
 
-            queue.add_used(&self.guest_memory, avail_desc.index, len as u32);
+            queue.add_used(&self.guest_memory, index, len as u32);
             needs_interrupt = true;
         }
 
