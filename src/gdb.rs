@@ -167,9 +167,20 @@ impl Handler for GdbHandler {
     }
 
     fn write_memory(&self, address: u64, bytes: &[u8]) -> Result<(), ProtoError> {
-        self.mem
-            .write_all_at_addr(bytes, GuestAddress(address))
-            .map_err(|_| ProtoError::Error(1))
+        let len = bytes.len();
+        self.vcpu_request(
+            self.current_cpu,
+            VCpuControl::Debug(VCpuDebug::WriteMem(GuestAddress(address), bytes.to_owned())),
+        )
+        .map_err(|_| ProtoError::Error(1))?;
+        //TODO(dgreid) - allow timeout.
+        match self.from_vcpu.recv() {
+            Ok(msg) => match msg.msg {
+                VCpuDebugStatus::CommandComplete => Ok(()),
+                _ => Err(ProtoError::Error(1)),
+            },
+            Err(e) => Err(ProtoError::Error(1)),
+        }
     }
 
     fn cont(&self, _addr: Option<u64>) -> Result<ContinueStatus, ProtoError> {

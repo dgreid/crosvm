@@ -98,6 +98,7 @@ pub enum Error {
     Disk(io::Error),
     DiskImageLock(sys_util::Error),
     DropCapabilities(sys_util::Error),
+    HandleDebugCommand(<Arch as LinuxArch>::Error),
     InputDeviceNew(virtio::InputError),
     InputEventsOpen(std::io::Error),
     InvalidFdPath,
@@ -181,6 +182,7 @@ impl Display for Error {
             Disk(e) => write!(f, "failed to load disk image: {}", e),
             DiskImageLock(e) => write!(f, "failed to lock disk image: {}", e),
             DropCapabilities(e) => write!(f, "failed to drop process capabilities: {}", e),
+            HandleDebugCommand(e) => write!(f, "failed to handle a gdb command: {}", e),
             InputDeviceNew(e) => write!(f, "failed to set up input device: {}", e),
             InputEventsOpen(e) => write!(f, "failed to open event device: {}", e),
             InvalidFdPath => write!(f, "failed parsing a /proc/self/fd/*"),
@@ -1048,13 +1050,15 @@ fn handle_debug_msg(
     vcpu: &Vcpu,
     d: VCpuDebug,
     reply_channel: &mpsc::Sender<VCpuDebugStatusMessage>,
-) {
+) -> Result<()> {
     // TODO -handle errors
     match d {
         VCpuDebug::ReadRegs => {
             let msg = VCpuDebugStatusMessage {
                 cpu: cpu_id as usize,
-                msg: VCpuDebugStatus::RegValues(Arch::read_general_registers(vcpu).unwrap()),
+                msg: VCpuDebugStatus::RegValues(
+                    Arch::read_general_registers(vcpu).map_err(Error::HandleDebugCommand)?,
+                ),
             };
             reply_channel.send(msg).unwrap();
         }
@@ -1062,12 +1066,22 @@ fn handle_debug_msg(
             let msg = VCpuDebugStatusMessage {
                 cpu: cpu_id as usize,
                 msg: VCpuDebugStatus::MemoryRegion(
-                    Arch::debug_read_memory(vcpu, vaddr, len).unwrap(),
+                    Arch::debug_read_memory(vcpu, vaddr, len).unwrap_or(Vec::new()),
                 ),
             };
             reply_channel.send(msg).unwrap();
         }
+        VCpuDebug::WriteMem(vaddr, buf) => {
+            Arch::debug_write_memory(vcpu, vaddr, &buf).map_err(Error::HandleDebugCommand)?;
+            reply_channel
+                .send(VCpuDebugStatusMessage {
+                    cpu: cpu_id as usize,
+                    msg: VCpuDebugStatus::CommandComplete,
+                })
+                .unwrap();
+        }
     }
+    Ok(())
 }
 
 fn run_vcpu(
@@ -1125,7 +1139,11 @@ fn run_vcpu(
                                 Ok(msg) => match msg {
                                     VCpuControl::RunState(new_mode) => run_mode = new_mode,
                                     VCpuControl::Debug(d) => {
-                                        handle_debug_msg(cpu_id, &vcpu, d, &to_gdb_channel)
+                                        if let Err(e) =
+                                            handle_debug_msg(cpu_id, &vcpu, d, &to_gdb_channel)
+                                        {
+                                            error!("Failed to handle gdb message: {}", e);
+                                        }
                                     }
                                 },
                                 Err(mpsc::RecvTimeoutError::Timeout) => (), // no message = no change

@@ -43,6 +43,7 @@ mod mptable;
 mod regs;
 mod smbios;
 
+use std::cmp::min;
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::ffi::{CStr, CString};
@@ -104,6 +105,7 @@ pub enum Error {
     SetupSmbios(smbios::Error),
     SetupSregs(regs::Error),
     TranslatingVirtAddr,
+    WritingGuestMemory(GuestMemoryError),
     ZeroPagePastRamEnd,
     ZeroPageSetup,
 }
@@ -153,6 +155,7 @@ impl Display for Error {
             SetupSmbios(e) => write!(f, "failed to set up SMBIOS: {}", e),
             SetupSregs(e) => write!(f, "failed to set up sregs: {}", e),
             TranslatingVirtAddr => write!(f, "failed to translate virtual address"),
+            WritingGuestMemory(e) => write!(f, "error writing guest memory {}", e),
             ZeroPagePastRamEnd => write!(f, "the zero page extends past the end of guest_mem"),
             ZeroPageSetup => write!(f, "error writing the zero page of guest memory"),
         }
@@ -445,17 +448,46 @@ impl arch::LinuxArch for X8664arch {
 
     fn debug_read_memory(vcpu: &Vcpu, vaddr: GuestAddress, len: usize) -> Result<Vec<u8>> {
         let sregs = vcpu.get_sregs().map_err(Error::ReadRegs)?;
-        let paddr = phys_addr(vcpu.get_memory(), vaddr.0, &sregs)?;
         let mut buf = Cursor::new(Vec::with_capacity(len));
-        // TODO -handle reads across page boundaries.
-        vcpu.get_memory()
-            .write_from_memory(GuestAddress(paddr), &mut buf, len)
-            .map_err(Error::ReadingGuestMemory)?;
+        let mut total_read = 0u64;
+        // Handle reads across page boundaries.
+        while total_read < len as u64 {
+            let (paddr, psize) = phys_addr(vcpu.get_memory(), vaddr.0 + total_read, &sregs)?;
+            let read_len = min(len as u64 - total_read, psize - (paddr & (psize - 1)));
+
+            vcpu.get_memory()
+                .write_from_memory(GuestAddress(paddr), &mut buf, read_len as usize)
+                .map_err(Error::ReadingGuestMemory)?;
+            total_read += read_len;
+        }
         Ok(buf.into_inner())
+    }
+
+    fn debug_write_memory(vcpu: &Vcpu, vaddr: GuestAddress, buf: &[u8]) -> Result<()> {
+        let sregs = vcpu.get_sregs().map_err(Error::ReadRegs)?;
+        let mut total_written = 0u64;
+        // Handle writes across page boundaries.
+        while total_written < buf.len() as u64 {
+            let (paddr, psize) = phys_addr(vcpu.get_memory(), vaddr.0 + total_written, &sregs)?;
+            let write_len = min(
+                buf.len() as u64 - total_written,
+                psize - (paddr & (psize - 1)),
+            );
+
+            vcpu.get_memory()
+                .write_all_at_addr(
+                    &buf[total_written as usize..(total_written as usize + write_len as usize)],
+                    GuestAddress(paddr),
+                )
+                .map_err(Error::WritingGuestMemory)?;
+            total_written += write_len;
+        }
+        Ok(())
     }
 }
 
-fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
+// return the translated address and the size of the page it resides in.
+fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<(u64, u64)> {
     const CR0_PG_MASK: u64 = 1 << 31;
     const CR4_PAE_MASK: u64 = 1 << 5;
     const CR4_LA57_MASK: u64 = 1 << 12;
@@ -465,16 +497,17 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
     const PAGE_PRESENT: u64 = 0x1;
     const PAGE_PSE_MASK: u64 = 0x1 << 7;
 
+    const PAGE_SIZE_4K: u64 = 4 * 1024;
+    const PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
+    const PAGE_SIZE_1G: u64 = 1024 * 1024 * 1024;
+
     fn next_pte(mem: &GuestMemory, curr_table_addr: u64, vaddr: u64, level: usize) -> Result<u64> {
-        println!(
-            "read from {:x}",
-            (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, level)
-        );
         let ent: u64 = mem
             .read_obj_from_addr(GuestAddress(
                 (curr_table_addr & PTE_ADDR_MASK) + page_table_offset(vaddr, level),
             ))
             .map_err(|_| Error::TranslatingVirtAddr)?;
+        /* TODO - convert to a trace
         println!(
             "level {} vaddr {:x} table-addr {:x} mask {:x} ent {:x} offset {:x}",
             level,
@@ -484,16 +517,16 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
             ent,
             page_table_offset(vaddr, level)
         );
+        */
         if ent & PAGE_PRESENT == 0 {
-            println!("not present");
             return Err(Error::PageNotPresent);
         }
         Ok(ent)
     }
 
     // Get the offset in to the page of `vaddr`.
-    fn page_offset(vaddr: u64) -> u64 {
-        vaddr & 0x0fff
+    fn page_offset(vaddr: u64, page_size: u64) -> u64 {
+        vaddr & (page_size - 1)
     }
 
     // Get the offset in to the page table of the given `level` specified by the virtual `address`.
@@ -504,33 +537,34 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &kvm_sregs) -> Result<u64> {
     }
 
     if sregs.cr0 & CR0_PG_MASK == 0 {
-        return Ok(vaddr);
+        return Ok((vaddr, PAGE_SIZE_4K));
     }
 
     if sregs.cr4 & CR4_PAE_MASK == 0 {
-        println!("not pae");
         return Err(Error::TranslatingVirtAddr);
     }
 
     if sregs.efer & MSR_EFER_LMA != 0 {
         // TODO - check LA57
-        if sregs.cr4 & CR4_LA57_MASK != 0 {
-            println!("in la57");
-        }
+        if sregs.cr4 & CR4_LA57_MASK != 0 {}
         let p4_ent = next_pte(mem, sregs.cr3, vaddr, 4)?;
         let p3_ent = next_pte(mem, p4_ent, vaddr, 3)?;
         // TODO check if it's a 1G page with the PSE bit in p2_ent
+        if p3_ent & PAGE_PSE_MASK != 0 {
+            // It's a 1G page with the PSE bit in p3_ent
+            let paddr = p3_ent & PTE_ADDR_MASK | page_offset(vaddr, PAGE_SIZE_1G);
+            return Ok((paddr, PAGE_SIZE_1G));
+        }
         let p2_ent = next_pte(mem, p3_ent, vaddr, 2)?;
         if p2_ent & PAGE_PSE_MASK != 0 {
             // It's a 2M page with the PSE bit in p2_ent
-            return Ok(p2_ent & PTE_ADDR_MASK | page_offset(vaddr));
+            let paddr = p2_ent & PTE_ADDR_MASK | page_offset(vaddr, PAGE_SIZE_2M);
+            return Ok((paddr, PAGE_SIZE_2M));
         }
         let p1_ent = next_pte(mem, p2_ent, vaddr, 1)?;
-        let paddr = p1_ent & PTE_ADDR_MASK | page_offset(vaddr);
-        println!("paddr {:x}", paddr);
-        return Ok(paddr);
+        let paddr = p1_ent & PTE_ADDR_MASK | page_offset(vaddr, PAGE_SIZE_4K);
+        return Ok((paddr, PAGE_SIZE_4K));
     }
-    println!("not lma");
     Err(Error::TranslatingVirtAddr)
 }
 

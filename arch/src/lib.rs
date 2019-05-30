@@ -103,6 +103,8 @@ pub trait LinuxArch {
         vaddr: GuestAddress,
         len: usize,
     ) -> Result<Vec<u8>, Self::Error>;
+
+    fn debug_write_memory(vcpu: &Vcpu, vaddr: GuestAddress, buf: &[u8]) -> Result<(), Self::Error>;
 }
 
 /// Errors for device manager.
