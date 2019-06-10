@@ -49,12 +49,13 @@ use std::error::Error as StdError;
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
 use std::fs::File;
-use std::io::{self, Cursor, Seek};
+use std::io::{self, Seek};
 use std::mem;
 use std::sync::Arc;
 
 use crate::bootparam::boot_params;
 use arch::{RunnableLinuxVm, VmComponents, VmImage};
+use data_model::volatile_memory::{VolatileMemory, VolatileMemoryError};
 use devices::{get_serial_tty_string, PciConfigIo, PciDevice, PciInterruptPin, SerialParameters};
 use io_jail::Minijail;
 use kvm::*;
@@ -90,7 +91,7 @@ pub enum Error {
     LoadInitrd(arch::LoadImageError),
     LoadKernel(kernel_loader::Error),
     PageNotPresent,
-    ReadingGuestMemory(GuestMemoryError),
+    ReadingGuestMemory(VolatileMemoryError),
     ReadRegs(sys_util::Error),
     RegisterIrqfd(sys_util::Error),
     RegisterVsock(arch::DeviceRegistrationError),
@@ -448,7 +449,7 @@ impl arch::LinuxArch for X8664arch {
 
     fn debug_read_memory(vcpu: &Vcpu, vaddr: GuestAddress, len: usize) -> Result<Vec<u8>> {
         let sregs = vcpu.get_sregs().map_err(Error::ReadRegs)?;
-        let mut buf = Cursor::new(Vec::with_capacity(len));
+        let mut buf = vec![0; len];
         let mut total_read = 0u64;
         // Handle reads across page boundaries.
         while total_read < len as u64 {
@@ -456,11 +457,12 @@ impl arch::LinuxArch for X8664arch {
             let read_len = min(len as u64 - total_read, psize - (paddr & (psize - 1)));
 
             vcpu.get_memory()
-                .write_from_memory(GuestAddress(paddr), &mut buf, read_len as usize)
-                .map_err(Error::ReadingGuestMemory)?;
+                .get_slice(paddr, read_len)
+                .map_err(Error::ReadingGuestMemory)?
+                .copy_to(&mut buf[total_read as usize..]);
             total_read += read_len;
         }
-        Ok(buf.into_inner())
+        Ok(buf)
     }
 
     fn debug_write_memory(vcpu: &Vcpu, vaddr: GuestAddress, buf: &[u8]) -> Result<()> {
