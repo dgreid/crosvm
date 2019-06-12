@@ -55,7 +55,7 @@ use vm_control::{
     VmMemoryRequest, VmMemoryResponse, VmRequest, VmResponse, VmRunMode,
 };
 
-use crate::gdb::{GdbControl, GdbStub};
+use crate::gdb::GdbStub;
 use crate::{Config, DiskOption, Executable, TouchDeviceOption};
 
 use arch::{self, LinuxArch, RunnableLinuxVm, VirtioDeviceStub, VmComponents, VmImage};
@@ -1435,7 +1435,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
 }
 
 // TODO(dgreid) move to a gdb file or maybe in arch.
-fn gdb_thread(gdb_stub: Arc<Mutex<dyn GdbControl>>) {
+fn gdb_thread(gdb_stub: Arc<Mutex<GdbStub>>) {
     use std::net::TcpListener;
 
     let port = {

@@ -21,21 +21,6 @@ use vm_control::{
     VmRequest,
 };
 
-pub trait GdbControl {
-    /// Notify the stub that the CPU has stopped and why or that it has resumed if `reason` in
-    /// `None`.
-    fn cpu_stopped(&mut self, cpu_id: usize, signal: Option<GdbStopReason>);
-
-    /// Notify the stub that a new byte has been received from the client.
-    fn next_byte(&mut self, byte: u8);
-
-    /// Set the output to write gdb replies to.
-    fn set_output(&mut self, output: Box<dyn Write + Send + 'static>);
-
-    /// Get the port on which to listen for clients.
-    fn port(&self) -> u32;
-}
-
 /// A Gdb Stub implementation that can be used to debug code running in a VM.
 pub struct GdbStub {
     handler: GdbHandler,
@@ -45,6 +30,12 @@ pub struct GdbStub {
 }
 
 impl GdbStub {
+    /// Create a new GDB stub.
+    /// `mem` - The guest memory of the VM.
+    /// `port` - The port on which to lisetn for clients.
+    /// `vm_socket` - Socket used to signal the VM.
+    /// `vcpu_com` - One channel per vcpu, used to command the vcpu.
+    /// `from_vcpu` - Receive status messages from vcpus on this channel.
     pub fn new(
         mem: GuestMemory,
         port: u32,
@@ -59,27 +50,30 @@ impl GdbStub {
             port,
         }
     }
-}
 
-impl GdbControl for GdbStub {
-    fn cpu_stopped(&mut self, cpu_id: usize, signal: Option<GdbStopReason>) {
+    /// Notify the stub that the CPU has stopped and why or that it has resumed if `reason` in
+    /// `None`.
+    pub fn cpu_stopped(&mut self, cpu_id: usize, signal: Option<GdbStopReason>) {
         self.handler.cpu_states[cpu_id] = signal;
         // TODO - update all the register states.
     }
 
-    fn next_byte(&mut self, byte: u8) {
+    /// Notify the stub that a new byte has been received from the client.
+    pub fn next_byte(&mut self, byte: u8) {
         if let Some(output) = self.output.as_mut() {
             self.reader.next_byte(byte, &self.handler, output);
         }
     }
 
-    fn set_output(&mut self, output: Box<dyn Write + Send + 'static>) {
+    /// Set the output to write gdb replies to.
+    pub fn set_output(&mut self, output: Box<dyn Write + Send + 'static>) {
         self.output = Some(output);
         self.reader.reset();
         let _ = self.handler.stop_all(); // TODO -handle error
     }
 
-    fn port(&self) -> u32 {
+    /// Get the port on which to listen for clients.
+    pub fn port(&self) -> u32 {
         self.port
     }
 }
