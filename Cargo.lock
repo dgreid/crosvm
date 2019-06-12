@@ -24,7 +24,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "devices 0.1.0",
- "gdb-remote-protocol 0.1.0",
+ "gdb-remote-protocol 0.1.0 (git+https://github.com/dgreid/rust-gdb-remote-protocol?branch=topic/crosvm)",
  "io_jail 0.1.0",
  "kernel_cmdline 0.1.0",
  "kvm 0.1.0",
@@ -96,7 +96,7 @@ dependencies = [
  "data_model 0.1.0",
  "devices 0.1.0",
  "enumn 0.1.0",
- "gdb-remote-protocol 0.1.0",
+ "gdb-remote-protocol 0.1.0 (git+https://github.com/dgreid/rust-gdb-remote-protocol?branch=topic/crosvm)",
  "gpu_buffer 0.1.0",
  "io_jail 0.1.0",
  "kernel_cmdline 0.1.0",
@@ -185,6 +185,7 @@ dependencies = [
 [[package]]
 name = "gdb-remote-protocol"
 version = "0.1.0"
+source = "git+https://github.com/dgreid/rust-gdb-remote-protocol?branch=topic/crosvm#0f8b7e78a3715c7c212cb83e3e2b1815b32d536b"
 dependencies = [
  "log 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "nom 3.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -643,7 +644,7 @@ dependencies = [
  "cc 1.0.25 (registry+https://github.com/rust-lang/crates.io-index)",
  "data_model 0.1.0",
  "devices 0.1.0",
- "gdb-remote-protocol 0.1.0",
+ "gdb-remote-protocol 0.1.0 (git+https://github.com/dgreid/rust-gdb-remote-protocol?branch=topic/crosvm)",
  "io_jail 0.1.0",
  "kernel_cmdline 0.1.0",
  "kernel_loader 0.1.0",
@@ -662,6 +663,7 @@ dependencies = [
 "checksum byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ff81738b726f5d099632ceaffe7fb65b90212e8dce59d518729e7e8634032d3d"
 "checksum cc 1.0.25 (registry+https://github.com/rust-lang/crates.io-index)" = "f159dfd43363c4d08055a07703eb7a3406b0dac4d0584d96965a3262db3c9d16"
 "checksum cfg-if 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)" = "0c4e7bb64a8ebb0d856483e1e682ea3422f883c5f5615a90d51a2c82fe87fdd3"
+"checksum gdb-remote-protocol 0.1.0 (git+https://github.com/dgreid/rust-gdb-remote-protocol?branch=topic/crosvm)" = "<none>"
 "checksum getopts 0.2.18 (registry+https://github.com/rust-lang/crates.io-index)" = "0a7292d30132fb5424b354f5dc02512a86e4c516fe544bb7a25e7f266951b797"
 "checksum libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)" = "10923947f84a519a45c8fefb7dd1b3e8c08747993381adee176d7a82b4195311"
 "checksum log 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)" = "d4fcce5fa49cc693c312001daf1d13411c4a5283796bac1084299ea3e567113f"

@@ -11,7 +11,7 @@ assertions = { path = "../assertions" }
 byteorder = "*"
 data_model = { path = "../data_model" }
 devices = { path = "../devices" }
-gdb-remote-protocol = { path = "/usr/local/google/home/dgreid/third_party/rust-gdb-remote-protocol" }
+gdb-remote-protocol = { git = "https://github.com/dgreid/rust-gdb-remote-protocol", branch = "topic/crosvm" }
 io_jail = { path = "../io_jail" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 kernel_loader = { path = "../kernel_loader" }

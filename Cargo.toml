@@ -39,7 +39,7 @@ crosvm_plugin = { path = "crosvm_plugin", optional = true }
 data_model = "*"
 devices = { path = "devices" }
 enumn = { path = "enumn" }
-gdb-remote-protocol = { path = "/usr/local/google/home/dgreid/third_party/rust-gdb-remote-protocol" }
+gdb-remote-protocol = { git = "https://github.com/dgreid/rust-gdb-remote-protocol", branch = "topic/crosvm" }
 gpu_buffer = { path = "gpu_buffer", optional = true }
 io_jail = { path = "io_jail" }
 kernel_cmdline = { path = "kernel_cmdline" }
