@@ -61,36 +61,48 @@ impl<'a> DescriptorChainConsumer<'a> {
         self.bytes_consumed
     }
 
+    fn consume_one<F>(&mut self, mut fnc: F, count: usize) -> Result<usize>
+    where
+        F: FnMut(GuestAddress, usize) -> Result<()>,
+    {
+        if let Some(current) = &self.desc_chain {
+            let addr = current
+                .addr
+                .checked_add(self.offset as u64)
+                .ok_or_else(|| Error::InvalidGuestAddress(current.addr))?;
+            let len = cmp::min(count, current.len as usize - self.offset);
+            fnc(addr, len)?;
+
+            self.offset += len;
+            self.avail_bytes = self.avail_bytes.map(|av| av - len);
+            self.bytes_consumed += len;
+
+            if self.offset == current.len as usize {
+                self.offset = 0;
+                if let Some(desc_chain) = self.desc_chain.take() {
+                    self.desc_chain = self.advance(desc_chain);
+                }
+            }
+
+            Ok(len)
+        } else {
+            // Nothing left to read.
+            Ok(0)
+        }
+    }
+
     fn consume<F>(&mut self, mut fnc: F, mut count: usize) -> Result<usize>
     where
         F: FnMut(GuestAddress, usize) -> Result<()>,
     {
         let mut bytes_consumed = 0;
         while count > 0 {
-            if let Some(current) = &self.desc_chain {
-                let addr = current
-                    .addr
-                    .checked_add(self.offset as u64)
-                    .ok_or_else(|| Error::InvalidGuestAddress(current.addr))?;
-                let len = cmp::min(count, current.len as usize - self.offset);
-                fnc(addr, len)?;
-
-                self.offset += len;
-                self.avail_bytes = self.avail_bytes.map(|av| av - len);
-                self.bytes_consumed += len;
-                bytes_consumed += len;
-                count -= len;
-
-                if self.offset == current.len as usize {
-                    self.offset = 0;
-                    if let Some(desc_chain) = self.desc_chain.take() {
-                        self.desc_chain = self.advance(desc_chain);
-                    }
-                }
-            } else {
-                // Nothing left to read.
+            let consumed = self.consume_one(&mut fnc, count)?;
+            if consumed == 0 {
                 break;
             }
+            bytes_consumed += consumed;
+            count -= consumed;
         }
         Ok(bytes_consumed)
     }
@@ -230,6 +242,25 @@ impl<'a> Writer<'a> {
         let len = buf.len();
         let mut write_count = 0;
         self.buffer.consume(
+            move |addr, count| {
+                let result = mem.write_all_at_addr(&buf[write_count..write_count + count], addr);
+                if result.is_ok() {
+                    write_count += count;
+                }
+                result
+            },
+            len,
+        )
+    }
+
+    /// Writes a slice to the current descriptor chain buffer.
+    /// Unlike `write` this will only write to the current descriptor.
+    /// Use `write_one` instead of `write` when targetting a particular descriptor.
+    pub fn write_one(&mut self, buf: &[u8]) -> Result<usize> {
+        let mem = self.mem;
+        let len = buf.len();
+        let mut write_count = 0;
+        self.buffer.consume_one(
             move |addr, count| {
                 let result = mem.write_all_at_addr(&buf[write_count..write_count + count], addr);
                 if result.is_ok() {
@@ -446,6 +477,34 @@ mod tests {
 
         assert_eq!(writer.available_bytes(), 0);
         assert_eq!(writer.bytes_written(), 106);
+    }
+
+    #[test]
+    fn writer_test_one_descriptor() {
+        use DescriptorType::*;
+
+        let memory_start_addr = GuestAddress(0x0);
+        let memory = GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap();
+
+        let chain = create_descriptor_chain(
+            &memory,
+            GuestAddress(0x0),
+            GuestAddress(0x100),
+            vec![(Writable, 8), (Writable, 16)],
+            0,
+        );
+        let mut writer = Writer::new(&memory, chain);
+        assert_eq!(writer.available_bytes(), 24);
+        assert_eq!(writer.bytes_written(), 0);
+
+        let mut buffer = [0 as u8; 64];
+        if let Err(_) = writer.write_one(&mut buffer) {
+            panic!("write_all should not fail here");
+        }
+
+        // write_one should fill the first descriptor and leave the second alone.
+        assert_eq!(writer.available_bytes(), 16);
+        assert_eq!(writer.bytes_written(), 8);
     }
 
     #[test]
