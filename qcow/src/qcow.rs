@@ -8,7 +8,7 @@ mod vec_cache;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use data_model::{VolatileMemory, VolatileSlice};
-use libc::{EINVAL, ENOSPC, ENOTSUP};
+use libc::{EINVAL, EIO, ENOSPC, ENOTSUP};
 use remain::sorted;
 use sys_util::{
     error, FileReadWriteVolatile, FileSetLen, FileSync, PunchHole, SeekHole, WriteZeroes,
@@ -32,6 +32,7 @@ pub enum Error {
     CompressedBlocksNotSupported,
     EvictingCache(io::Error),
     FileTooBig(u64),
+    FlushingAvailClusters(io::Error),
     GettingFileSize(io::Error),
     GettingRefcount(refcount::Error),
     InvalidClusterIndex,
@@ -82,6 +83,7 @@ impl Display for Error {
                 "file larger than max of {}: {}",
                 MAX_QCOW_FILE_SIZE, size
             ),
+            FlushingAvailClusters(e) => write!(f, "failed to flush available clusters: {}", e),
             GettingFileSize(e) => write!(f, "failed to get file size: {}", e),
             GettingRefcount(e) => write!(f, "failed to get refcount: {}", e),
             InvalidClusterIndex => write!(f, "invalid cluster index"),
@@ -149,6 +151,10 @@ const L2_TABLE_OFFSET_MASK: u64 = 0x00ff_ffff_ffff_fe00;
 const COMPRESSED_FLAG: u64 = 1 << 62;
 const CLUSTER_USED_FLAG: u64 = 1 << 63;
 const COMPATIBLE_FEATURES_LAZY_REFCOUNTS: u64 = 1 << 0;
+
+// The maximum number of clusters to scan for unused clusters at a time. Larger values lead to
+// larger startup times, but more efficient disk usage.
+const MAX_FREE_CLUSTER_SCAN: u64 = 512;
 
 /// Contains the information from the header of a qcow file.
 #[derive(Copy, Clone, Debug)]
@@ -353,6 +359,8 @@ pub struct QcowFile {
     // List of unreferenced clusters available to be used. unref clusters become available once the
     // removal of references to them have been synced to disk.
     avail_clusters: Vec<u64>,
+    next_cluster_avail_scan: u64,
+    init_file_size: u64,
     //TODO(dgreid) Add support for backing files. - backing_file: Option<Box<QcowFile<T>>>,
 }
 
@@ -470,6 +478,12 @@ impl QcowFile {
 
         let l2_entries = cluster_size / size_of::<u64>() as u64;
 
+        let init_file_size = raw_file
+            .file_mut()
+            .metadata()
+            .map_err(Error::GettingFileSize)?
+            .len();
+
         let mut qcow = QcowFile {
             raw_file,
             header,
@@ -480,6 +494,8 @@ impl QcowFile {
             current_offset: 0,
             unref_clusters: Vec::new(),
             avail_clusters: Vec::new(),
+            next_cluster_avail_scan: 0,
+            init_file_size,
         };
 
         // Check that the L1 and refcount tables fit in a 64bit address space.
@@ -492,7 +508,7 @@ impl QcowFile {
             .checked_add(u64::from(qcow.header.refcount_table_clusters) * cluster_size)
             .ok_or(Error::InvalidRefcountTableOffset)?;
 
-        qcow.find_avail_clusters()?;
+        qcow.find_avail_clusters(Some(MAX_FREE_CLUSTER_SCAN))?;
 
         Ok(qcow)
     }
@@ -601,24 +617,53 @@ impl QcowFile {
         Ok(None)
     }
 
-    fn find_avail_clusters(&mut self) -> Result<()> {
+    // Scan the file for unused clusters. Limit the scan to `MAX_FREE_CLUSTER_SCAN`. The limit
+    // prevents looping for too long during startup.
+    fn find_avail_clusters(&mut self, max_to_scan: Option<u64>) -> Result<()> {
         let cluster_size = self.raw_file.cluster_size();
 
-        let file_size = self
-            .raw_file
-            .file_mut()
-            .metadata()
-            .map_err(Error::GettingFileSize)?
-            .len();
+        let first_cluster = self.next_cluster_avail_scan;
+        let cluster_count = self.init_file_size / cluster_size;
+        if first_cluster >= cluster_count {
+            return Ok(());
+        }
+        let total_clusters = cluster_count - first_cluster;
+        let num_clusters = match max_to_scan {
+            Some(max) => min(max, total_clusters),
+            None => total_clusters,
+        };
+        let end_cluster = first_cluster + num_clusters;
 
-        for i in (0..file_size).step_by(cluster_size as usize) {
+        if first_cluster >= end_cluster {
+            return Ok(());
+        }
+
+        let mut found_cluster = false;
+
+        for cluster in first_cluster..end_cluster {
+            self.next_cluster_avail_scan = cluster;
+            let cluster_address = cluster * cluster_size;
             let refcount = self
                 .refcounts
-                .get_cluster_refcount(&mut self.raw_file, i)
+                .get_cluster_refcount(&mut self.raw_file, cluster_address)
                 .map_err(Error::GettingRefcount)?;
-            if refcount == 0 {
-                self.avail_clusters.push(i);
+            if refcount == 0
+                && !self.avail_clusters.contains(&cluster_address)
+                && !self.unref_clusters.contains(&cluster_address)
+            {
+                self.unref_clusters.push(cluster_address);
+                // If this isn't limited, exit after the first free cluster is found.
+                if max_to_scan.is_none() {
+                    self.flush().map_err(Error::FlushingAvailClusters)?;
+                    return Ok(());
+                }
+                found_cluster = true;
             }
+        }
+
+        if found_cluster {
+            // Flush to move unreferenced clusters to available.
+            self.flush().map_err(Error::FlushingAvailClusters)?;
         }
 
         Ok(())
@@ -1033,6 +1078,11 @@ impl QcowFile {
 
     // Allocate a new cluster and return its offset within the raw file.
     fn get_new_cluster(&mut self) -> std::io::Result<u64> {
+        // Check if there is a need to scan for more available clusters.
+        if self.avail_clusters.is_empty() {
+            self.find_avail_clusters(None)
+                .map_err(|_| std::io::Error::from_raw_os_error(EIO))?;
+        }
         // First use a pre allocated cluster if one is available.
         if let Some(free_cluster) = self.avail_clusters.pop() {
             self.raw_file.zero_cluster(free_cluster)?;
@@ -1043,6 +1093,14 @@ impl QcowFile {
         if let Some(new_cluster) = self.raw_file.add_cluster_end(max_valid_cluster_offset)? {
             return Ok(new_cluster);
         } else {
+            // Flushing will move unreferenced clusters to available. However, it must be a last
+            // resort because it has a major performance hit.
+            self.flush()?;
+            if let Some(free_cluster) = self.avail_clusters.pop() {
+                self.raw_file.zero_cluster(free_cluster)?;
+                return Ok(free_cluster);
+            }
+            // Nothing left to try, there isn't room for another cluster.
             error!("No free clusters in get_new_cluster()");
             return Err(std::io::Error::from_raw_os_error(ENOSPC));
         }
@@ -1396,6 +1454,11 @@ impl QcowFile {
         }
         self.current_offset += write_count as u64;
         Ok(write_count)
+    }
+
+    pub fn to_file(mut self) -> io::Result<File> {
+        self.flush()?;
+        self.raw_file.clone_file()
     }
 }
 
@@ -2350,6 +2413,7 @@ mod tests {
             const OFFSET: usize = 0x1_0000_0020;
             let data = [0x55u8; BLOCK_SIZE];
             let mut readback = [0u8; BLOCK_SIZE];
+            assert_eq!(qcow_file.first_zero_refcount().unwrap(), None);
             for i in 0..NUM_BLOCKS {
                 let seek_offset = OFFSET + i * BLOCK_SIZE;
                 qcow_file
@@ -2367,6 +2431,7 @@ mod tests {
                     assert_eq!(orig, read);
                 }
             }
+            assert_eq!(qcow_file.first_zero_refcount().unwrap(), None);
             // Check that address 0 is still zeros.
             qcow_file.seek(SeekFrom::Start(0)).expect("Failed to seek.");
             let nread = qcow_file.read(&mut readback).expect("Failed to read.");
@@ -2511,6 +2576,54 @@ mod tests {
                 QcowRawFile::from(disk_file, cluster_size).expect("Failed to create QcowRawFile.");
             QcowFile::rebuild_refcounts(&mut raw_file, header)
                 .expect("Failed to rebuild recounts.");
+        });
+    }
+
+    #[test]
+    fn find_avail_at_open() {
+        let mut header = valid_header();
+        // Set the size to 100MB.
+        let size: u64 = 1024 * 1024 * 100;
+        &mut header[24..32].copy_from_slice(&size.to_be_bytes());
+        // Cluster size to 64k
+        let cluster_size = {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&header[20..24]);
+            2u64.pow(u32::from_be_bytes(bytes))
+        };
+
+        with_basic_file(&header, |disk_file: File| {
+            // Set file size to match the header which puts the L1 table at 0x4_0000.
+            disk_file.set_len(0x5_0000).unwrap();
+            let mut qcow = QcowFile::from(disk_file).expect("Failed to create file.");
+            // Write 100MB of data in 1kB chunks(128 8byte u64s) and flush.
+            // A big file is needed to test incremental searching for clusters with refcounts = 0.
+            const USED_SIZE: u64 = 100 * 1024 * 1024;
+            for i in 0..USED_SIZE / 1024 {
+                let chunk: Vec<u64> = (i * 128..).take(128).collect();
+                qcow.write(unsafe {
+                    std::slice::from_raw_parts(
+                        chunk.as_ptr() as *const u8,
+                        chunk.len() * std::mem::size_of::<u64>(),
+                    )
+                })
+                .unwrap();
+            }
+            qcow.flush().unwrap();
+            // unuse some of the clusters that were just written and flush
+            qcow.punch_hole(USED_SIZE - 5 * cluster_size, 5 * cluster_size)
+                .unwrap();
+            qcow.flush().unwrap();
+            // Make sure there are holes after punching them.
+            assert!(qcow.first_zero_refcount().unwrap().is_some());
+            // simulate a close and open
+            let file = qcow.to_file().expect("failed to clone file");
+            let mut qcow = QcowFile::from(file).expect("Failed to create file.");
+            // No free clusters in the initial scan.
+            assert_eq!(qcow.avail_clusters.len(), 0);
+            // But there are free clusters after a complete scan.
+            qcow.find_avail_clusters(None).unwrap();
+            assert_ne!(qcow.avail_clusters.len(), 0);
         });
     }
 }

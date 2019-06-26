@@ -125,6 +125,11 @@ impl QcowRawFile {
         &mut self.file
     }
 
+    /// Returns the inner file consuming self.
+    pub fn clone_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
     /// Returns the size of the file's clusters.
     pub fn cluster_size(&self) -> u64 {
         self.cluster_size
