@@ -631,7 +631,9 @@ impl QcowFile {
                 .get_cluster_refcount(&mut self.raw_file, cluster_address)
                 .map_err(Error::GettingRefcount)?;
             if refcount == 0 {
-                if !self.avail_clusters.contains(&cluster_address) {
+                if !self.avail_clusters.contains(&cluster_address)
+                    && !self.unref_clusters.contains(&cluster_address)
+                {
                     self.avail_clusters.push(cluster_address);
                 }
             }
