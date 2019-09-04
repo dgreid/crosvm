@@ -317,7 +317,7 @@ fn create_base_minijail(
 
 fn simple_jail(cfg: &Config, policy: &str) -> Result<Option<Minijail>> {
     if cfg.sandbox {
-        let pivot_root: &str = option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/var/empty");
+        let pivot_root: &str = option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/mnt/empty");
         // A directory for a jailed device's pivot root.
         let root_path = Path::new(pivot_root);
         if !root_path.exists() {
@@ -1174,6 +1174,7 @@ fn run_vcpu(
             };
 
             start_barrier.wait();
+            println!("start vcpu {}", cpu_id);
 
             if sig_ok {
                 'vcpu_loop: loop {

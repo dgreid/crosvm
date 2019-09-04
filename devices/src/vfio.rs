@@ -378,6 +378,7 @@ impl VfioDevice {
             return Err(VfioError::VfioDeviceGetInfo(get_error()));
         }
 
+        println!("num regions {}", dev_info.num_regions);
         for i in VFIO_PCI_BAR0_REGION_INDEX..dev_info.num_regions {
             let argsz = mem::size_of::<vfio_region_info>() as u32;
             let mut reg_info = vfio_region_info {
@@ -392,7 +393,9 @@ impl VfioDevice {
             // and we verify the return value.
             ret = unsafe { ioctl_with_mut_ref(dev, VFIO_DEVICE_GET_REGION_INFO(), &mut reg_info) };
             if ret < 0 {
-                return Err(VfioError::VfioDeviceGetRegionInfo(get_error()));
+                println!("first info {}", i);
+                continue;
+                //return Err(VfioError::VfioDeviceGetRegionInfo(get_error()));
             }
 
             let mut mmap_size: u64 = 0;
@@ -417,6 +420,7 @@ impl VfioDevice {
                     )
                 };
                 if ret < 0 {
+                    println!("second info");
                     return Err(VfioError::VfioDeviceGetRegionInfo(get_error()));
                 }
                 // region_with_cap[0].cap_info may contain vfio_region_info_cap_sparse_mmap
@@ -453,6 +457,7 @@ impl VfioDevice {
             };
             regions.push(region);
         }
+        println!("regions done");
 
         Ok(regions)
     }
@@ -571,7 +576,10 @@ impl VfioDevice {
         size: u64,
         user_addr: u64,
     ) -> Result<(), VfioError> {
-        self.group.container.vfio_dma_map(iova, size, user_addr)
+        println!("map {} {}", iova, user_addr);
+        let r = self.group.container.vfio_dma_map(iova, size, user_addr);
+        println!("done map {} {}", iova, user_addr);
+        r
     }
 
     /// Remove (iova, user_addr) map from vfio container iommu table
