@@ -83,7 +83,7 @@ use libc::{
     WNOHANG, _SC_PAGESIZE,
 };
 
-use syscall_defines::linux::LinuxSyscall::SYS_getpid;
+use syscall_defines::linux::LinuxSyscall::{SYS_getpid, SYS_gettid};
 
 /// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
 #[inline(always)]
@@ -105,6 +105,13 @@ pub fn round_up_to_page_size(v: usize) -> usize {
 pub fn getpid() -> pid_t {
     // Safe because this syscall can never fail and we give it a valid syscall number.
     unsafe { syscall(SYS_getpid as c_long) as pid_t }
+}
+
+/// Safe wrapper for gettid().  There is no glibc wrapper so syscall is used.
+#[inline(always)]
+pub fn gettid() -> pid_t {
+    // Safe because this syscall can never fail and we give it a valid syscall number.
+    unsafe { syscall(SYS_gettid as c_long) as pid_t }
 }
 
 /// Safe wrapper for `geteuid(2)`.
