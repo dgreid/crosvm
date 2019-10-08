@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 use libc::{
-    c_int, pthread_kill, pthread_sigmask, pthread_t, sigaction, sigaddset, sigemptyset, siginfo_t,
-    sigismember, sigpending, sigset_t, sigtimedwait, timespec, EAGAIN, EINTR, EINVAL, SA_RESTART,
-    SIG_BLOCK, SIG_UNBLOCK,
+    c_int, c_void, pthread_kill, pthread_sigmask, pthread_t, sigaction, sigaddset, sigemptyset,
+    siginfo_t, sigismember, sigpending, sigset_t, sigtimedwait, timespec, EAGAIN, EINTR, EINVAL,
+    SA_RESTART, SA_SIGINFO, SIG_BLOCK, SIG_UNBLOCK,
 };
 
 use std::fmt::{self, Display};
@@ -126,6 +126,27 @@ pub unsafe fn register_rt_signal_handler(
     }
 
     register_signal_handler(num, handler)
+}
+
+/// Registers `handler` as the signal handler of signum `num`.  This version is to register
+/// a signal handler that can accept a valid sent by sigqueue.
+///
+/// This is considered unsafe because the given handler will be called asynchronously, interrupting
+/// whatever the thread was doing and therefore must only do async-signal-safe operations.
+pub unsafe fn register_signal_handler_with_arg(
+    num: c_int,
+    handler: extern "C" fn(_: c_int, _: *const siginfo_t, _: *const c_void),
+) -> errno::Result<()> {
+    let mut sigact: sigaction = mem::zeroed();
+    sigact.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigact.sa_sigaction = handler as *const () as usize;
+
+    let ret = sigaction(num, &sigact, null_mut());
+    if ret < 0 {
+        return errno_result();
+    }
+
+    Ok(())
 }
 
 /// Creates `sigset` from an array of signal numbers.
@@ -257,6 +278,15 @@ pub fn clear_signal(num: c_int) -> SignalResult<()> {
     Ok(())
 }
 
+#[repr(C)]
+pub struct sigval {
+    sival_ptr: *const c_void,
+}
+
+extern "C" {
+    pub fn pthread_sigqueue(thread: pthread_t, sig: c_int, value: sigval) -> c_int;
+}
+
 /// Trait for threads that can be signalled via `pthread_kill`.
 ///
 /// Note that this is only useful for signals between SIGRTMIN and SIGRTMAX because these are
@@ -278,6 +308,25 @@ pub unsafe trait Killable {
         // Safe because we ensure we are using a valid pthread handle, a valid signal number, and
         // check the return result.
         let ret = unsafe { pthread_kill(self.pthread_handle(), num) };
+        if ret < 0 {
+            return errno_result();
+        }
+        Ok(())
+    }
+
+    /// Sends the signal `num` to this killable thread with a value
+    ///
+    /// The value of `num` must be within [`SIGRTMIN`, `SIGRTMAX`] range.
+    fn sigqueue(&self, num: c_int, value: u64) -> errno::Result<()> {
+        if !valid_rt_signal_num(num) {
+            return Err(errno::Error::new(EINVAL));
+        }
+
+        // Safe because we ensure we are using a valid pthread handle, a valid signal number, and
+        // check the return result.
+        let value = value as *mut c_void;
+        let sigval = sigval { sival_ptr: value };
+        let ret = unsafe { pthread_sigqueue(self.pthread_handle(), num, sigval) };
         if ret < 0 {
             return errno_result();
         }
