@@ -1134,7 +1134,7 @@ impl VcpuRunMode {
 }
 
 fn run_vcpu(
-    mut vcpu: Vcpu,
+    vcpu: Vcpu,
     cpu_id: u32,
     vcpu_affinity: Vec<usize>,
     start_barrier: Arc<Barrier>,
@@ -1175,13 +1175,23 @@ fn run_vcpu(
                         sig_ok = false;
                     }
                 };
-            } else {
-                vcpu.set_thread_id(SIGRTMIN() + 0);
             }
+
+            let vcpu = if !sig_ok{None} else { match vcpu.set_thread_id(SIGRTMIN() + 0) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                        error!(
+                            "Failed to set thread idfor vcpu {} : {}",
+                            cpu_id, e
+                        );
+                    None
+                }
+            }
+            };
 
             start_barrier.wait();
 
-            if sig_ok {
+            if let Some(vcpu) = vcpu {
                 'vcpu_loop: loop {
                     let mut interrupted_by_signal = false;
                     match vcpu.run() {
