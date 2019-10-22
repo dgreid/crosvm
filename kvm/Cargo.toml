@@ -5,8 +5,8 @@ authors = ["The Chromium OS Authors"]
 edition = "2018"
 
 [dependencies]
-kvm-bindings = {path = "/tmp/kvm-bindings"}
-#kvm-bindings = "*"
+#kvm-bindings = {path = "/tmp/kvm-bindings"}
+kvm-bindings = "*"
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
 msg_socket = { path = "../msg_socket" }

@@ -49,7 +49,7 @@ impl fmt::Display for VfioError {
             VfioError::OpenGroup(e) => write!(f, "failed to open /dev/vfio/$group_num group: {}", e),
             VfioError::GetGroupStatus(e) => write!(f, "failed to get Group Status: {}", e),
             VfioError::GroupViable => write!(f, "group is inviable"),
-            VfioError::VfioApiVersion => write!(f, "vfio API version doesn't match with VFIO_API_VERSION defined in vfio_sys/srv/vfio.rs"),
+            VfioError::VfioApiVersion => write!(f, "vfio API version doesn't match with VFIO_API_VERSION defined in vfio_bindings/src/vfio.rs"),
             VfioError::VfioType1V2 => write!(f, "container dones't support VfioType1V2 IOMMU driver type"),
             VfioError::GroupSetContainer(e) => write!(f, "failed to add vfio group into vfio container: {}", e),
             VfioError::ContainerSetIOMMU(e) => write!(f, "failed to set container's IOMMU driver type as VfioType1V2: {}", e),
@@ -215,8 +215,8 @@ impl VfioGroup {
     }
 
     fn kvm_device_add_group(vm: &Vm, group: &File) -> Result<File, VfioError> {
-        let mut vfio_dev = kvm_sys::kvm_create_device {
-            type_: kvm_sys::kvm_device_type_KVM_DEV_TYPE_VFIO,
+        let mut vfio_dev = kvm_bindings::kvm_create_device {
+            type_: kvm_bindings::kvm_device_type_KVM_DEV_TYPE_VFIO,
             fd: 0,
             flags: 0,
         };
@@ -228,17 +228,21 @@ impl VfioGroup {
 
         let group_fd = group.as_raw_fd();
         let group_fd_ptr = &group_fd as *const i32;
-        let vfio_dev_attr = kvm_sys::kvm_device_attr {
+        let vfio_dev_attr = kvm_bindings::kvm_device_attr {
             flags: 0,
-            group: kvm_sys::KVM_DEV_VFIO_GROUP,
-            attr: kvm_sys::KVM_DEV_VFIO_GROUP_ADD as u64,
+            group: kvm_bindings::KVM_DEV_VFIO_GROUP,
+            attr: kvm_bindings::KVM_DEV_VFIO_GROUP_ADD as u64,
             addr: group_fd_ptr as u64,
         };
 
         // Safe as we are the owner of vfio_dev_fd and vfio_dev_attr which are valid value,
         // and we verify the return value.
         if 0 != unsafe {
-            ioctl_with_ref(&vfio_dev_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &vfio_dev_attr)
+            ioctl_with_ref(
+                &vfio_dev_fd,
+                kvm_bindings::KVM_SET_DEVICE_ATTR(),
+                &vfio_dev_attr,
+            )
         } {
             return Err(VfioError::KvmSetDeviceAttr(get_error()));
         }

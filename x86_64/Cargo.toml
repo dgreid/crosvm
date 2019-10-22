@@ -14,7 +14,8 @@ io_jail = { path = "../io_jail" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 kernel_loader = { path = "../kernel_loader" }
 kvm = { path = "../kvm" }
-kvm-bindings = "*"
+#kvm-bindings = "*"
+kvm-bindings = { path = "/home/dgreid/src/rust-vmm/kvm-bindings" }
 libc = "*"
 remain = "*"
 resources = { path = "../resources" }

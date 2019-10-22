@@ -23,6 +23,7 @@ gpu_renderer = { path = "../gpu_renderer", optional = true }
 io_jail = { path = "../io_jail" }
 kvm = { path = "../kvm" }
 kvm_sys = { path = "../kvm_sys" }
+kvm-bindings = "*"
 libc = "*"
 msg_on_socket_derive = { path = "../msg_socket/msg_on_socket_derive" }
 msg_socket = { path = "../msg_socket" }
