@@ -52,8 +52,9 @@ fn test_run() {
         )
         .expect("failed to register memory");
 
+    let runnable_vcpu = vcpu.set_thread_id(-1).unwrap();
     loop {
-        match vcpu.run().expect("run failed") {
+        match runnable_vcpu.run().expect("run failed") {
             VcpuExit::Hlt => break,
             r => panic!("unexpected exit reason: {:?}", r),
         }

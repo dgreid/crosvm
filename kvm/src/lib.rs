@@ -11,12 +11,13 @@ use std::cmp::{min, Ordering};
 use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::mem::size_of;
+use std::ops::{Deref, DerefMut};
 use std::os::raw::*;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::copy_nonoverlapping;
 
 use libc::sigset_t;
-use libc::{open, EINVAL, ENOENT, ENOSPC, O_CLOEXEC, O_RDWR};
+use libc::{open, EBUSY, EINVAL, ENOENT, ENOSPC, O_CLOEXEC, O_RDWR};
 
 use kvm_sys::*;
 
@@ -1144,6 +1145,8 @@ pub enum VcpuExit {
 }
 
 /// A wrapper around creating and using a VCPU.
+/// `Vcpu` provides all functionality except for running. To run, `set_thread_id` must be called to
+/// lock the vcpu to a thread. Then the returned `RunnableVcpu` can be used for running.
 pub struct Vcpu {
     vcpu: File,
     run_mmap: MemoryMapping,
@@ -1190,7 +1193,10 @@ impl Vcpu {
     /// by signal handlers to call set_local_immediate_exit(). Signal
     /// number (if provided, otherwise use -1) will be temporily blocked when the vcpu
     /// is added to the map, or later destroyed/removed from the map.
-    pub fn set_thread_id(&mut self, signal_num: c_int) {
+    /// Consumes `self` and returns a `RunnableVcpu`.
+    ///
+    /// Returns an error, `EBUSY`, if the current thread already contains a Vcpu.
+    pub fn set_thread_id(self, signal_num: c_int) -> Result<RunnableVcpu> {
         // Block signal while we add -- if a signal fires (very unlikely,
         // as this means something is trying to pause the vcpu before it has
         // even started) it'll try to grab the read lock while this write
@@ -1204,14 +1210,23 @@ impl Vcpu {
             }
         }
         VCPU_THREAD.with(|v| {
-            *v.borrow_mut() = Some(VcpuThread {
-                run: self.run_mmap.as_ptr() as *mut kvm_run,
-                signal_num,
-            });
-        });
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(VcpuThread {
+                    run: self.run_mmap.as_ptr() as *mut kvm_run,
+                    signal_num,
+                });
+                Ok(())
+            } else {
+                Err(Error::new(EBUSY))
+            }
+        })?;
         if unblock {
             let _ = unblock_signal(signal_num).expect("failed to restore signal mask");
         }
+        Ok(RunnableVcpu {
+            vcpu: self,
+            phantom: Default::default(),
+        })
     }
 
     /// Gets a reference to the guest memory owned by this VM of this VCPU.
@@ -1290,99 +1305,6 @@ impl Vcpu {
                 };
             }
         });
-    }
-
-    /// Runs the VCPU until it exits, returning the reason.
-    ///
-    /// Note that the state of the VCPU and associated VM must be setup first for this to do
-    /// anything useful.
-    #[allow(clippy::cast_ptr_alignment)]
-    // The pointer is page aligned so casting to a different type is well defined, hence the clippy
-    // allow attribute.
-    pub fn run(&self) -> Result<VcpuExit> {
-        // Safe because we know that our file is a VCPU fd and we verify the return result.
-        let ret = unsafe { ioctl(self, KVM_RUN()) };
-        if ret == 0 {
-            // Safe because we know we mapped enough memory to hold the kvm_run struct because the
-            // kernel told us how large it was.
-            let run = unsafe { &*(self.run_mmap.as_ptr() as *const kvm_run) };
-            match run.exit_reason {
-                KVM_EXIT_IO => {
-                    // Safe because the exit_reason (which comes from the kernel) told us which
-                    // union field to use.
-                    let io = unsafe { run.__bindgen_anon_1.io };
-                    let port = io.port;
-                    let size = (io.count as usize) * (io.size as usize);
-                    match io.direction as u32 {
-                        KVM_EXIT_IO_IN => Ok(VcpuExit::IoIn { port, size }),
-                        KVM_EXIT_IO_OUT => {
-                            let mut data = [0; 8];
-                            let run_start = run as *const kvm_run as *const u8;
-                            // The data_offset is defined by the kernel to be some number of bytes
-                            // into the kvm_run structure, which we have fully mmap'd.
-                            unsafe {
-                                let data_ptr = run_start.offset(io.data_offset as isize);
-                                copy_nonoverlapping(
-                                    data_ptr,
-                                    data.as_mut_ptr(),
-                                    min(size, data.len()),
-                                );
-                            }
-                            Ok(VcpuExit::IoOut { port, size, data })
-                        }
-                        _ => Err(Error::new(EINVAL)),
-                    }
-                }
-                KVM_EXIT_MMIO => {
-                    // Safe because the exit_reason (which comes from the kernel) told us which
-                    // union field to use.
-                    let mmio = unsafe { &run.__bindgen_anon_1.mmio };
-                    let address = mmio.phys_addr;
-                    let size = min(mmio.len as usize, mmio.data.len());
-                    if mmio.is_write != 0 {
-                        Ok(VcpuExit::MmioWrite {
-                            address,
-                            size,
-                            data: mmio.data,
-                        })
-                    } else {
-                        Ok(VcpuExit::MmioRead { address, size })
-                    }
-                }
-                KVM_EXIT_UNKNOWN => Ok(VcpuExit::Unknown),
-                KVM_EXIT_EXCEPTION => Ok(VcpuExit::Exception),
-                KVM_EXIT_HYPERCALL => Ok(VcpuExit::Hypercall),
-                KVM_EXIT_DEBUG => Ok(VcpuExit::Debug),
-                KVM_EXIT_HLT => Ok(VcpuExit::Hlt),
-                KVM_EXIT_IRQ_WINDOW_OPEN => Ok(VcpuExit::IrqWindowOpen),
-                KVM_EXIT_SHUTDOWN => Ok(VcpuExit::Shutdown),
-                KVM_EXIT_FAIL_ENTRY => Ok(VcpuExit::FailEntry),
-                KVM_EXIT_INTR => Ok(VcpuExit::Intr),
-                KVM_EXIT_SET_TPR => Ok(VcpuExit::SetTpr),
-                KVM_EXIT_TPR_ACCESS => Ok(VcpuExit::TprAccess),
-                KVM_EXIT_S390_SIEIC => Ok(VcpuExit::S390Sieic),
-                KVM_EXIT_S390_RESET => Ok(VcpuExit::S390Reset),
-                KVM_EXIT_DCR => Ok(VcpuExit::Dcr),
-                KVM_EXIT_NMI => Ok(VcpuExit::Nmi),
-                KVM_EXIT_INTERNAL_ERROR => Ok(VcpuExit::InternalError),
-                KVM_EXIT_OSI => Ok(VcpuExit::Osi),
-                KVM_EXIT_PAPR_HCALL => Ok(VcpuExit::PaprHcall),
-                KVM_EXIT_S390_UCONTROL => Ok(VcpuExit::S390Ucontrol),
-                KVM_EXIT_WATCHDOG => Ok(VcpuExit::Watchdog),
-                KVM_EXIT_S390_TSCH => Ok(VcpuExit::S390Tsch),
-                KVM_EXIT_EPR => Ok(VcpuExit::Epr),
-                KVM_EXIT_SYSTEM_EVENT => {
-                    // Safe because we know the exit reason told us this union
-                    // field is valid
-                    let event_type = unsafe { run.__bindgen_anon_1.system_event.type_ };
-                    let event_flags = unsafe { run.__bindgen_anon_1.system_event.flags };
-                    Ok(VcpuExit::SystemEvent(event_type, event_flags))
-                }
-                r => panic!("unknown kvm exit reason: {}", r),
-            }
-        } else {
-            errno_result()
-        }
     }
 
     /// Gets the VCPU registers.
@@ -1782,7 +1704,136 @@ impl Vcpu {
     }
 }
 
-impl Drop for Vcpu {
+impl AsRawFd for Vcpu {
+    fn as_raw_fd(&self) -> RawFd {
+        self.vcpu.as_raw_fd()
+    }
+}
+
+/// A Vcpu that has a thread set and can be run. Created by calling `set_thread_id` on a `Vcpu`.
+/// Implements `Deref` to a `Vcpu` so all `Vcpu` mehtods are usable, with the addition of the `run`
+/// function to execute the guest.
+pub struct RunnableVcpu {
+    vcpu: Vcpu,
+    // vcpus must stay on the same thread once they start the PhantomData pointer disallows that.
+    phantom: std::marker::PhantomData<*mut u8>,
+}
+
+impl RunnableVcpu {
+    /// Runs the VCPU until it exits, returning the reason.
+    ///
+    /// Note that the state of the VCPU and associated VM must be setup first for this to do
+    /// anything useful.
+    #[allow(clippy::cast_ptr_alignment)]
+    // The pointer is page aligned so casting to a different type is well defined, hence the clippy
+    // allow attribute.
+    pub fn run(&self) -> Result<VcpuExit> {
+        // Safe because we know that our file is a VCPU fd and we verify the return result.
+        let ret = unsafe { ioctl(self, KVM_RUN()) };
+        if ret == 0 {
+            // Safe because we know we mapped enough memory to hold the kvm_run struct because the
+            // kernel told us how large it was.
+            let run = unsafe { &*(self.run_mmap.as_ptr() as *const kvm_run) };
+            match run.exit_reason {
+                KVM_EXIT_IO => {
+                    // Safe because the exit_reason (which comes from the kernel) told us which
+                    // union field to use.
+                    let io = unsafe { run.__bindgen_anon_1.io };
+                    let port = io.port;
+                    let size = (io.count as usize) * (io.size as usize);
+                    match io.direction as u32 {
+                        KVM_EXIT_IO_IN => Ok(VcpuExit::IoIn { port, size }),
+                        KVM_EXIT_IO_OUT => {
+                            let mut data = [0; 8];
+                            let run_start = run as *const kvm_run as *const u8;
+                            // The data_offset is defined by the kernel to be some number of bytes
+                            // into the kvm_run structure, which we have fully mmap'd.
+                            unsafe {
+                                let data_ptr = run_start.offset(io.data_offset as isize);
+                                copy_nonoverlapping(
+                                    data_ptr,
+                                    data.as_mut_ptr(),
+                                    min(size, data.len()),
+                                );
+                            }
+                            Ok(VcpuExit::IoOut { port, size, data })
+                        }
+                        _ => Err(Error::new(EINVAL)),
+                    }
+                }
+                KVM_EXIT_MMIO => {
+                    // Safe because the exit_reason (which comes from the kernel) told us which
+                    // union field to use.
+                    let mmio = unsafe { &run.__bindgen_anon_1.mmio };
+                    let address = mmio.phys_addr;
+                    let size = min(mmio.len as usize, mmio.data.len());
+                    if mmio.is_write != 0 {
+                        Ok(VcpuExit::MmioWrite {
+                            address,
+                            size,
+                            data: mmio.data,
+                        })
+                    } else {
+                        Ok(VcpuExit::MmioRead { address, size })
+                    }
+                }
+                KVM_EXIT_UNKNOWN => Ok(VcpuExit::Unknown),
+                KVM_EXIT_EXCEPTION => Ok(VcpuExit::Exception),
+                KVM_EXIT_HYPERCALL => Ok(VcpuExit::Hypercall),
+                KVM_EXIT_DEBUG => Ok(VcpuExit::Debug),
+                KVM_EXIT_HLT => Ok(VcpuExit::Hlt),
+                KVM_EXIT_IRQ_WINDOW_OPEN => Ok(VcpuExit::IrqWindowOpen),
+                KVM_EXIT_SHUTDOWN => Ok(VcpuExit::Shutdown),
+                KVM_EXIT_FAIL_ENTRY => Ok(VcpuExit::FailEntry),
+                KVM_EXIT_INTR => Ok(VcpuExit::Intr),
+                KVM_EXIT_SET_TPR => Ok(VcpuExit::SetTpr),
+                KVM_EXIT_TPR_ACCESS => Ok(VcpuExit::TprAccess),
+                KVM_EXIT_S390_SIEIC => Ok(VcpuExit::S390Sieic),
+                KVM_EXIT_S390_RESET => Ok(VcpuExit::S390Reset),
+                KVM_EXIT_DCR => Ok(VcpuExit::Dcr),
+                KVM_EXIT_NMI => Ok(VcpuExit::Nmi),
+                KVM_EXIT_INTERNAL_ERROR => Ok(VcpuExit::InternalError),
+                KVM_EXIT_OSI => Ok(VcpuExit::Osi),
+                KVM_EXIT_PAPR_HCALL => Ok(VcpuExit::PaprHcall),
+                KVM_EXIT_S390_UCONTROL => Ok(VcpuExit::S390Ucontrol),
+                KVM_EXIT_WATCHDOG => Ok(VcpuExit::Watchdog),
+                KVM_EXIT_S390_TSCH => Ok(VcpuExit::S390Tsch),
+                KVM_EXIT_EPR => Ok(VcpuExit::Epr),
+                KVM_EXIT_SYSTEM_EVENT => {
+                    // Safe because we know the exit reason told us this union
+                    // field is valid
+                    let event_type = unsafe { run.__bindgen_anon_1.system_event.type_ };
+                    let event_flags = unsafe { run.__bindgen_anon_1.system_event.flags };
+                    Ok(VcpuExit::SystemEvent(event_type, event_flags))
+                }
+                r => panic!("unknown kvm exit reason: {}", r),
+            }
+        } else {
+            errno_result()
+        }
+    }
+}
+
+impl Deref for RunnableVcpu {
+    type Target = Vcpu;
+    fn deref(&self) -> &Self::Target {
+        &self.vcpu
+    }
+}
+
+impl DerefMut for RunnableVcpu {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.vcpu
+    }
+}
+
+impl AsRawFd for RunnableVcpu {
+    fn as_raw_fd(&self) -> RawFd {
+        self.vcpu.as_raw_fd()
+    }
+}
+
+impl Drop for RunnableVcpu {
     fn drop(&mut self) {
         VCPU_THREAD.with(|v| {
             let mut unblock = false;
@@ -1802,12 +1853,6 @@ impl Drop for Vcpu {
                 let _ = unblock_signal(signal_num).expect("failed to restore signal mask");
             }
         });
-    }
-}
-
-impl AsRawFd for Vcpu {
-    fn as_raw_fd(&self) -> RawFd {
-        self.vcpu.as_raw_fd()
     }
 }
 
