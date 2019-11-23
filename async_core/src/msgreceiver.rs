@@ -19,6 +19,12 @@ use cros_async::add_read_waker;
 /// messages can be consumed in an async context.
 pub struct MsgReceiver<I: MsgOnSocket, O: MsgOnSocket>(MsgSocket<I, O>);
 
+impl<I: MsgOnSocket, O: MsgOnSocket> MsgReceiver<I, O> {
+    pub fn into_inner(self) -> MsgSocket<I, O> {
+        self.0
+    }
+}
+
 impl<I: MsgOnSocket, O: MsgOnSocket> TryFrom<MsgSocket<I, O>> for MsgReceiver<I, O> {
     type Error = sys_util::Error;
 

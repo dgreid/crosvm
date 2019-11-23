@@ -3,21 +3,29 @@
 // found in the LICENSE file.
 
 use std;
+use std::cell::RefCell;
+use std::convert::TryFrom;
 use std::fmt::{self, Display};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::task::{Context, Poll};
+use std::future::Future;
+use std::pin::Pin;
 
+use futures::StreamExt;
+
+use async_core::{EventFd as AsyncEventFd, MsgReceiver as AsyncReceiver};
+use cros_async::{SelectResult,select5};
 use data_model::{DataInit, Le32};
-use msg_socket::MsgReceiver;
-use sys_util::{
-    self, error, info, warn, EventFd, GuestAddress, GuestMemory, PollContext, PollToken,
-};
+use sys_util::{self, error, info, warn, EventFd, GuestAddress, GuestMemory};
 use vm_control::{BalloonControlCommand, BalloonControlResponseSocket};
 
 use super::{
-    copy_config, Interrupt, Queue, Reader, VirtioDevice, TYPE_BALLOON, VIRTIO_F_VERSION_1,
+    copy_config, DescriptorChain, Interrupt, Queue, Reader, VirtioDevice, TYPE_BALLOON,
+    VIRTIO_F_VERSION_1,
 };
 
 #[derive(Debug)]
@@ -69,166 +77,158 @@ struct BalloonConfig {
     actual_pages: AtomicUsize,
 }
 
-struct Worker {
-    interrupt: Interrupt,
-    mem: GuestMemory,
-    inflate_queue: Queue,
-    deflate_queue: Queue,
-    config: Arc<BalloonConfig>,
-    command_socket: BalloonControlResponseSocket,
+async fn handle_inflate(
+    mut mem: GuestMemory,
+    mut queue: Queue,
+    queue_evt: EventFd,
+    interrupt: Rc<RefCell<Interrupt>>,
+) {
+    let mut desc_mem = mem.clone();
+    let mut inflate_queue_evt = AsyncEventFd::try_from(queue_evt).unwrap();
+    let mut desc_stream = queue.stream(&mut desc_mem, &mut inflate_queue_evt);
+    while let Some(avail_desc) = desc_stream.next().await {
+        let index = avail_desc.index;
+        if process_inflate(avail_desc, &mut mem) {
+            desc_stream.queue_mut().add_used(&mut mem, index, 0);
+            interrupt
+                .borrow_mut()
+                .signal_used_queue(desc_stream.queue_mut().vector);
+        }
+    }
 }
 
-impl Worker {
-    fn process_inflate_deflate(&mut self, inflate: bool) -> bool {
-        let queue = if inflate {
-            &mut self.inflate_queue
-        } else {
-            &mut self.deflate_queue
-        };
-
-        let mut needs_interrupt = false;
-        while let Some(avail_desc) = queue.pop(&self.mem) {
-            let index = avail_desc.index;
-
-            if inflate {
-                let mut reader = match Reader::new(&self.mem, avail_desc) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        error!("balloon: failed to create reader: {}", e);
-                        queue.add_used(&self.mem, index, 0);
-                        needs_interrupt = true;
-                        continue;
-                    }
-                };
-                let data_length = reader.available_bytes();
-
-                if data_length % 4 != 0 {
-                    error!("invalid inflate buffer size: {}", data_length);
-                    queue.add_used(&self.mem, index, 0);
-                    needs_interrupt = true;
-                    continue;
-                }
-
-                let num_addrs = data_length / 4;
-                for _ in 0..num_addrs as usize {
-                    let guest_input = match reader.read_obj::<Le32>() {
-                        Ok(a) => a.to_native(),
-                        Err(err) => {
-                            error!("error while reading unused pages: {}", err);
-                            break;
-                        }
-                    };
-                    let guest_address =
-                        GuestAddress((u64::from(guest_input)) << VIRTIO_BALLOON_PFN_SHIFT);
-
-                    if self
-                        .mem
-                        .remove_range(guest_address, 1 << VIRTIO_BALLOON_PFN_SHIFT)
-                        .is_err()
-                    {
-                        warn!("Marking pages unused failed; addr={}", guest_address);
-                        continue;
-                    }
-                }
-            }
-
-            queue.add_used(&self.mem, index, 0);
-            needs_interrupt = true;
-        }
-
-        needs_interrupt
+async fn handle_deflate(
+    mut mem: GuestMemory,
+    mut queue: Queue,
+    queue_evt: EventFd,
+    interrupt: Rc<RefCell<Interrupt>>,
+) {
+    let mut desc_mem = mem.clone();
+    let mut deflate_queue_evt = AsyncEventFd::try_from(queue_evt).unwrap();
+    let mut desc_stream = queue.stream(&mut desc_mem, &mut deflate_queue_evt);
+    while let Some(avail_desc) = desc_stream.next().await {
+        let index = avail_desc.index;
+        // Do nothing with deflate
+        desc_stream.queue_mut().add_used(&mut mem, index, 0);
+        interrupt
+            .borrow_mut()
+            .signal_used_queue(desc_stream.queue_mut().vector);
     }
+}
 
-    fn run(&mut self, mut queue_evts: Vec<EventFd>, kill_evt: EventFd) {
-        #[derive(PartialEq, PollToken)]
-        enum Token {
-            Inflate,
-            Deflate,
-            CommandSocket,
-            InterruptResample,
-            Kill,
+struct CommandSocketFuture {
+    command_socket: Option<AsyncReceiver<(), BalloonControlCommand>>,
+    interrupt: Rc<RefCell<Interrupt>>,
+    config: Arc<BalloonConfig>,
+}
+
+impl CommandSocketFuture {
+    fn new(
+    command_socket: BalloonControlResponseSocket,
+    interrupt: Rc<RefCell<Interrupt>>,
+    config: Arc<BalloonConfig>,) -> Self {
+        CommandSocketFuture {
+            command_socket: Some(AsyncReceiver::try_from(command_socket).unwrap()),
+            interrupt,
+            config,
         }
+    }
+}
 
-        let inflate_queue_evt = queue_evts.remove(0);
-        let deflate_queue_evt = queue_evts.remove(0);
+impl Future for CommandSocketFuture {
+    type Output = BalloonControlResponseSocket;
 
-        let poll_ctx: PollContext<Token> = match PollContext::build_with(&[
-            (&inflate_queue_evt, Token::Inflate),
-            (&deflate_queue_evt, Token::Deflate),
-            (&self.command_socket, Token::CommandSocket),
-            (self.interrupt.get_resample_evt(), Token::InterruptResample),
-            (&kill_evt, Token::Kill),
-        ]) {
-            Ok(pc) => pc,
-            Err(e) => {
-                error!("failed creating PollContext: {}", e);
-                return;
-            }
-        };
-
-        'poll: loop {
-            let events = match poll_ctx.wait() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("failed polling for events: {}", e);
-                    break;
-                }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        loop {
+            let req = if let Some(command_socket) = self.command_socket.as_mut() {
+                command_socket.poll_next_unpin(cx)
+            } else {
+                panic!("polled without a command_socket");
             };
+            match req {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(req) => {
+                    match req {
+                        Some(BalloonControlCommand::Adjust { num_bytes }) => {
+                            let num_pages = (num_bytes >> VIRTIO_BALLOON_PFN_SHIFT) as usize;
+                            info!("ballon config changed to consume {} pages", num_pages);
 
-            let mut needs_interrupt_inflate = false;
-            let mut needs_interrupt_deflate = false;
-            for event in events.iter_readable() {
-                match event.token() {
-                    Token::Inflate => {
-                        if let Err(e) = inflate_queue_evt.read() {
-                            error!("failed reading inflate queue EventFd: {}", e);
-                            break 'poll;
+                            self.config.num_pages.store(num_pages, Ordering::Relaxed);
+                            self.interrupt.borrow_mut().signal_config_changed();
                         }
-                        needs_interrupt_inflate |= self.process_inflate_deflate(true);
-                    }
-                    Token::Deflate => {
-                        if let Err(e) = deflate_queue_evt.read() {
-                            error!("failed reading deflate queue EventFd: {}", e);
-                            break 'poll;
-                        }
-                        needs_interrupt_deflate |= self.process_inflate_deflate(false);
-                    }
-                    Token::CommandSocket => {
-                        if let Ok(req) = self.command_socket.recv() {
-                            match req {
-                                BalloonControlCommand::Adjust { num_bytes } => {
-                                    let num_pages =
-                                        (num_bytes >> VIRTIO_BALLOON_PFN_SHIFT) as usize;
-                                    info!("ballon config changed to consume {} pages", num_pages);
-
-                                    self.config.num_pages.store(num_pages, Ordering::Relaxed);
-                                    self.interrupt.signal_config_changed();
-                                }
-                            };
+                        None => {
+                            break
                         }
                     }
-                    Token::InterruptResample => {
-                        self.interrupt.interrupt_resample();
-                    }
-                    Token::Kill => break 'poll,
-                }
-            }
-            for event in events.iter_hungup() {
-                if event.token() == Token::CommandSocket && !event.readable() {
-                    // If this call fails, the command socket was already removed from the
-                    // PollContext.
-                    let _ = poll_ctx.delete(&self.command_socket);
-                }
-            }
-
-            if needs_interrupt_inflate {
-                self.interrupt.signal_used_queue(self.inflate_queue.vector);
-            }
-
-            if needs_interrupt_deflate {
-                self.interrupt.signal_used_queue(self.deflate_queue.vector);
+                },
             }
         }
+
+        Poll::Ready(self.command_socket.take().unwrap().into_inner())
+    }
+}
+
+async fn handle_irq_resample(interrupt: Rc<RefCell<Interrupt>>) {
+    let resample_evt = interrupt
+        .borrow_mut()
+        .get_resample_evt()
+        .try_clone()
+        .unwrap();
+    let mut resample_evt = AsyncEventFd::try_from(resample_evt).unwrap();
+    loop {
+        if let Some(_) = resample_evt.next().await {
+            interrupt.borrow_mut().interrupt_resample();
+        } else {
+            break;
+        }
+    }
+}
+
+async fn wait_kill(kill_evt: EventFd) {
+    let mut kill_evt = AsyncEventFd::try_from(kill_evt).unwrap();
+    // Once this event is readable, exit. Exiting this future will cause the main loop to
+    // break and the device process to exit.
+    kill_evt.next().await;
+}
+
+fn run_worker(
+    mut queue_evts: Vec<EventFd>,
+    mut queues: Vec<Queue>,
+    command_socket: BalloonControlResponseSocket,
+    interrupt: Interrupt,
+    kill_evt: EventFd,
+    mem: GuestMemory,
+    config: Arc<BalloonConfig>,
+) -> BalloonControlResponseSocket {
+    // Wrap the interupt in a `RefCell` so it can be shared between async functions.
+    let interrupt = Rc::new(RefCell::new(interrupt));
+
+    // The first queue is used for inflate messages
+    let inflate = handle_inflate(
+        mem.clone(),
+        queues.remove(0),
+        queue_evts.remove(0),
+        interrupt.clone(),
+    );
+    // The second queue is used for deflate messages
+    let deflate = handle_deflate(
+        mem.clone(),
+        queues.remove(0),
+        queue_evts.remove(0),
+        interrupt.clone(),
+    );
+    // Future to handle command messages that resize the balloon.
+    let socket = CommandSocketFuture::new(command_socket, interrupt.clone(), config);
+    // Process any requests to resample the irq value.
+    let resample = handle_irq_resample(interrupt.clone());
+    // Exit if the kill event is triggered.
+    let kill = wait_kill(kill_evt);
+
+    // And return once any future exits.
+    let (_, _, socket, _, _) = select5(inflate, deflate, socket, resample, kill);
+    match socket {
+        SelectResult::Finished(s) => s,
+        SelectResult::Pending(f) => f.command_socket.unwrap().into_inner(),
     }
 }
 
@@ -238,7 +238,7 @@ pub struct Balloon {
     config: Arc<BalloonConfig>,
     features: u64,
     kill_evt: Option<EventFd>,
-    worker_thread: Option<thread::JoinHandle<Worker>>,
+    worker_thread: Option<thread::JoinHandle<BalloonControlResponseSocket>>,
 }
 
 impl Balloon {
@@ -319,7 +319,7 @@ impl VirtioDevice for Balloon {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
+        queues: Vec<Queue>,
         queue_evts: Vec<EventFd>,
     ) {
         if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
@@ -340,17 +340,15 @@ impl VirtioDevice for Balloon {
         let worker_result = thread::Builder::new()
             .name("virtio_balloon".to_string())
             .spawn(move || {
-                let mut worker = Worker {
-                    interrupt,
-                    mem,
-                    inflate_queue: queues.remove(0),
-                    deflate_queue: queues.remove(0),
+                run_worker(
+                    queue_evts,
+                    queues,
                     command_socket,
+                    interrupt,
+                    kill_evt,
+                    mem,
                     config,
-                };
-                worker.run(queue_evts, kill_evt);
-                worker
-            });
+                )});
 
         match worker_result {
             Err(e) => {
@@ -376,12 +374,49 @@ impl VirtioDevice for Balloon {
                     error!("{}: failed to get back resources", self.debug_label());
                     return false;
                 }
-                Ok(worker) => {
-                    self.command_socket = Some(worker.command_socket);
+                Ok(command_socket) => {
+                    self.command_socket = Some(command_socket);
                     return true;
                 }
             }
         }
         return false;
     }
+}
+
+fn process_inflate(avail_desc: DescriptorChain, mem: &mut GuestMemory) -> bool {
+    let mut reader = match Reader::new(mem, avail_desc) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("balloon: failed to create reader: {}", e);
+            return true;
+        }
+    };
+    let data_length = reader.available_bytes();
+
+    if data_length % 4 != 0 {
+        error!("invalid inflate buffer size: {}", data_length);
+        return true;
+    }
+
+    let num_addrs = data_length / 4;
+    for _ in 0..num_addrs as usize {
+        let guest_input = match reader.read_obj::<Le32>() {
+            Ok(a) => a.to_native(),
+            Err(err) => {
+                error!("error while reading unused pages: {}", err);
+                return false;
+            }
+        };
+        let guest_address = GuestAddress((u64::from(guest_input)) << VIRTIO_BALLOON_PFN_SHIFT);
+
+        if mem
+            .remove_range(guest_address, 1 << VIRTIO_BALLOON_PFN_SHIFT)
+            .is_err()
+        {
+            warn!("Marking pages unused failed; addr={}", guest_address);
+            return false;
+        }
+    }
+    true
 }
