@@ -1,0 +1,14 @@
+[package]
+name = "cros_async"
+version = "0.1.0"
+authors = ["The Chromium OS Authors"]
+edition = "2018"
+
+[dependencies]
+libc = "*"
+sys_util = { path = "../sys_util" }
+syscall_defines = { path = "../syscall_defines" }
+
+[dependencies.futures]
+version = "*"
+default-features = false
