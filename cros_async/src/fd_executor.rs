@@ -12,12 +12,13 @@
 //! # Example of starting the framework and running a future:
 //!
 //! ```
+//! use cros_async::Executor;
 //! async fn my_async() {
 //!     // Insert async code here.
 //! }
 //!
-//! let mut ex = cros_async::FdExecutor::new();
-//! ex.add_future(Box::pin(my_async()));
+//! let mut ex = cros_async::empty_executor();
+//! cros_async::add_future(Box::pin(my_async()));
 //! ex.run();
 //! ```
 
@@ -37,7 +38,7 @@ use sys_util::{PollContext, WatchingEvents};
 thread_local!(static NEW_FDS: RefCell<Vec<(SavedFd, Waker, WatchingEvents)>> =
               RefCell::new(Vec::new()));
 // Top level futures that are added during poll calls.
-thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture>> =
+thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture<()>>> =
               RefCell::new(VecDeque::new()));
 
 /// Tells the waking system to wake `waker` when `fd` becomes readable.
@@ -77,83 +78,142 @@ pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) {
 // polled. Futures will start with the flag set. After blocking by returning `Poll::Pending`, the
 // flag will be false until the waker is triggers and sets the flag to true, signalling the future
 // can be polled again.
-struct ExecutableFuture {
-    future: Pin<Box<dyn Future<Output = ()>>>,
+struct ExecutableFuture<T> {
+    future: Pin<Box<dyn Future<Output = T>>>,
     needs_poll: AtomicBool,
 }
 
-impl ExecutableFuture {
+impl<T> ExecutableFuture<T> {
     pub fn new(
-        future: Pin<Box<dyn Future<Output = ()>>>,
+        future: Pin<Box<dyn Future<Output = T>>>,
         needs_poll: AtomicBool,
-    ) -> ExecutableFuture {
+    ) -> ExecutableFuture<T> {
         ExecutableFuture { future, needs_poll }
     }
+}
+
+trait FutureList {
+    type Output;
+    fn push_back(&mut self, future: ExecutableFuture<()>);
+    fn append(&mut self, futures: &mut VecDeque<ExecutableFuture<()>>);
+    fn results(&mut self) -> Option<Self::Output>;
+    fn any_ready(&self) -> bool;
+
+    /// for each future that is ready:
+    ///  poll it
+    ///  remove it if ready
+    fn run_remove_done(&mut self);
+}
+
+struct UnitFutures {
+    futures: VecDeque<ExecutableFuture<()>>,
+}
+
+impl UnitFutures {
+    pub fn new() -> UnitFutures {
+        UnitFutures {
+            futures: VecDeque::new(),
+        }
+    }
+}
+
+impl FutureList for UnitFutures {
+    type Output = ();
+
+    fn push_back(&mut self, future: ExecutableFuture<()>) {
+        self.futures.push_back(future);
+    }
+    fn append(&mut self, futures: &mut VecDeque<ExecutableFuture<()>>) {
+        self.futures.append(futures);
+    }
+    fn results(&mut self) -> Option<Self::Output> {
+        if self.futures.is_empty() {
+            Some(())
+        } else {
+            None
+        }
+    }
+    fn any_ready(&self) -> bool {
+        self.futures
+            .iter()
+            .any(|fut| fut.needs_poll.load(Ordering::Relaxed))
+    }
+    fn run_remove_done(&mut self) {
+        let to_remove: Vec<usize> = self
+            .futures
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, fut)| {
+                if fut.needs_poll.swap(false, Ordering::Relaxed) {
+                    if let Poll::Ready(_) = poll_one(fut) {
+                        return Some(i);
+                    }
+                }
+                None
+            })
+            .collect();
+        for i in to_remove.into_iter() {
+            self.futures.remove(i);
+        }
+    }
+}
+
+// Polls one future and returns the result.
+// Covers setting up the waker and context before calling the future.
+fn poll_one<O>(fut: &mut ExecutableFuture<O>) -> Poll<O> {
+    // Safe because a valid pointer is passed to `create_waker` and the valid result is
+    // passed to `Waker::from_raw`.
+    let waker = unsafe {
+        let raw_waker = create_waker(&fut.needs_poll as *const _ as *const _);
+        Waker::from_raw(raw_waker)
+    };
+    let mut ctx = Context::from_waker(&waker);
+    let f = fut.future.as_mut();
+    f.poll(&mut ctx)
+}
+
+pub trait Executor {
+    type Output;
+    /// Run the executor, this will return once the exit crieteria is met. The exit criteria is
+    /// specified when the executor is created, for example running until all futures are complete.
+    /// exit criteria.
+    fn run(&mut self) -> Self::Output;
 }
 
 /// Runs futures to completion on a single thread. Futures are allowed to block on file descriptors
 /// only. Futures can only block on FDs becoming readable or writable. `FdExecutor` is meant to be
 /// used where a poll or select loop would be used otherwise.
-pub struct FdExecutor {
-    futures: VecDeque<ExecutableFuture>,
+struct FdExecutor<T: FutureList> {
+    futures: T,
     poll_ctx: PollContext<u64>,
     token_map: BTreeMap<u64, (SavedFd, Waker)>,
     next_token: u64, // Next token for adding to the poll context.
 }
 
-impl FdExecutor {
+impl<T: FutureList> Executor for FdExecutor<T> {
+    type Output = T::Output;
+
+    fn run(&mut self) -> Self::Output {
+        self.run_all()
+    }
+}
+
+impl<T: FutureList> FdExecutor<T> {
     /// Create a new executor.
-    pub fn new() -> FdExecutor {
+    pub fn new(futures: T) -> FdExecutor<T> {
         FdExecutor {
-            futures: VecDeque::new(),
+            futures,
             poll_ctx: PollContext::new().unwrap(),
             token_map: BTreeMap::new(),
             next_token: 0,
         }
     }
 
-    /// Appends the given future to the list of futures to run.
-    /// These futures must return `()`. The futures added here are intended to drive side-effects
-    /// only. Use `add_future` for top-level futures.
-    pub fn add_future(&mut self, future: Pin<Box<dyn Future<Output = ()>>>) {
-        self.futures
-            .push_back(ExecutableFuture::new(future, AtomicBool::new(true)));
-    }
-
-    /// Run the executor, this will return once all of the futures added to it have completed.
-    pub fn run(&mut self) {
-        self.run_all(false)
-    }
-
-    /// Run the executor until any future completes, returns once any of the futures added to it
-    /// have completed.
-    pub fn run_first(&mut self) {
-        self.run_all(true)
-    }
-
     // Run the executor, If 'exit_any' is true, 'run_all' returns after any future completes. If
     // 'exit_any' is false, `run_all` only returns after all futures have completed.
-    fn run_all(&mut self, exit_any: bool) {
+    fn run_all(&mut self) -> T::Output {
         loop {
-            // for each future that is ready:
-            //  poll it
-            //  remove it if ready
-            let mut i = 0;
-            while i < self.futures.len() {
-                // The loop would be `drain_filter` if it was stable.
-                let exec_fut = &mut self.futures[i];
-
-                if exec_fut.needs_poll.swap(false, Ordering::Relaxed)
-                    && poll_one(exec_fut) == Poll::Ready(())
-                {
-                    self.futures.remove(i);
-                    if exit_any {
-                        return;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
+            self.futures.run_remove_done();
 
             // Add any new futures and wakers to the lists.
             NEW_FUTURES.with(|new_futures| {
@@ -168,32 +228,14 @@ impl FdExecutor {
                 }
             });
 
-            if self.futures.is_empty() {
-                return;
+            if let Some(output) = self.futures.results() {
+                return output;
             }
 
-            // If no futures are read, sleep until a waker is signaled.
-            if !self
-                .futures
-                .iter()
-                .any(|fut| fut.needs_poll.load(Ordering::Relaxed))
-            {
+            // If no futures are ready, sleep until a waker is signaled.
+            if !self.futures.any_ready() {
                 self.wait_wake_event();
             }
-        }
-
-        // Polls one future and returns the result.
-        // Covers setting up the waker and context before calling the future.
-        fn poll_one(fut: &mut ExecutableFuture) -> Poll<()> {
-            // Safe because a valid pointer is passed to `create_waker` and the valid result is
-            // passed to `Waker::from_raw`.
-            let waker = unsafe {
-                let raw_waker = create_waker(&fut.needs_poll as *const _ as *const _);
-                Waker::from_raw(raw_waker)
-            };
-            let mut ctx = Context::from_waker(&waker);
-            let f = fut.future.as_mut();
-            f.poll(&mut ctx)
         }
     }
 
@@ -219,6 +261,11 @@ impl FdExecutor {
             }
         }
     }
+}
+
+/// Creates an empty FdExecutor that can have futures returning `()` added via `add_future`.
+pub fn empty_executor() -> impl Executor {
+    FdExecutor::new(UnitFutures::new())
 }
 
 // Saved FD exists becaus RawFd doesn't impl AsRawFd.

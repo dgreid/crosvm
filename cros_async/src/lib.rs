@@ -26,4 +26,4 @@
 
 mod fd_executor;
 
-pub use fd_executor::{add_future, add_read_waker, add_write_waker, FdExecutor};
+pub use fd_executor::{add_future, add_read_waker, add_write_waker, empty_executor, Executor};

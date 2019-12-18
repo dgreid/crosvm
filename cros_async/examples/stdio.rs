@@ -7,7 +7,7 @@ use std::io::{stdin, Read, StdinLock};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use cros_async::{add_read_waker, FdExecutor};
+use cros_async::{add_read_waker, add_future, empty_executor, Executor};
 
 struct VectorProducer<'a> {
     stdin_lock: StdinLock<'a>,
@@ -42,7 +42,7 @@ impl<'a> Future for VectorProducer<'a> {
 }
 
 fn main() {
-    let mut ex = FdExecutor::new();
+    let mut ex = empty_executor();
 
     async fn get_vec() {
         let stdin = stdin();
@@ -55,7 +55,7 @@ fn main() {
     }
     println!("pre add future");
 
-    ex.add_future(Box::pin(get_vec()));
+    add_future(Box::pin(get_vec()));
     println!("after adding, before runninc");
 
     ex.run();
