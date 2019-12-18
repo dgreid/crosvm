@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::task::{RawWaker, RawWakerVTable, Waker};
 
+use futures::future::{maybe_done, MaybeDone};
+
 use sys_util::{PollContext, WatchingEvents};
 
 // Temporary vectors of new additions to the executor.
@@ -90,6 +92,20 @@ impl<T> ExecutableFuture<T> {
     ) -> ExecutableFuture<T> {
         ExecutableFuture { future, needs_poll }
     }
+
+    // Polls the future if needed and returns the result.
+    // Covers setting up the waker and context before calling the future.
+    fn poll(&mut self) -> Poll<T> {
+        // Safe because a valid pointer is passed to `create_waker` and the valid result is
+        // passed to `Waker::from_raw`.
+        let waker = unsafe {
+            let raw_waker = create_waker(&self.needs_poll as *const _ as *const _);
+            Waker::from_raw(raw_waker)
+        };
+        let mut ctx = Context::from_waker(&waker);
+        let f = self.future.as_mut();
+        f.poll(&mut ctx)
+    }
 }
 
 // Private trait used to allow one executor to behave differently depending on the implementor of
@@ -102,11 +118,9 @@ trait FutureList {
     // Return a mutable reference to the list of futures that can be added or removed from this
     // List.
     fn futures_mut(&mut self) -> &mut UnitFutures;
-    fn results(&mut self) -> Option<Self::Output>;
-    fn any_ready(&self) -> bool;
-
     // polls all futures that are ready.
-    fn poll_all(&mut self);
+    fn poll_results(&mut self) -> Option<Self::Output>;
+    fn any_ready(&self) -> bool;
 }
 
 // `UnitFutures` is the simplest implementor of `FutureList` it runs all futures added to it until
@@ -124,26 +138,6 @@ impl UnitFutures {
     fn append(&mut self, futures: &mut VecDeque<ExecutableFuture<()>>) {
         self.futures.append(futures);
     }
-}
-
-impl FutureList for UnitFutures {
-    type Output = ();
-
-    fn futures_mut(&mut self) -> &mut UnitFutures {
-        self
-    }
-    fn results(&mut self) -> Option<Self::Output> {
-        if self.futures.is_empty() {
-            Some(())
-        } else {
-            None
-        }
-    }
-    fn any_ready(&self) -> bool {
-        self.futures
-            .iter()
-            .any(|fut| fut.needs_poll.load(Ordering::Relaxed))
-    }
     fn poll_all(&mut self) {
         let to_remove: Vec<usize> = self
             .futures
@@ -151,7 +145,7 @@ impl FutureList for UnitFutures {
             .enumerate()
             .filter_map(|(i, fut)| {
                 if fut.needs_poll.swap(false, Ordering::Relaxed) {
-                    if let Poll::Ready(_) = poll_one(fut) {
+                    if let Poll::Ready(_) = fut.poll() {
                         return Some(i);
                     }
                 }
@@ -164,18 +158,104 @@ impl FutureList for UnitFutures {
     }
 }
 
-// Polls one future and returns the result.
-// Covers setting up the waker and context before calling the future.
-fn poll_one<O>(fut: &mut ExecutableFuture<O>) -> Poll<O> {
-    // Safe because a valid pointer is passed to `create_waker` and the valid result is
-    // passed to `Waker::from_raw`.
-    let waker = unsafe {
-        let raw_waker = create_waker(&fut.needs_poll as *const _ as *const _);
-        Waker::from_raw(raw_waker)
-    };
-    let mut ctx = Context::from_waker(&waker);
-    let f = fut.future.as_mut();
-    f.poll(&mut ctx)
+impl FutureList for UnitFutures {
+    type Output = ();
+
+    fn futures_mut(&mut self) -> &mut UnitFutures {
+        self
+    }
+    fn poll_results(&mut self) -> Option<Self::Output> {
+        self.poll_all();
+        if self.futures.is_empty() {
+            Some(())
+        } else {
+            None
+        }
+    }
+    fn any_ready(&self) -> bool {
+        self.futures
+            .iter()
+            .any(|fut| fut.needs_poll.load(Ordering::Relaxed))
+    }
+}
+
+struct Complete2<F1: Future, F2: Future> {
+    added_futures: UnitFutures,
+    f1: MaybeDone<F1>,
+    f1_ready: AtomicBool,
+    f2: MaybeDone<F2>,
+    f2_ready: AtomicBool,
+}
+
+impl<F1: Future, F2: Future> Complete2<F1, F2> {
+    fn new(f1: F1, f2: F2) -> Complete2<F1, F2> {
+        Complete2 {
+            added_futures: UnitFutures::new(),
+            f1: maybe_done(f1),
+            f1_ready: AtomicBool::new(true),
+            f2: maybe_done(f2),
+            f2_ready: AtomicBool::new(true),
+        }
+    }
+}
+
+impl<F1: Future, F2: Future> FutureList for Complete2<F1, F2> {
+    type Output = (F1::Output, F2::Output);
+
+    fn futures_mut(&mut self) -> &mut UnitFutures {
+        &mut self.added_futures
+    }
+    fn poll_results(&mut self) -> Option<Self::Output> {
+        let _ = self.added_futures.poll_results();
+
+        let f1 = unsafe {
+            // Safe because no future will be moved before the structure is dropped and no future
+            // can run after the structure is dropped.
+            Pin::new_unchecked(&mut self.f1)
+        };
+        let f2 = unsafe {
+            // Safe because no future will be moved before the structure is dropped and no future
+            // can run after the structure is dropped.
+            Pin::new_unchecked(&mut self.f2)
+        };
+        let mut complete = true;
+        if self.f1_ready.load(Ordering::Relaxed) {
+            let waker = unsafe {
+                let raw_waker = create_waker(&self.f1_ready as *const _ as *const _);
+                Waker::from_raw(raw_waker)
+            };
+            let mut ctx = Context::from_waker(&waker);
+            complete &= f1.poll(&mut ctx).is_ready();
+        }
+        if self.f2_ready.load(Ordering::Relaxed) {
+            let waker = unsafe {
+                let raw_waker = create_waker(&self.f2_ready as *const _ as *const _);
+                Waker::from_raw(raw_waker)
+            };
+            let mut ctx = Context::from_waker(&waker);
+            complete &= f2.poll(&mut ctx).is_ready();
+        }
+        if complete {
+            let f1 = unsafe {
+                // Safe because no future will be moved before the structure is dropped and no future
+                // can run after the structure is dropped.
+                Pin::new_unchecked(&mut self.f1)
+            };
+            let f2 = unsafe {
+                // Safe because no future will be moved before the structure is dropped and no future
+                // can run after the structure is dropped.
+                Pin::new_unchecked(&mut self.f2)
+            };
+            Some((f1.take_output().unwrap(), f2.take_output().unwrap()))
+        } else {
+            None
+        }
+    }
+    fn any_ready(&self) -> bool {
+        self.f1_ready.load(Ordering::Relaxed)
+            || self.f2_ready.load(Ordering::Relaxed)
+            || self.added_futures.any_ready()
+    }
 }
 
 pub trait Executor {
@@ -219,8 +299,6 @@ impl<T: FutureList> FdExecutor<T> {
     // 'exit_any' is false, `run_all` only returns after all futures have completed.
     fn run_all(&mut self) -> T::Output {
         loop {
-            self.futures.poll_all();
-
             // Add any new futures and wakers to the lists.
             NEW_FUTURES.with(|new_futures| {
                 let mut new_futures = new_futures.borrow_mut();
@@ -234,7 +312,7 @@ impl<T: FutureList> FdExecutor<T> {
                 }
             });
 
-            if let Some(output) = self.futures.results() {
+            if let Some(output) = self.futures.poll_results() {
                 return output;
             }
 
@@ -274,7 +352,27 @@ pub fn empty_executor() -> impl Executor {
     FdExecutor::new(UnitFutures::new())
 }
 
-// Saved FD exists becaus RawFd doesn't impl AsRawFd.
+/// Creates an executor that runs the two given futures to completion, returning a tuple of the
+/// outputs each yields.
+///
+///  # Example
+///
+///    ```
+///    use cros_async::{complete2, Executor};
+///
+///    let first = async {5};
+///    let second = async {6};
+///    let mut ex = complete2(first, second);
+///    assert_eq!(ex.run(), (5,6));
+///    ```
+pub fn complete2<F1: Future, F2: Future>(
+    f1: F1,
+    f2: F2,
+) -> impl Executor<Output = (F1::Output, F2::Output)> {
+    FdExecutor::new(Complete2::new(f1, f2))
+}
+
+// Saved FD exists because RawFd doesn't impl AsRawFd.
 struct SavedFd(RawFd);
 impl AsRawFd for SavedFd {
     fn as_raw_fd(&self) -> RawFd {
