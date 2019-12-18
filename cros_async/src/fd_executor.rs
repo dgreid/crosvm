@@ -92,19 +92,25 @@ impl<T> ExecutableFuture<T> {
     }
 }
 
+// Private trait used to allow one executor to behave differently depending on the implementor of
+// this trait used by the executor.  Using FutureList allows the executor code to be common across
+// different collections of crates and different termination behavior. For example, one List can
+// decide to exit after the first trait completes, others can wait until all are complete.
 trait FutureList {
     type Output;
-    fn push_back(&mut self, future: ExecutableFuture<()>);
-    fn append(&mut self, futures: &mut VecDeque<ExecutableFuture<()>>);
+
+    // Return a mutable reference to the list of futures that can be added or removed from this
+    // List.
+    fn futures_mut(&mut self) -> &mut UnitFutures;
     fn results(&mut self) -> Option<Self::Output>;
     fn any_ready(&self) -> bool;
 
-    /// for each future that is ready:
-    ///  poll it
-    ///  remove it if ready
-    fn run_remove_done(&mut self);
+    // polls all futures that are ready.
+    fn poll_all(&mut self);
 }
 
+// `UnitFutures` is the simplest implementor of `FutureList` it runs all futures added to it until
+// there are none left to poll. The futures must all return `()`.
 struct UnitFutures {
     futures: VecDeque<ExecutableFuture<()>>,
 }
@@ -115,16 +121,16 @@ impl UnitFutures {
             futures: VecDeque::new(),
         }
     }
+    fn append(&mut self, futures: &mut VecDeque<ExecutableFuture<()>>) {
+        self.futures.append(futures);
+    }
 }
 
 impl FutureList for UnitFutures {
     type Output = ();
 
-    fn push_back(&mut self, future: ExecutableFuture<()>) {
-        self.futures.push_back(future);
-    }
-    fn append(&mut self, futures: &mut VecDeque<ExecutableFuture<()>>) {
-        self.futures.append(futures);
+    fn futures_mut(&mut self) -> &mut UnitFutures {
+        self
     }
     fn results(&mut self) -> Option<Self::Output> {
         if self.futures.is_empty() {
@@ -138,7 +144,7 @@ impl FutureList for UnitFutures {
             .iter()
             .any(|fut| fut.needs_poll.load(Ordering::Relaxed))
     }
-    fn run_remove_done(&mut self) {
+    fn poll_all(&mut self) {
         let to_remove: Vec<usize> = self
             .futures
             .iter_mut()
@@ -213,12 +219,12 @@ impl<T: FutureList> FdExecutor<T> {
     // 'exit_any' is false, `run_all` only returns after all futures have completed.
     fn run_all(&mut self) -> T::Output {
         loop {
-            self.futures.run_remove_done();
+            self.futures.poll_all();
 
             // Add any new futures and wakers to the lists.
             NEW_FUTURES.with(|new_futures| {
                 let mut new_futures = new_futures.borrow_mut();
-                self.futures.append(&mut new_futures);
+                self.futures.futures_mut().append(&mut new_futures);
             });
 
             NEW_FDS.with(|new_fds| {
