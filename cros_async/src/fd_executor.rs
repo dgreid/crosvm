@@ -400,3 +400,89 @@ static WAKER_VTABLE: RawWakerVTable =
 unsafe fn create_waker(data_ptr: *const ()) -> RawWaker {
     RawWaker::new(data_ptr, &WAKER_VTABLE)
 }
+
+// Macro-generate future combinators to allow for running different numbers of top-level futures in
+// an executor.
+macro_rules! generate {
+    ($(
+        $(#[$doc:meta])*
+        ($Complete:ident, <$($Fut:ident),*>),
+    )*) => ($(
+        $(#[$doc])*
+        #[must_use = "Combinations of futures don't do anything unless run in an executor."]
+        pub struct $Complete<$($Fut: Future),*> {
+            added_futures: UnitFutures,
+            $($Fut: MaybeDone<$Fut>,)*
+            $($Fut_ready: AtomicBool,)*
+        }
+
+        impl<$($Fut: Future),*> $Complete<$($Fut),*> {
+            fn new($($Fut: $Fut),*) -> $Complete<$($Fut),*> {
+                $Complete {
+                    added_futures: UnitFutures,
+                    $($Fut: maybe_done($Fut)),*
+                    $($Fut_ready: AtomicBool::new(true)),*
+                }
+            }
+            $(
+                unsafe_pinned!($Fut: MaybeDone<$Fut>);
+            )*
+        }
+
+        impl<$($Fut: Future),*> FutureList for $Complete<$($Fut),*> {
+            type Output = ($($Fut::Output),*);
+
+            fn futures_mut(&mut self) -> &mut UnitFutures {
+                &mut self.added_futures
+            }
+
+            fn poll_results(&mut self) -> Option<Self::Output> {
+                let _ = self.added_futures.poll_results();
+
+                let mut complete = true;
+                $(
+                    let $Fut = unsafe {
+                        // Safe because no future will be moved before the structure is dropped and
+                        // no future can run after the structure is dropped.
+                        Pin::new_unchecked(&mut self.$Fut)
+                    };
+                    if self.$Fut_ready.load(Ordering::Relaxed) {
+                        let waker = unsafe {
+                            let raw_waker = create_waker(&self.$Fut_ready as *const _ as *const _);
+                            Waker::from_raw(raw_waker)
+                        };
+                        let mut ctx = Context::from_waker(&waker);
+                        complete &= $Fut.poll(&mut ctx).is_ready();
+                    }
+                )*
+
+                if complete {
+                    $(
+                    let $Fut = unsafe {
+                        // Safe because no future will be moved before the structure is dropped and
+                        // no future can run after the structure is dropped.
+                        Pin::new_unchecked(&mut self.$Fut)
+                    };
+                    )*
+                    Poll::Ready(($($Fut)), *))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    )*)
+}
+
+generate! {
+    /// Future for the [`join`](join()) function.
+    (Join, <Fut1, Fut2>),
+
+    /// Future for the [`join3`] function.
+    (Join3, <Fut1, Fut2, Fut3>),
+
+    /// Future for the [`join4`] function.
+    (Join4, <Fut1, Fut2, Fut3, Fut4>),
+
+    /// Future for the [`join5`] function.
+    (Join5, <Fut1, Fut2, Fut3, Fut4, Fut5>),
+}
