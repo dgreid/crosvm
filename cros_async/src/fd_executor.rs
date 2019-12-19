@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// Need non-snake case so the macro can re-use type names for variables.
+#![allow(non_snake_case)]
+
 //! The executor runs all given futures to completion. Futures register wakers associated with file
 //! descriptors. The wakers will be called when the FD becomes readable or writable depending on
 //! the situation.
@@ -179,85 +182,6 @@ impl FutureList for UnitFutures {
     }
 }
 
-struct Complete2<F1: Future, F2: Future> {
-    added_futures: UnitFutures,
-    f1: MaybeDone<F1>,
-    f1_ready: AtomicBool,
-    f2: MaybeDone<F2>,
-    f2_ready: AtomicBool,
-}
-
-impl<F1: Future, F2: Future> Complete2<F1, F2> {
-    fn new(f1: F1, f2: F2) -> Complete2<F1, F2> {
-        Complete2 {
-            added_futures: UnitFutures::new(),
-            f1: maybe_done(f1),
-            f1_ready: AtomicBool::new(true),
-            f2: maybe_done(f2),
-            f2_ready: AtomicBool::new(true),
-        }
-    }
-}
-
-impl<F1: Future, F2: Future> FutureList for Complete2<F1, F2> {
-    type Output = (F1::Output, F2::Output);
-
-    fn futures_mut(&mut self) -> &mut UnitFutures {
-        &mut self.added_futures
-    }
-    fn poll_results(&mut self) -> Option<Self::Output> {
-        let _ = self.added_futures.poll_results();
-
-        let f1 = unsafe {
-            // Safe because no future will be moved before the structure is dropped and no future
-            // can run after the structure is dropped.
-            Pin::new_unchecked(&mut self.f1)
-        };
-        let f2 = unsafe {
-            // Safe because no future will be moved before the structure is dropped and no future
-            // can run after the structure is dropped.
-            Pin::new_unchecked(&mut self.f2)
-        };
-        let mut complete = true;
-        if self.f1_ready.load(Ordering::Relaxed) {
-            let waker = unsafe {
-                let raw_waker = create_waker(&self.f1_ready as *const _ as *const _);
-                Waker::from_raw(raw_waker)
-            };
-            let mut ctx = Context::from_waker(&waker);
-            complete &= f1.poll(&mut ctx).is_ready();
-        }
-        if self.f2_ready.load(Ordering::Relaxed) {
-            let waker = unsafe {
-                let raw_waker = create_waker(&self.f2_ready as *const _ as *const _);
-                Waker::from_raw(raw_waker)
-            };
-            let mut ctx = Context::from_waker(&waker);
-            complete &= f2.poll(&mut ctx).is_ready();
-        }
-        if complete {
-            let f1 = unsafe {
-                // Safe because no future will be moved before the structure is dropped and no future
-                // can run after the structure is dropped.
-                Pin::new_unchecked(&mut self.f1)
-            };
-            let f2 = unsafe {
-                // Safe because no future will be moved before the structure is dropped and no future
-                // can run after the structure is dropped.
-                Pin::new_unchecked(&mut self.f2)
-            };
-            Some((f1.take_output().unwrap(), f2.take_output().unwrap()))
-        } else {
-            None
-        }
-    }
-    fn any_ready(&self) -> bool {
-        self.f1_ready.load(Ordering::Relaxed)
-            || self.f2_ready.load(Ordering::Relaxed)
-            || self.added_futures.any_ready()
-    }
-}
-
 pub trait Executor {
     type Output;
     /// Run the executor, this will return once the exit crieteria is met. The exit criteria is
@@ -371,6 +295,30 @@ pub fn complete2<F1: Future, F2: Future>(
 ) -> impl Executor<Output = (F1::Output, F2::Output)> {
     FdExecutor::new(Complete2::new(f1, f2))
 }
+pub fn complete3<F1: Future, F2: Future, F3: Future>(
+    f1: F1,
+    f2: F2,
+    f3: F3,
+) -> impl Executor<Output = (F1::Output, F2::Output, F3::Output)> {
+    FdExecutor::new(Complete3::new(f1, f2, f3))
+}
+pub fn complete4<F1: Future, F2: Future, F3: Future, F4: Future>(
+    f1: F1,
+    f2: F2,
+    f3: F3,
+    f4: F4,
+) -> impl Executor<Output = (F1::Output, F2::Output, F3::Output, F4::Output)> {
+    FdExecutor::new(Complete4::new(f1, f2, f3, f4))
+}
+pub fn complete5<F1: Future, F2: Future, F3: Future, F4: Future, F5: Future>(
+    f1: F1,
+    f2: F2,
+    f3: F3,
+    f4: F4,
+    f5: F5,
+) -> impl Executor<Output = (F1::Output, F2::Output, F3::Output, F4::Output, F5::Output)> {
+    FdExecutor::new(Complete5::new(f1, f2, f3, f4, f5))
+}
 
 // Saved FD exists because RawFd doesn't impl AsRawFd.
 struct SavedFd(RawFd);
@@ -410,23 +358,24 @@ macro_rules! generate {
     )*) => ($(
         $(#[$doc])*
         #[must_use = "Combinations of futures don't do anything unless run in an executor."]
-        pub struct $Complete<$($Fut: Future),*> {
-            added_futures: UnitFutures,
-            $($Fut: MaybeDone<$Fut>,)*
-            $($Fut_ready: AtomicBool,)*
+        paste::item! {
+            pub struct $Complete<$($Fut: Future),*> {
+                added_futures: UnitFutures,
+                $($Fut: MaybeDone<$Fut>,)*
+                $([<$Fut _ready>]: AtomicBool,)*
+            }
         }
 
         impl<$($Fut: Future),*> $Complete<$($Fut),*> {
-            fn new($($Fut: $Fut),*) -> $Complete<$($Fut),*> {
-                $Complete {
-                    added_futures: UnitFutures,
-                    $($Fut: maybe_done($Fut)),*
-                    $($Fut_ready: AtomicBool::new(true)),*
+            paste::item! {
+                fn new($($Fut: $Fut),*) -> $Complete<$($Fut),*> {
+                    $Complete {
+                        added_futures: UnitFutures::new(),
+                        $($Fut: maybe_done($Fut),)*
+                        $([<$Fut _ready>]: AtomicBool::new(true),)*
+                    }
                 }
             }
-            $(
-                unsafe_pinned!($Fut: MaybeDone<$Fut>);
-            )*
         }
 
         impl<$($Fut: Future),*> FutureList for $Complete<$($Fut),*> {
@@ -436,53 +385,64 @@ macro_rules! generate {
                 &mut self.added_futures
             }
 
-            fn poll_results(&mut self) -> Option<Self::Output> {
-                let _ = self.added_futures.poll_results();
+            paste::item! {
+                fn poll_results(&mut self) -> Option<Self::Output> {
+                    let _ = self.added_futures.poll_results();
 
-                let mut complete = true;
-                $(
-                    let $Fut = unsafe {
-                        // Safe because no future will be moved before the structure is dropped and
-                        // no future can run after the structure is dropped.
-                        Pin::new_unchecked(&mut self.$Fut)
-                    };
-                    if self.$Fut_ready.load(Ordering::Relaxed) {
-                        let waker = unsafe {
-                            let raw_waker = create_waker(&self.$Fut_ready as *const _ as *const _);
-                            Waker::from_raw(raw_waker)
-                        };
-                        let mut ctx = Context::from_waker(&waker);
-                        complete &= $Fut.poll(&mut ctx).is_ready();
-                    }
-                )*
-
-                if complete {
+                    let mut complete = true;
                     $(
-                    let $Fut = unsafe {
-                        // Safe because no future will be moved before the structure is dropped and
-                        // no future can run after the structure is dropped.
-                        Pin::new_unchecked(&mut self.$Fut)
-                    };
+                        let $Fut = unsafe {
+                            // Safe because no future will be moved before the structure is dropped and
+                            // no future can run after the structure is dropped.
+                            Pin::new_unchecked(&mut self.$Fut)
+                        };
+                        if self.[<$Fut _ready>].swap(false, Ordering::Relaxed) {
+                            let waker = unsafe {
+                                let raw_waker =
+                                    create_waker(&self.[<$Fut _ready>] as *const _ as *const _);
+                                Waker::from_raw(raw_waker)
+                            };
+                            let mut ctx = Context::from_waker(&waker);
+                            complete &= $Fut.poll(&mut ctx).is_ready();
+                        }
                     )*
-                    Poll::Ready(($($Fut)), *))
-                } else {
-                    Poll::Pending
+
+                        if complete {
+                            $(
+                                let $Fut = unsafe {
+                                    // Safe because no future will be moved before the structure is dropped and
+                                    // no future can run after the structure is dropped.
+                                    Pin::new_unchecked(&mut self.$Fut)
+                                };
+                            )*
+                            Some(($($Fut.take_output().unwrap()), *))
+                        } else {
+                            None
+                        }
                 }
+
+    fn any_ready(&self) -> bool {
+        let mut ready = self.added_futures.any_ready();
+        $(
+            ready |= self.[<$Fut _ready>].load(Ordering::Relaxed);
+        )*
+        ready
+    }
             }
         }
     )*)
 }
 
 generate! {
-    /// Future for the [`join`](join()) function.
-    (Join, <Fut1, Fut2>),
+    /// Future for the [`complete`](complete()) function.
+    (Complete2, <Fut1, Fut2>),
 
-    /// Future for the [`join3`] function.
-    (Join3, <Fut1, Fut2, Fut3>),
+    /// Future for the [`complete3`] function.
+    (Complete3, <Fut1, Fut2, Fut3>),
 
-    /// Future for the [`join4`] function.
-    (Join4, <Fut1, Fut2, Fut3, Fut4>),
+    /// Future for the [`complete4`] function.
+    (Complete4, <Fut1, Fut2, Fut3, Fut4>),
 
-    /// Future for the [`join5`] function.
-    (Join5, <Fut1, Fut2, Fut3, Fut4, Fut5>),
+    /// Future for the [`complete5`] function.
+    (Complete5, <Fut1, Fut2, Fut3, Fut4, Fut5>),
 }
