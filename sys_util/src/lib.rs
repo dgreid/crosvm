@@ -5,6 +5,7 @@
 //! Small system utility modules for usage by other modules.
 
 pub mod affinity;
+mod aio_abi_bindings;
 mod alloc;
 #[macro_use]
 pub mod handle_eintr;
