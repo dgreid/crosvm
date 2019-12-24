@@ -8,6 +8,8 @@
 
 mod eventfd;
 mod msgreceiver;
+mod timerfd;
 
 pub use eventfd::EventFd;
 pub use msgreceiver::MsgReceiver;
+pub use timerfd::TimerFd;
