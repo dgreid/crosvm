@@ -9,12 +9,15 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
+use std::os::unix::io::RawFd;
 use std::ptr::null;
 
 use crate::{errno_result, Result};
 
 use libc::{c_long, c_void, syscall, timespec};
-use syscall_defines::linux::LinuxSyscall::{SYS_io_getevents, SYS_io_setup, SYS_io_submit};
+use syscall_defines::linux::LinuxSyscall::{
+    SYS_io_destroy, SYS_io_getevents, SYS_io_setup, SYS_io_submit,
+};
 
 pub type aio_context_t = ::std::os::raw::c_ulong;
 pub const IOCB_CMD_PREAD: u32 = 0;
@@ -50,6 +53,15 @@ pub struct iocb {
     pub aio_reserved2: u64,
     pub aio_flags: u32,
     pub aio_resfd: u32,
+}
+
+pub fn poll_iocb(token: u64, fd: RawFd, flag_events: u64) -> iocb {
+    let mut cb: iocb = Default::default();
+    cb.aio_lio_opcode = IOCB_CMD_POLL as u16;
+    cb.aio_data = token;
+    cb.aio_buf = flag_events;
+    cb.aio_fildes = fd as u32;
+    cb
 }
 
 // Wrapper around the io_setup syscall.
@@ -91,14 +103,14 @@ pub unsafe fn io_submit(context: aio_context_t, cbs: &[iocb]) -> Result<()> {
 }
 
 // Wrapper around io_getevents.
-// Only support polling, blocking is not supported.
+// Only support blocking mode, polling is not supported.
 pub fn io_getevents(context: aio_context_t, events: &mut [io_event]) -> Result<usize> {
     unsafe {
         // Safe becuase the kernel is trusted to only write within io_events.
         let ret = syscall(
             SYS_io_getevents as c_long,
             context,
-            0,
+            1,
             events.len(),
             events.as_mut_ptr() as *mut io_event,
             null::<timespec>(),
@@ -107,5 +119,14 @@ pub fn io_getevents(context: aio_context_t, events: &mut [io_event]) -> Result<u
             return errno_result();
         }
         Ok(ret as usize)
+    }
+}
+
+// Destroys a context create with `io_submit`.
+pub fn io_destroy(context: aio_context_t) {
+    unsafe {
+        // Safe because the context can't be accessed after drop, making it OK for the kernel to
+        // destroy it.
+        syscall(SYS_io_destroy as c_long, context);
     }
 }
