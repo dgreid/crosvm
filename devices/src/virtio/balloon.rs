@@ -116,6 +116,9 @@ async fn handle_deflate(
     }
 }
 
+// Because of the requirement to pull the command socket back from an uncompleted future,
+// `CommandSocketFuture` wraps what would otherwise be an async fn, but adds the ability to extract
+// the socket from the future without completing it first.
 struct CommandSocketFuture {
     command_socket: Option<AsyncReceiver<(), BalloonControlCommand>>,
     interrupt: Rc<RefCell<Interrupt>>,
