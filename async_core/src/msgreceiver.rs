@@ -4,6 +4,7 @@
 
 use futures::Stream;
 use std::convert::TryFrom;
+use std::marker::PhantomData;
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -15,27 +16,23 @@ use sys_util::{self, add_fd_flags, Result};
 
 use cros_async::add_read_waker;
 
-/// Asynchronous version of `sys_util::MsgReceiver`. Provides an implementation of `futures::Stream` so that
-/// messages can be consumed in an async context.
-pub struct MsgReceiver<I: MsgOnSocket, O: MsgOnSocket>(MsgSocket<I, O>);
+/// Asynchronous version of `sys_util::MsgReceiver`. Provides an implementation of
+/// `futures::Stream` so that messages can be consumed in an async context.
+pub struct MsgReceiver<O: MsgOnSocket, T: SysMsgReceiver<O>>(T, PhantomData<O>);
 
-impl<I: MsgOnSocket, O: MsgOnSocket> MsgReceiver<I, O> {
-    pub fn into_inner(self) -> MsgSocket<I, O> {
+impl<O: MsgOnSocket, T: SysMsgReceiver<O> + AsRawFd> MsgReceiver<O, T> {
+    pub fn into_inner(self) -> T {
         self.0
     }
-}
 
-impl<I: MsgOnSocket, O: MsgOnSocket> TryFrom<MsgSocket<I, O>> for MsgReceiver<I, O> {
-    type Error = sys_util::Error;
-
-    fn try_from(sock: MsgSocket<I, O>) -> Result<MsgReceiver<I, O>> {
+    pub fn from_receiver(sock: T) -> Result<MsgReceiver<O, T>> {
         let fd = sock.as_raw_fd();
         add_fd_flags(fd, O_NONBLOCK)?;
-        Ok(MsgReceiver(sock))
+        Ok(MsgReceiver(sock, Default::default()))
     }
 }
 
-impl<I: MsgOnSocket, O: MsgOnSocket> Stream for MsgReceiver<I, O> {
+impl<O: MsgOnSocket, T: SysMsgReceiver<O> + AsRawFd> Stream for MsgReceiver<O, T> {
     type Item = O;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {

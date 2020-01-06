@@ -116,11 +116,30 @@ async fn handle_deflate(
     }
 }
 
+async fn handle_command_socket(
+    command_socket: &BalloonControlResponseSocket,
+    interrupt: Rc<RefCell<Interrupt>>,
+    config: Arc<BalloonConfig>,
+) {
+    let mut command_socket = AsyncReceiver::from_receiver(command_socket).unwrap();
+    while let Some(req) = command_socket.next().await {
+        match req {
+            BalloonControlCommand::Adjust { num_bytes } => {
+                let num_pages = (num_bytes >> VIRTIO_BALLOON_PFN_SHIFT) as usize;
+                info!("ballon config changed to consume {} pages", num_pages);
+
+                config.num_pages.store(num_pages, Ordering::Relaxed);
+                interrupt.borrow_mut().signal_config_changed();
+            }
+        }
+    }
+}
+
 // Because of the requirement to pull the command socket back from an uncompleted future,
 // `CommandSocketFuture` wraps what would otherwise be an async fn, but adds the ability to extract
 // the socket from the future without completing it first.
 struct CommandSocketFuture {
-    command_socket: Option<AsyncReceiver<(), BalloonControlCommand>>,
+    command_socket: Option<AsyncReceiver<BalloonControlCommand, BalloonControlResponseSocket>>,
     interrupt: Rc<RefCell<Interrupt>>,
     config: Arc<BalloonConfig>,
 }
@@ -131,7 +150,7 @@ impl CommandSocketFuture {
     interrupt: Rc<RefCell<Interrupt>>,
     config: Arc<BalloonConfig>,) -> Self {
         CommandSocketFuture {
-            command_socket: Some(AsyncReceiver::try_from(command_socket).unwrap()),
+            command_socket: Some(AsyncReceiver::from_receiver(command_socket).unwrap()),
             interrupt,
             config,
         }
