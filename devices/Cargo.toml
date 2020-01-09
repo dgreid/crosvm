@@ -48,5 +48,9 @@ vhost = { path = "../vhost" }
 virtio_sys = { path = "../virtio_sys" }
 vm_control = { path = "../vm_control" }
 
+[dependencies.futures]
+version = "*"
+default-features = false
+
 [dev-dependencies]
 tempfile = { path = "../tempfile" }
