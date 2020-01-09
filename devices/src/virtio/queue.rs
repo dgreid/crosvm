@@ -4,8 +4,14 @@
 
 use std::cmp::min;
 use std::num::Wrapping;
+use std::pin::Pin;
 use std::sync::atomic::{fence, Ordering};
+use std::task::{Context, Poll};
 
+use futures::Stream;
+use futures::StreamExt;
+
+use async_core::EventFd;
 use sys_util::{error, GuestAddress, GuestMemory};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 
@@ -199,6 +205,43 @@ impl<'a, 'b> Iterator for AvailIter<'a, 'b> {
     }
 }
 
+/// Consuming async iterator over all available descriptor chain heads in the queue.
+pub struct AvailStream<'a, 'b, 'c> {
+    mem: &'a GuestMemory,
+    queue: &'b mut Queue,
+    eventfd: &'c mut EventFd,
+}
+
+impl<'a, 'b, 'c> AvailStream<'a, 'b, 'c> {
+    fn pop(&mut self) -> Option<DescriptorChain<'a>> {
+        self.queue.pop(self.mem)
+    }
+
+    pub fn queue_mut(&mut self) -> &mut Queue {
+        self.queue
+    }
+}
+
+impl<'a, 'b, 'c> Stream for AvailStream<'a, 'b, 'c> {
+    type Item = DescriptorChain<'a>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        loop {
+            // Check if there are more descriptors available.
+            if let Some(chain) = self.pop() {
+                return Poll::Ready(Some(chain));
+            }
+            // Check if the eventfd is ready and return pending if not.
+            match self.eventfd.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(e))) => println!("Error with eventfd {}.", e),
+                Poll::Ready(Some(Ok(_))) => (), // fall through and pop the next descriptor chain.
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 /// A virtio queue's parameters.
 pub struct Queue {
@@ -371,6 +414,18 @@ impl Queue {
     /// A consuming iterator over all available descriptor chain heads offered by the driver.
     pub fn iter<'a, 'b>(&'b mut self, mem: &'a GuestMemory) -> AvailIter<'a, 'b> {
         AvailIter { mem, queue: self }
+    }
+
+    pub fn stream<'a, 'b, 'c>(
+        &'b mut self,
+        mem: &'a GuestMemory,
+        eventfd: &'c mut EventFd,
+    ) -> AvailStream<'a, 'b, 'c> {
+        AvailStream {
+            mem,
+            queue: self,
+            eventfd,
+        }
     }
 
     /// Puts an available descriptor head into the used ring for use by the guest.
