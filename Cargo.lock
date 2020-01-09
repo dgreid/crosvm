@@ -240,6 +240,7 @@ dependencies = [
  "disk",
  "enumn",
  "fuse",
+ "futures",
  "gpu_buffer",
  "gpu_display",
  "gpu_renderer",
