@@ -18,6 +18,9 @@ futex: 1
 getpid: 1
 gettid: 1
 gettimeofday: 1
+io_setup: 1
+io_submit: 1
+io_getevents: 1
 kill: 1
 madvise: arg2 == MADV_DONTNEED || arg2 == MADV_DONTDUMP || arg2 == MADV_REMOVE
 mmap: arg2 in ~PROT_EXEC
