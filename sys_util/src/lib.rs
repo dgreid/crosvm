@@ -5,6 +5,7 @@
 //! Small system utility modules for usage by other modules.
 
 pub mod affinity;
+mod aio;
 mod aio_abi_bindings;
 mod alloc;
 #[macro_use]
@@ -39,6 +40,7 @@ mod timerfd;
 mod write_zeroes;
 
 pub use crate::affinity::*;
+pub use crate::aio::{Aio, AioCb};
 pub use crate::alloc::LayoutAllocation;
 pub use crate::capabilities::drop_capabilities;
 pub use crate::clock::{Clock, FakeClock};
