@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::os::unix::io::RawFd;
 use std::ptr::null;
 
-use crate::aio_abi_bindings::{aio_context_t, io_event, iocb, IOCB_CMD_POLL};
+use crate::aio_abi_bindings::*;
 use crate::{errno_result, Result};
 use crate::{PollToken, WatchingEvents};
 
@@ -38,6 +38,29 @@ impl<T: PollToken> Aio<T> {
             // Safe because of the checks when creating an AioCb.
             io_submit(self.context, &cbs)?;
         }
+        Ok(())
+    }
+
+    // Start writing from buf to len.
+    // # Safety Must ensure that the memory pointed to by buf lives until the kernel is done with
+    // the buffer.
+    pub unsafe fn submit_write(
+        &mut self,
+        fd: RawFd,
+        fd_offset: i64,
+        buf: *const u8,
+        len: u64,
+        token: T,
+    ) -> Result<()> {
+        let mut cb: iocb = Default::default();
+        cb.aio_lio_opcode = IOCB_CMD_PWRITE as u16;
+        cb.aio_data = token.as_raw_token();
+        cb.aio_buf = buf as u64;
+        cb.aio_nbytes = len;
+        cb.aio_fildes = fd as u32;
+        cb.aio_offset = fd_offset;
+        let cbs = [cb];
+        io_submit(self.context, &cbs)?;
         Ok(())
     }
 

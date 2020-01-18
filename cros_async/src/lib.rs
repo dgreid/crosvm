@@ -58,10 +58,12 @@
 mod complete;
 mod executor;
 pub mod fd_executor;
+mod fd_futures;
 mod select;
 mod waker;
 
 pub use executor::Executor;
+pub use fd_futures::write_mem;
 pub use select::SelectResult;
 
 use executor::UnitFutures;

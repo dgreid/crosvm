@@ -34,6 +34,7 @@ use std::os::unix::io::RawFd;
 use std::pin::Pin;
 use std::task::Waker;
 
+use data_model::VolatileMemoryError;
 use sys_util::{Aio, AioCb, WatchingEvents};
 
 use crate::executor::{ExecutableFuture, Executor, FutureList};
@@ -48,8 +49,12 @@ pub enum Error {
     CreatingContext(sys_util::Error),
     /// AioContext failure.
     AioContextError(sys_util::Error),
+    /// A read or write would exceed the bounds of memory.
+    ReadWriteRange(VolatileMemoryError),
     /// Failed to submit the waker to the Aio context.
     SubmittingWaker(sys_util::Error),
+    /// Failed to submit the write to the Aio context.
+    SubmittingWrite(sys_util::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -65,7 +70,11 @@ impl Display for Error {
             ),
             CreatingContext(e) => write!(f, "An error creating the fd waiting context: {}.", e),
             AioContextError(e) => write!(f, "AioContext failure: {}", e),
+            ReadWriteRange(e) => write!(f, "Invalid range for memory access: {}.", e),
             SubmittingWaker(e) => write!(f, "An error adding to the Aio context: {}.", e),
+            SubmittingWrite(e) => {
+                write!(f, "An error submitting a write to the Aio context: {}.", e)
+            }
         }
     }
 }
@@ -100,6 +109,29 @@ pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<()> {
 /// opened on top of it causing the next poll to access the new target file.
 pub fn add_write_waker(fd: RawFd, waker: Waker) -> Result<()> {
     add_waker(fd, waker, WatchingEvents::empty().set_write())
+}
+
+/// Starts a write to the fd and registers waker to be woken once the write completes.
+///
+/// # Safety
+///
+/// Must ensure that the memory pointed to by buf lives until the kernel is done with
+/// the buffer.
+pub(crate) unsafe fn start_write(
+    fd: RawFd,
+    fd_offset: i64,
+    buf: *const u8,
+    len: u64,
+    waker: Waker,
+) -> Result<()> {
+    STATE.with(|waker_state| {
+        let mut waker_state = waker_state.borrow_mut();
+        if let Some(waker_state) = waker_state.as_mut() {
+            waker_state.start_write(fd, fd_offset, buf, len, waker)
+        } else {
+            Err(Error::InvalidContext)
+        }
+    })
 }
 
 /// Adds a new top level future to the Executor.
@@ -141,6 +173,28 @@ impl FdWakerState {
         self.aio_ctx
             .submit_cb(AioCb::new(fd, events, next_token))
             .map_err(Error::SubmittingWaker)?;
+        self.token_map.insert(next_token, waker);
+        Ok(())
+    }
+
+    // Starts writing buf to the given FD, wakes `waker` when the read completes.
+    // # Safety
+    //
+    // Must ensure that the memory pointed to by buf lives until the kernel is done with
+    // the buffer.
+    unsafe fn start_write(
+        &mut self,
+        fd: RawFd,
+        fd_offset: i64,
+        buf: *const u8,
+        len: u64,
+        waker: Waker,
+    ) -> Result<()> {
+        self.next_token += 1;
+        self.aio_ctx
+            .submit_write(fd, fd_offset, buf, len, self.next_token)
+            .map_err(Error::SubmittingWrite)?;
+        let next_token = self.next_token;
         self.token_map.insert(next_token, waker);
         Ok(())
     }
