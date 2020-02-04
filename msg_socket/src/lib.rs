@@ -6,6 +6,7 @@ mod msg_on_socket;
 
 use std::io::Result;
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -222,6 +223,19 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> Drop for AsyncReceiver<'a, I, O> {
                 e
             );
         }
+    }
+}
+
+impl<'a, I: MsgOnSocket, O: MsgOnSocket> Deref for AsyncReceiver<'a, I, O> {
+    type Target = MsgSocket<I, O>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'a, I: MsgOnSocket, O: MsgOnSocket> DerefMut for AsyncReceiver<'a, I, O> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
