@@ -2,17 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::RefCell;
 use std::cmp::{max, min};
+use std::convert::TryFrom;
 use std::fmt::{self, Display};
 use std::io::{self, Write};
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::rc::Rc;
 use std::result;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use futures::StreamExt;
+
+use async_core::EventFd as AsyncEventFd;
 use data_model::{DataInit, Le16, Le32, Le64};
 use disk::DiskFile;
 use msg_socket::{MsgReceiver, MsgSender};
@@ -157,6 +163,14 @@ enum ExecuteError {
     OutOfRange,
     MissingStatus,
     Unsupported(u32),
+    /// Couldn't create an asynchronous message receiver.
+    CreatingMessageReceiver(msg_socket::MsgError),
+    /// Sending reply message failed.
+    SendingReply(msg_socket::MsgError),
+    /// Receiving command message failed.
+    ReceivingCommand(msg_socket::MsgError),
+    /// Failure wriitng the config notification event.
+    WritingConfigEvent(sys_util::Error),
 }
 
 impl Display for ExecuteError {
@@ -164,6 +178,10 @@ impl Display for ExecuteError {
         use self::ExecuteError::*;
 
         match self {
+            CreatingMessageReceiver(e) => write!(f, "failed to create async receiver: {}", e),
+            ReceivingCommand(e) => write!(f, "failed to receive command message: {}", e),
+            SendingReply(e) => write!(f, "failed to send reply  message: {}", e),
+            WritingConfigEvent(e) => write!(f, "failed to write config event: {}", e),
             Descriptor(e) => write!(f, "virtio descriptor error: {}", e),
             Read(e) => write!(f, "failed to read message: {}", e),
             WriteStatus(e) => write!(f, "failed to write request status: {}", e),
@@ -230,7 +248,138 @@ impl ExecuteError {
             ExecuteError::OutOfRange { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::MissingStatus => VIRTIO_BLK_S_IOERR,
             ExecuteError::Unsupported(_) => VIRTIO_BLK_S_UNSUPP,
+            ExecuteError::CreatingMessageReceiver(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::ReceivingCommand(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::SendingReply(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::WritingConfigEvent(_) => VIRTIO_BLK_S_IOERR,
         }
+    }
+}
+
+fn resize(
+    disk_image: &Rc<RefCell<dyn DiskFile>>,
+    read_only: bool,
+    sparse: bool,
+    disk_size: &Arc<Mutex<u64>>,
+    new_size: u64,
+) -> DiskControlResult {
+    if read_only {
+        error!("Attempted to resize read-only block device");
+        return DiskControlResult::Err(SysError::new(libc::EROFS));
+    }
+
+    info!("Resizing block device to {} bytes", new_size);
+
+    if let Err(e) = disk_image.borrow_mut().set_len(new_size) {
+        error!("Resizing disk failed! {}", e);
+        return DiskControlResult::Err(SysError::new(libc::EIO));
+    }
+
+    if !sparse {
+        // Allocate new space if the disk image is not sparse.
+        if let Err(e) = disk_image.borrow_mut().allocate(0, new_size) {
+            error!("Allocating disk space after resize failed! {}", e);
+            return DiskControlResult::Err(SysError::new(libc::EIO));
+        }
+    }
+
+    if let Ok(new_disk_size) = disk_image.borrow_mut().get_len() {
+        let mut disk_size = disk_size.lock();
+        *disk_size = new_disk_size;
+    }
+    DiskControlResult::Ok
+}
+
+async fn handle_command_socket(
+    command_socket: &mut DiskControlResponseSocket,
+    interrupt: Rc<RefCell<Interrupt>>,
+    disk_image: Rc<RefCell<dyn DiskFile>>,
+    read_only: bool,
+    sparse: bool,
+    disk_size: Arc<Mutex<u64>>,
+) -> std::result::Result<(), ExecuteError> {
+    let mut async_messages = command_socket
+        .async_receiver()
+        .map_err(ExecuteError::CreatingMessageReceiver)?;
+    while let Some(req) = async_messages.next().await {
+        let command = req.map_err(ExecuteError::ReceivingCommand)?;
+        let resp = match command {
+            DiskControlCommand::Resize { new_size } => {
+                resize(&disk_image, read_only, sparse, &disk_size, new_size)
+            }
+        };
+        interrupt.borrow_mut().signal_config_changed();
+
+        if let Err(e) = async_messages.send(&resp) {
+            error!("control socket failed send: {}", e);
+            return Err(ExecuteError::SendingReply(e));
+        }
+    }
+    Ok(())
+}
+
+async fn handle_irq_resample(interrupt: Rc<RefCell<Interrupt>>) {
+    let resample_evt = interrupt
+        .borrow_mut()
+        .get_resample_evt()
+        .try_clone()
+        .unwrap();
+    let mut resample_evt = AsyncEventFd::try_from(resample_evt).unwrap();
+    loop {
+        if let Some(_) = resample_evt.next().await {
+            interrupt.borrow_mut().interrupt_resample();
+        } else {
+            break;
+        }
+    }
+}
+
+async fn wait_kill(kill_evt: EventFd) {
+    let mut kill_evt = AsyncEventFd::try_from(kill_evt).unwrap();
+    // Once this event is readable, exit. Exiting this future will cause the main loop to
+    // break and the device process to exit.
+    kill_evt.next().await;
+}
+
+async fn handle_queue(
+    mut mem: GuestMemory,
+    mut queue: Queue,
+    queue_evt: EventFd,
+    interrupt: Rc<RefCell<Interrupt>>,
+    disk_image: Box<dyn DiskFile>,
+    disk_size: Arc<Mutex<u64>>,
+    read_only: bool,
+    sparse: bool,
+) {
+    let mut desc_mem = mem.clone();
+    let mut inflate_queue_evt = AsyncEventFd::try_from(queue_evt).unwrap();
+    let mut desc_stream = queue.stream(&mut desc_mem, &mut inflate_queue_evt);
+    while let Some(avail_desc) = desc_stream.next().await {
+        let desc_index = avail_desc.index;
+
+        let size = disk_size.lock();
+
+        let len = match Worker::process_one_request(
+            avail_desc,
+            read_only,
+            sparse,
+            &mut *disk_image,
+            *size,
+            flush_timer,
+            flush_timer_armed,
+            &mem,
+        ) {
+            Ok(len) => len,
+            Err(e) => {
+                error!("block: failed to handle request: {}", e);
+                0
+            }
+        };
+
+        queue.add_used(&mem, desc_index, len as u32);
+        interrupt
+            .borrow_mut()
+            .signal_used_queue(desc_stream.queue_mut().vector);
     }
 }
 
