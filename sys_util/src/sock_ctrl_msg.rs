@@ -103,7 +103,29 @@ impl CmsgBuffer {
     }
 }
 
-fn raw_sendmsg<D: IntoIovec>(fd: RawFd, out_data: D, out_fds: &[RawFd]) -> Result<usize> {
+/// Wrapper for a cmsg header, buffer, and iovec. Created from `create_cmsg` and the message can be
+/// passed back to the kernel's `sendmsg`.
+pub struct Cmsg {
+    hdr: msghdr,
+    _buffer: CmsgBuffer,
+    _iovec: Vec<libc::iovec>,
+}
+
+impl Cmsg {
+    /// Returns a raw pointer to the message header for passing to the `sendmsg`.
+    pub fn header(&self) -> &msghdr {
+        &self.hdr
+    }
+
+    /// Returns a raw pointer to the message header for passing to the `sendmsg`.
+    pub fn header_mut(&mut self) -> &mut msghdr {
+        &mut self.hdr
+    }
+}
+
+/// This function creates a raw pointer which is safe. However, dereferencing it later (or passing
+/// it to the kernel) is unsafe and the user must ensure that the data outlive the msghdr.
+pub fn send_cmsg<D: IntoIovec>(out_data: D, out_fds: &[RawFd]) -> Cmsg {
     let cmsg_capacity = CMSG_SPACE!(size_of::<RawFd>() * out_fds.len());
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
@@ -141,9 +163,21 @@ fn raw_sendmsg<D: IntoIovec>(fd: RawFd, out_data: D, out_fds: &[RawFd]) -> Resul
         msg.msg_controllen = cmsg_capacity;
     }
 
+    Cmsg {
+        hdr: msg,
+        _buffer: cmsg_buffer,
+        _iovec: iovec,
+    }
+}
+
+fn raw_sendmsg<D: IntoIovec>(fd: RawFd, out_data: D, out_fds: &[RawFd]) -> Result<usize> {
     // Safe because the msghdr was properly constructed from valid (or null) pointers of the
-    // indicated length and we check the return value.
-    let write_count = unsafe { sendmsg(fd, &msg, MSG_NOSIGNAL) };
+    // indicated length and we check the return value. And the msghdr doesn't outlive the data
+    // passed in.
+    let write_count = unsafe {
+        let msg = send_cmsg(out_data, out_fds);
+        sendmsg(fd, msg.header(), MSG_NOSIGNAL)
+    };
 
     if write_count == -1 {
         Err(Error::last())
@@ -152,7 +186,9 @@ fn raw_sendmsg<D: IntoIovec>(fd: RawFd, out_data: D, out_fds: &[RawFd]) -> Resul
     }
 }
 
-fn raw_recvmsg(fd: RawFd, in_data: &mut [u8], in_fds: &mut [RawFd]) -> Result<(usize, usize)> {
+/// This function creates a raw pointer which is safe. However, dereferencing it later (or passing
+/// it to the kernel) is unsafe and the user must ensure that the data outlive the msghdr.
+pub fn recv_cmsg(in_data: &mut [u8], in_fds: &mut [RawFd]) -> Cmsg {
     let cmsg_capacity = CMSG_SPACE!(size_of::<RawFd>() * in_fds.len());
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
@@ -176,19 +212,30 @@ fn raw_recvmsg(fd: RawFd, in_data: &mut [u8], in_fds: &mut [RawFd]) -> Result<(u
         msg.msg_controllen = cmsg_capacity;
     }
 
+    Cmsg {
+        hdr: msg,
+        _buffer: cmsg_buffer,
+        _iovec: vec![iovec],
+    }
+}
+
+fn raw_recvmsg(fd: RawFd, in_data: &mut [u8], in_fds: &mut [RawFd]) -> Result<(usize, usize)> {
     // Safe because the msghdr was properly constructed from valid (or null) pointers of the
     // indicated length and we check the return value.
-    let total_read = unsafe { recvmsg(fd, &mut msg, 0) };
+    let mut msg = recv_cmsg(in_data, in_fds);
+
+    let total_read = unsafe { recvmsg(fd, msg.header_mut(), 0) };
 
     if total_read == -1 {
         return Err(Error::last());
     }
 
-    if total_read == 0 && msg.msg_controllen < size_of::<cmsghdr>() {
+    let hdr = msg.header_mut();
+    if total_read == 0 && hdr.msg_controllen < size_of::<cmsghdr>() {
         return Ok((0, 0));
     }
 
-    let mut cmsg_ptr = msg.msg_control as *mut cmsghdr;
+    let mut cmsg_ptr = hdr.msg_control as *mut cmsghdr;
     let mut in_fds_count = 0;
     while !cmsg_ptr.is_null() {
         // Safe because we checked that cmsg_ptr was non-null, and the loop is constructed such that
@@ -207,7 +254,7 @@ fn raw_recvmsg(fd: RawFd, in_data: &mut [u8], in_fds: &mut [RawFd]) -> Result<(u
             in_fds_count += fd_count;
         }
 
-        cmsg_ptr = get_next_cmsg(&msg, &cmsg, cmsg_ptr);
+        cmsg_ptr = get_next_cmsg(&hdr, &cmsg, cmsg_ptr);
     }
 
     Ok((total_read as usize, in_fds_count))
