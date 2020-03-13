@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The executor runs all given futures to completion. Futures register wakers associated with file
-//! descriptors. The wakers will be called when the FD becomes readable or writable depending on
-//! the situation.
+//! The executor runs all given futures to completion. Futures register wakers associated with
+//! io_uring operations. A waker is called when the set of uring ops the waker is waiting on
+//! completes.
 //!
-//! `FdExecutor` is meant to be used with the `futures-rs` crate that provides combinators and
+//! `URingExecutor` is meant to be used with the `futures-rs` crate that provides combinators and
 //! utility functions to combine futures.
 //!
 //! # Example of starting the framework and running a future:
@@ -21,7 +21,7 @@
 //!
 //! let mut ex = cros_async::empty_executor().expect("Failed creating executor");
 //! let x = Rc::new(RefCell::new(0));
-//! cros_async::fd_executor::add_future(Box::pin(my_async(x.clone())));
+//! cros_async::uring_executor::add_future(Box::pin(my_async(x.clone())));
 //! ex.run();
 //! assert_eq!(*x.borrow(), 4);
 //! ```
@@ -31,16 +31,16 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display};
 use std::fs::File;
 use std::future::Future;
-use std::os::unix::io::FromRawFd;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::task::Waker;
 
-use sys_util::{PollContext, WatchingEvents};
+use io_uring::URingContext;
+use sys_util::WatchingEvents;
 
 use crate::executor::{ExecutableFuture, Executor, FutureList};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Error {
     /// Attempts to create two Executors on the same thread fail.
     AttemptedDuplicateExecutor,
@@ -49,11 +49,13 @@ pub enum Error {
     /// Failed accessing the thread local storage for wakers.
     InvalidContext,
     /// Creating a context to wait on FDs failed.
-    CreatingContext(sys_util::Error),
-    /// PollContext failure.
-    PollContextError(sys_util::Error),
+    CreatingContext(io_uring::Error),
+    /// URingContext failure.
+    URingContextError(io_uring::Error),
     /// Failed to submit the waker to the polling context.
-    SubmittingWaker(sys_util::Error),
+    SubmittingWaker(io_uring::Error),
+    /// Failed to submit or wait for io_uring events.
+    URingEnter(io_uring::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -68,23 +70,22 @@ impl Display for Error {
                 f,
                 "Invalid context, was the Fd executor created successfully?"
             ),
-            CreatingContext(e) => write!(f, "An error creating the fd waiting context: {}.", e),
-            PollContextError(e) => write!(f, "PollContext failure: {}", e),
-            SubmittingWaker(e) => write!(f, "An error adding to the Aio context: {}.", e),
+            CreatingContext(e) => write!(f, "Error creating the fd waiting context: {}.", e),
+            URingContextError(e) => write!(f, "URingContext failure: {}", e),
+            SubmittingWaker(e) => write!(f, "Error adding to the Aio context: {}.", e),
+            URingEnter(e) => write!(f, "URing::enter: {}", e),
         }
     }
 }
 
-// Temporary vectors of new additions to the executor.
-
 // Tracks active wakers and the futures they are associated with.
-thread_local!(static STATE: RefCell<Option<FdWakerState>> = RefCell::new(None));
+thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
 
-fn add_waker(fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<()> {
+fn notify_fd_ready(fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<()> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
-            state.add_waker(fd, waker, events)
+            state.add_fd(fd, waker, events)
         } else {
             Err(Error::InvalidContext)
         }
@@ -96,7 +97,7 @@ fn add_waker(fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<()> {
 /// next time the future is polled. If the fd is closed, there is a race where another FD can be
 /// opened on top of it causing the next poll to access the new target file.
 pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<()> {
-    add_waker(fd, waker, WatchingEvents::empty().set_read())
+    notify_fd_ready(fd, waker, WatchingEvents::empty().set_read())
 }
 
 /// Tells the waking system to wake `waker` when `fd` becomes writable.
@@ -104,7 +105,7 @@ pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<()> {
 /// next time the future is polled. If the fd is closed, there is a race where another FD can be
 /// opened on top of it causing the next poll to access the new target file.
 pub fn add_write_waker(fd: RawFd, waker: Waker) -> Result<()> {
-    add_waker(fd, waker, WatchingEvents::empty().set_write())
+    notify_fd_ready(fd, waker, WatchingEvents::empty().set_write())
 }
 
 /// Adds a new top level future to the Executor.
@@ -122,32 +123,32 @@ pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
 }
 
 // Tracks active wakers and associates wakers with the futures that registered them.
-struct FdWakerState {
-    poll_ctx: PollContext<u64>,
+struct RingWakerState {
+    ctx: URingContext,
     token_map: BTreeMap<u64, (File, Waker)>,
     next_token: u64, // Next token for adding to the context.
     new_futures: VecDeque<ExecutableFuture<()>>,
 }
 
-impl FdWakerState {
+impl RingWakerState {
     fn new() -> Result<Self> {
-        Ok(FdWakerState {
-            poll_ctx: PollContext::new().map_err(Error::CreatingContext)?,
+        Ok(RingWakerState {
+            ctx: URingContext::new(256).map_err(Error::CreatingContext)?,
             token_map: BTreeMap::new(),
             next_token: 0,
             new_futures: VecDeque::new(),
         })
     }
 
-    // Adds an fd that, when signaled, will trigger the given waker.
-    fn add_waker(&mut self, fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<()> {
+    // Adds an fd that, when and event is ready, will trigger the given waker.
+    fn add_fd(&mut self, fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<()> {
         let duped_fd = unsafe {
             // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
             // will only be added to the poll loop.
             File::from_raw_fd(dup_fd(fd)?)
         };
-        self.poll_ctx
-            .add_fd_with_events(&duped_fd, events, self.next_token)
+        self.ctx
+            .add_poll_fd(duped_fd.as_raw_fd(), events, self.next_token)
             .map_err(Error::SubmittingWaker)?;
         let next_token = self.next_token;
         self.token_map.insert(next_token, (duped_fd, waker));
@@ -157,10 +158,10 @@ impl FdWakerState {
 
     // Waits until one of the FDs is readable and wakes the associated waker.
     fn wait_wake_event(&mut self) -> Result<()> {
-        let events = self.poll_ctx.wait().map_err(Error::PollContextError)?;
-        for e in events.iter() {
-            if let Some((fd, waker)) = self.token_map.remove(&e.token()) {
-                self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
+        let events = self.ctx.enter().map_err(Error::URingEnter)?;
+        for (token, _result) in events {
+            // TODO - store the result and make accessible to the future.
+            if let Some((_fd, waker)) = self.token_map.remove(&token) {
                 waker.wake_by_ref();
             }
         }
@@ -169,13 +170,13 @@ impl FdWakerState {
 }
 
 /// Runs futures to completion on a single thread. Futures are allowed to block on file descriptors
-/// only. Futures can only block on FDs becoming readable or writable. `FdExecutor` is meant to be
+/// only. Futures can only block on FDs becoming readable or writable. `URingExecutor` is meant to be
 /// used where a poll or select loop would be used otherwise.
-pub(crate) struct FdExecutor<T: FutureList> {
+pub(crate) struct URingExecutor<T: FutureList> {
     futures: T,
 }
 
-impl<T: FutureList> Executor for FdExecutor<T> {
+impl<T: FutureList> Executor for URingExecutor<T> {
     type Output = Result<T::Output>;
 
     fn run(&mut self) -> Self::Output {
@@ -204,17 +205,17 @@ impl<T: FutureList> Executor for FdExecutor<T> {
     }
 }
 
-impl<T: FutureList> FdExecutor<T> {
+impl<T: FutureList> URingExecutor<T> {
     /// Create a new executor.
-    pub fn new(futures: T) -> Result<FdExecutor<T>> {
+    pub fn new(futures: T) -> Result<URingExecutor<T>> {
         STATE.with(|state| {
             if state.borrow().is_some() {
                 return Err(Error::AttemptedDuplicateExecutor);
             }
-            state.replace(Some(FdWakerState::new()?));
+            state.replace(Some(RingWakerState::new()?));
             Ok(())
         })?;
-        Ok(FdExecutor { futures })
+        Ok(URingExecutor { futures })
     }
 
     // Add any new futures and wakers to the lists.
@@ -230,7 +231,7 @@ impl<T: FutureList> FdExecutor<T> {
     }
 }
 
-impl<T: FutureList> Drop for FdExecutor<T> {
+impl<T: FutureList> Drop for URingExecutor<T> {
     fn drop(&mut self) {
         STATE.with(|state| {
             state.replace(None);
