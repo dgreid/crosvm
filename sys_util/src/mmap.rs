@@ -174,6 +174,29 @@ impl MemoryMapping {
     /// * `fd` - File descriptor to mmap from.
     /// * `size` - Size of memory region in bytes.
     /// * `offset` - Offset in bytes from the beginning of `fd` to start the mmap.
+    /// * `flags` - flags passed directly to mmap.
+    /// * `prot` - Protection (e.g. readable/writable) of the memory region.
+    ///
+    /// # Safety
+    /// Must call with `flags` that don't violate other safety guarantees.
+    pub unsafe fn from_fd_offset_flags(
+        fd: &dyn AsRawFd,
+        size: usize,
+        offset: usize,
+        flags: c_int,
+        prot: Protection,
+    ) -> Result<MemoryMapping> {
+        // This is safe because we are creating an anonymous mapping in a place not already used by
+        // any other area in this process.
+        MemoryMapping::try_mmap(None, size, prot.into(), flags, Some((fd, offset)))
+    }
+
+    /// Maps the `size` bytes starting at `offset` bytes of the given `fd` as read/write.
+    ///
+    /// # Arguments
+    /// * `fd` - File descriptor to mmap from.
+    /// * `size` - Size of memory region in bytes.
+    /// * `offset` - Offset in bytes from the beginning of `fd` to start the mmap.
     /// * `prot` - Protection (e.g. readable/writable) of the memory region.
     pub fn from_fd_offset_protection(
         fd: &dyn AsRawFd,
