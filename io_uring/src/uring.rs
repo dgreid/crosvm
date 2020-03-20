@@ -8,7 +8,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use sys_util::{MemoryMapping, Protection, WatchingEvents};
+use sys_util::{Cmsg, MemoryMapping, Protection, WatchingEvents};
 
 use crate::bindings::*;
 use crate::syscalls::*;
@@ -257,6 +257,48 @@ impl URingContext {
             user_data,
             IORING_OP_READV as u8,
         )
+    }
+
+    /// Sends a message to the given `fd`. Sending ancillary data is not supportied by the
+    /// kernel's uring interface.
+    /// # Safety
+    /// The caller must ensure that the data pointed to by `msg` and `msg` itself live until the
+    /// completion of this send is returned from `enter`.
+    pub unsafe fn add_sendmsg(&mut self, fd: RawFd, msg: &Cmsg, user_data: u64) -> Result<()> {
+        self.with_next_sqe(|sqe, _iovec| {
+            sqe.opcode = IORING_OP_SENDMSG as u8;
+            sqe.fd = fd;
+            sqe.user_data = user_data;
+            sqe.addr = msg.header() as *const _ as u64;
+
+            sqe.len = 0;
+            sqe.__bindgen_anon_1.off = 0;
+            sqe.__bindgen_anon_3.__bindgen_anon_1.buf_index = 0;
+            sqe.__bindgen_anon_2.rw_flags = 0;
+            sqe.ioprio = 0;
+            sqe.flags = 0;
+        })
+    }
+
+    /// Recieves a message from the given `fd`. Receiving ancillary data is not supportied by the
+    /// kernel's uring interface.
+    /// # Safety
+    /// The caller must ensure that the data pointed to by `msg` and `msg` itself live until the
+    /// completion of this send is returned from `enter`.
+    pub unsafe fn add_recvmsg(&mut self, fd: RawFd, msg: &mut Cmsg, user_data: u64) -> Result<()> {
+        self.with_next_sqe(|sqe, _iovec| {
+            sqe.opcode = IORING_OP_RECVMSG as u8;
+            sqe.fd = fd;
+            sqe.user_data = user_data;
+            sqe.addr = msg.header_mut() as *const _ as u64;
+
+            sqe.len = 1;
+            sqe.__bindgen_anon_1.off = 0;
+            sqe.__bindgen_anon_3.__bindgen_anon_1.buf_index = 0;
+            sqe.__bindgen_anon_2.rw_flags = 0;
+            sqe.ioprio = 0;
+            sqe.flags = 0;
+        })
     }
 
     /// `add_fsync` syncs all completed operations, the ordering with in-flight async ops is not
@@ -533,6 +575,7 @@ impl Iterator for CompleteQueueState {
 mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
+    use std::os::unix::net::UnixDatagram;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -695,6 +738,43 @@ mod tests {
 
         let new_size = std::fs::metadata(&file_path).unwrap().len() as usize;
         assert_eq!(new_size, set_size);
+    }
+
+    #[test]
+    fn sendmsg() {
+        let (send, recv) = UnixDatagram::pair().unwrap();
+
+        let mut uring = URingContext::new(16).unwrap();
+
+        let buf = [0u8; 4096];
+        let sent_msg = sys_util::send_cmsg(&buf[..], &[]);
+
+        let mut rbuf = [0u8; 4096];
+        let mut rfds: [RawFd; 3] = [0; 3];
+        // Should fail as fds can't be sent because ancillary data is banned when using uring.
+        let mut recv_msg = sys_util::recv_cmsg(&mut rbuf[..], &mut rfds[..]);
+
+        unsafe {
+            uring.add_sendmsg(send.as_raw_fd(), &sent_msg, 77).unwrap();
+            uring
+                .add_recvmsg(recv.as_raw_fd(), &mut recv_msg, 78)
+                .unwrap();
+        }
+        let mut count = 0;
+        loop {
+            let events = uring.enter().unwrap();
+            for event in events {
+                count += 1;
+                match event {
+                    (77, len) => assert_eq!(len, buf.len() as i32),
+                    (78, res) => assert_eq!(res, -libc::EINVAL),
+                    (d, len) => panic!("Unknown user data: {} ret = {}", d, len),
+                }
+            }
+            if count == 2 {
+                break;
+            }
+        }
     }
 
     #[test]
