@@ -3,8 +3,9 @@
 // found in the LICENSE file.
 
 use std::cmp::{max, min};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display};
-use std::io::{self, Write};
+use std::io::{self, IoSlice, Write};
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
@@ -13,13 +14,14 @@ use std::thread;
 use std::time::Duration;
 use std::u32;
 
-use data_model::{DataInit, Le16, Le32, Le64};
+use data_model::{DataInit, Le16, Le32, Le64, VolatileSlice};
 use disk::DiskFile;
+use io_uring::{self, URingContext};
 use msg_socket::{MsgReceiver, MsgSender};
 use sync::Mutex;
 use sys_util::Error as SysError;
 use sys_util::Result as SysResult;
-use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, PollContext, PollToken, TimerFd};
+use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, IntoIovec, PollContext, TimerFd};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_control::{DiskControlCommand, DiskControlResponseSocket, DiskControlResult};
 
@@ -29,7 +31,8 @@ use super::{
 };
 
 const QUEUE_SIZE: u16 = 256;
-const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
+const NUM_QUEUES: u16 = 8;
+const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES as usize];
 const SECTOR_SHIFT: u8 = 9;
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 const MAX_DISCARD_SECTORS: u32 = u32::MAX;
@@ -55,6 +58,7 @@ const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
 const VIRTIO_BLK_F_RO: u32 = 5;
 const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
 const VIRTIO_BLK_F_FLUSH: u32 = 9;
+const VIRTIO_BLK_F_MQ: u32 = 12;
 const VIRTIO_BLK_F_DISCARD: u32 = 13;
 const VIRTIO_BLK_F_WRITE_ZEROES: u32 = 14;
 
@@ -91,7 +95,8 @@ struct virtio_blk_config {
     blk_size: Le32,
     topology: virtio_blk_topology,
     writeback: u8,
-    unused0: [u8; 3],
+    unused0: u8,
+    num_queues: Le16,
     max_discard_sectors: Le32,
     max_discard_seg: Le32,
     discard_sector_alignment: Le32,
@@ -133,30 +138,17 @@ enum ExecuteError {
     Descriptor(DescriptorError),
     Read(io::Error),
     WriteStatus(io::Error),
-    /// Error arming the flush timer.
-    Flush(io::Error),
-    ReadIo {
-        length: usize,
-        sector: u64,
-        desc_error: io::Error,
-    },
     TimerFd(SysError),
-    WriteIo {
-        length: usize,
-        sector: u64,
-        desc_error: io::Error,
-    },
     DiscardWriteZeroes {
         ioerr: Option<io::Error>,
         sector: u64,
         num_sectors: u32,
         flags: u32,
     },
-    ReadOnly {
-        request_type: u32,
-    },
+    ReadOnly,
     OutOfRange,
     MissingStatus,
+    URing(std::io::Error),
     Unsupported(u32),
 }
 
@@ -168,26 +160,7 @@ impl Display for ExecuteError {
             Descriptor(e) => write!(f, "virtio descriptor error: {}", e),
             Read(e) => write!(f, "failed to read message: {}", e),
             WriteStatus(e) => write!(f, "failed to write request status: {}", e),
-            Flush(e) => write!(f, "failed to flush: {}", e),
-            ReadIo {
-                length,
-                sector,
-                desc_error,
-            } => write!(
-                f,
-                "io error reading {} bytes from sector {}: {}",
-                length, sector, desc_error,
-            ),
             TimerFd(e) => write!(f, "{}", e),
-            WriteIo {
-                length,
-                sector,
-                desc_error,
-            } => write!(
-                f,
-                "io error writing {} bytes to sector {}: {}",
-                length, sector, desc_error,
-            ),
             DiscardWriteZeroes {
                 ioerr: Some(ioerr),
                 sector,
@@ -208,9 +181,10 @@ impl Display for ExecuteError {
                 "failed to perform discard or write zeroes; sector={} num_sectors={} flags={}",
                 sector, num_sectors, flags,
             ),
-            ReadOnly { request_type } => write!(f, "read only; request_type={}", request_type),
+            ReadOnly => write!(f, "read only disk"),
             OutOfRange => write!(f, "out of range"),
             MissingStatus => write!(f, "not enough space in descriptor chain to write status"),
+            URing(e) => write!(f, "uring operation failed {}", e),
             Unsupported(n) => write!(f, "unsupported ({})", n),
         }
     }
@@ -222,110 +196,606 @@ impl ExecuteError {
             ExecuteError::Descriptor(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Read(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::WriteStatus(_) => VIRTIO_BLK_S_IOERR,
-            ExecuteError::Flush(_) => VIRTIO_BLK_S_IOERR,
-            ExecuteError::ReadIo { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::TimerFd(_) => VIRTIO_BLK_S_IOERR,
-            ExecuteError::WriteIo { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::DiscardWriteZeroes { .. } => VIRTIO_BLK_S_IOERR,
-            ExecuteError::ReadOnly { .. } => VIRTIO_BLK_S_IOERR,
+            ExecuteError::ReadOnly => VIRTIO_BLK_S_IOERR,
             ExecuteError::OutOfRange { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::MissingStatus => VIRTIO_BLK_S_IOERR,
+            ExecuteError::URing(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Unsupported(_) => VIRTIO_BLK_S_UNSUPP,
         }
     }
 }
 
+// The state that started a read or write op.
+// This state is kept so that a partial read or write can be continued.
+struct RwOperation {
+    // The original iovecs
+    iovecs: VecDeque<libc::iovec>,
+    // The offset in to the file
+    offset: u64,
+    // length of the entire transaction.
+    len: usize,
+}
+
+impl RwOperation {
+    fn bytes_processed(mut self, len_processed: usize) -> Self {
+        // assert is acceptable as all callers are local and guarantee this case never happens.
+        assert!(len_processed < self.len);
+        self.offset = self.offset + len_processed as u64;
+        self.len = self.len - len_processed as usize;
+
+        let mut iovecs_finished = 0;
+        let mut consumed = len_processed;
+        for iovec in self.iovecs.iter() {
+            if iovec.iov_len <= consumed {
+                iovecs_finished += 1;
+                consumed -= iovec.iov_len;
+            } else {
+                break;
+            }
+        }
+
+        while iovecs_finished > 0 {
+            self.iovecs.pop_front().unwrap();
+            iovecs_finished -= 1;
+        }
+
+        self.iovecs[0].iov_len -= consumed;
+        unsafe {
+            // Safe because we know the original length was valid and that the new length is <= to
+            // that.
+            self.iovecs[0].iov_base = (self.iovecs[0].iov_base as *mut u8).add(consumed) as *mut _;
+        }
+
+        self
+    }
+}
+
+enum OperationType {
+    FSync,
+    PunchHole {
+        offset: u64,
+        length: u64,
+    },
+    Read(RwOperation),
+    Write(RwOperation),
+    WriteZeros {
+        offset: u64,
+        length: u64,
+        sector: u64,
+        num_sectors: u32,
+        flags: u32,
+    },
+}
+
+impl OperationType {
+    // Returns true if this operation is allowed on read-only disks.
+    fn valid_read_only(&self) -> bool {
+        match self {
+            OperationType::Read(_) => true, // Read works on read-only disks.
+            _ => {
+                // Everything else is invalid on read-only disks.
+                false
+            }
+        }
+    }
+}
+
+type OpResult<T> = std::result::Result<T, ExecuteError>;
+
+// An operation that has been validated for a given disk.
+struct ValidOperationType(OperationType);
+
+impl ValidOperationType {
+    fn try_from(
+        op: OperationType,
+        disk_size: u64,
+        read_only: bool,
+        sparse: bool,
+    ) -> OpResult<ValidOperationType> {
+        /// Checks that a request accesses only data within the disk's current size.
+        /// All parameters are in units of bytes.
+        fn check_range(
+            io_start: u64,
+            io_length: u64,
+            disk_size: u64,
+        ) -> result::Result<(), ExecuteError> {
+            let io_end = io_start
+                .checked_add(io_length)
+                .ok_or(ExecuteError::OutOfRange)?;
+            if io_end > disk_size {
+                Err(ExecuteError::OutOfRange)
+            } else {
+                Ok(())
+            }
+        }
+
+        if read_only && !op.valid_read_only() {
+            return Err(ExecuteError::ReadOnly);
+        }
+
+        match &op {
+            OperationType::FSync => (), // Always valid.
+            OperationType::PunchHole { offset, length } => {
+                check_range(*offset, *length, disk_size)?
+            }
+            OperationType::Read(rw_op) => check_range(rw_op.offset, rw_op.len as u64, disk_size)?,
+            OperationType::Write(rw_op) => check_range(rw_op.offset, rw_op.len as u64, disk_size)?,
+            OperationType::WriteZeros { offset, length, .. } => {
+                check_range(*offset, *length, disk_size)?
+            }
+        }
+
+        Ok(ValidOperationType(op))
+    }
+}
+
+struct OpIter<'a> {
+    req_type: u32,
+    next_op: Option<OpResult<OperationType>>,
+    reader: Reader<'a>,
+    writer: Writer<'a>,
+}
+
+impl<'a> OpIter<'a> {
+    fn new(mut reader: Reader<'a>, mut writer: Writer<'a>) -> OpResult<OpIter<'a>> {
+        let req_header: virtio_blk_req_header = reader.read_obj().map_err(ExecuteError::Read)?;
+
+        let req_type = req_header.req_type.to_native();
+        let sector = req_header.sector.to_native();
+        let offset = sector
+            .checked_shl(u32::from(SECTOR_SHIFT))
+            .ok_or(ExecuteError::OutOfRange)?;
+
+        let next_op = match req_type {
+            VIRTIO_BLK_T_IN => {
+                let data_len = writer.available_bytes();
+                // TODO(dgreid 3/18) look at all these allocations (Vec for iovec, vec for consuming
+                // each time read is called)...
+                // TODO - fix unwrap and extra allocations here.
+                if data_len == 0 {
+                    None
+                } else {
+                    let iovecs = VolatileSlice::as_iovecs(writer.get_remaining())
+                        .iter()
+                        .cloned()
+                        .collect::<VecDeque<_>>();
+                    let total_len = iovecs.iter().fold(0, |a, iovec| a + iovec.iov_len);
+                    writer.consume_gotten(data_len);
+                    Some(Ok(OperationType::Read(RwOperation {
+                        iovecs,
+                        offset,
+                        len: total_len,
+                    })))
+                }
+            }
+            VIRTIO_BLK_T_OUT => {
+                let data_len = reader.available_bytes();
+                // TODO(dgreid) make reader give the list of addresses in the list without
+                // allocating.
+                // TODO - fix unwrap and extra allocations here.
+                if data_len == 0 {
+                    None
+                } else {
+                    let iovecs = VolatileSlice::as_iovecs(reader.get_remaining())
+                        .iter()
+                        .cloned()
+                        .collect::<VecDeque<_>>();
+                    let total_len = iovecs.iter().fold(0, |a, iovec| a + iovec.iov_len);
+                    reader.consume(data_len);
+                    Some(Ok(OperationType::Write(RwOperation {
+                        iovecs,
+                        offset,
+                        len: total_len,
+                    })))
+                }
+            }
+            VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
+                Self::next_discard_op(req_type, &mut reader)
+            }
+            VIRTIO_BLK_T_FLUSH => Some(Ok(OperationType::FSync)),
+            t => return Err(ExecuteError::Unsupported(t)),
+        };
+        Ok(OpIter {
+            req_type,
+            next_op,
+            reader,
+            writer,
+        })
+    }
+
+    fn get_offset_length(sector: u64, num_sectors: u32) -> OpResult<(u64, u64)> {
+        let offset = sector
+            .checked_shl(u32::from(SECTOR_SHIFT))
+            .ok_or(ExecuteError::OutOfRange)?;
+        let length = u64::from(num_sectors)
+            .checked_shl(u32::from(SECTOR_SHIFT))
+            .ok_or(ExecuteError::OutOfRange)?;
+        Ok((offset, length))
+    }
+
+    fn next_discard_op(req_type: u32, reader: &mut Reader) -> Option<OpResult<OperationType>> {
+        if reader.available_bytes() < size_of::<virtio_blk_discard_write_zeroes>() {
+            return None;
+        }
+        Some(Self::read_next_discard_op(req_type, reader))
+    }
+
+    fn read_next_discard_op(req_type: u32, reader: &mut Reader) -> OpResult<OperationType> {
+        let seg: virtio_blk_discard_write_zeroes = reader.read_obj().map_err(ExecuteError::Read)?;
+
+        let sector = seg.sector.to_native();
+        let num_sectors = seg.num_sectors.to_native();
+        let flags = seg.flags.to_native();
+
+        let valid_flags = if req_type == VIRTIO_BLK_T_WRITE_ZEROES {
+            VIRTIO_BLK_DISCARD_WRITE_ZEROES_FLAG_UNMAP
+        } else {
+            0
+        };
+
+        if (flags & !valid_flags) != 0 {
+            return Err(ExecuteError::DiscardWriteZeroes {
+                ioerr: None,
+                sector,
+                num_sectors,
+                flags,
+            });
+        }
+
+        let (offset, length) = Self::get_offset_length(sector, num_sectors)?;
+
+        if req_type == VIRTIO_BLK_T_DISCARD {
+            Ok(OperationType::PunchHole { offset, length })
+        } else {
+            Ok(OperationType::WriteZeros {
+                offset,
+                length,
+                sector,
+                num_sectors,
+                flags,
+            })
+        }
+    }
+}
+
+impl<'a> Iterator for OpIter<'a> {
+    type Item = OpResult<OperationType>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.next_op.take();
+        self.next_op = match self.req_type {
+            VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
+                Self::next_discard_op(self.req_type, &mut self.reader)
+            }
+            _ => None, // All other requests only generate one operation.
+        };
+        ret
+    }
+}
+
+struct Operation {
+    // The queue the operation is being run for.
+    queue_index: usize,
+    // The descriptor that the operation is being run for.
+    desc_index: u16,
+    // The file being operatied on
+    fd: RawFd,
+    // Op-type specific data.
+    type_: ValidOperationType,
+}
+
+impl Operation {
+    fn new(
+        op_type: OperationType,
+        queue_index: usize,
+        desc_index: u16,
+        fd: RawFd,
+        disk_size: u64,
+        read_only: bool,
+        sparse: bool,
+    ) -> OpResult<Self> {
+        Ok(Operation {
+            queue_index,
+            desc_index,
+            fd,
+            type_: ValidOperationType::try_from(op_type, disk_size, read_only, sparse)?,
+        })
+    }
+}
+
+struct PendingDescriptor {
+    desc_len: usize,
+    pending_op_count: usize,
+    status_byte: *mut u8,
+}
+
+impl PendingDescriptor {
+    fn set_error(&self, err: u8) {
+        unsafe {
+            // Safe as long as the status_byte is valid. This is guaranteed by the caller holding a
+            // guestmemory reference and the pointer being within GuestMemory,
+            *self.status_byte = err;
+        }
+    }
+}
+
+struct URingState {
+    uring_ctx: URingContext,
+    uring_idx: u64,
+    // Map an operation to the queue and descriptor waiting for it.
+    pending_operations: BTreeMap<u64, Operation>,
+    // Map a pending descriptor to the length and the count of ops needed for completion and the
+    // status..
+    pending_descriptors: BTreeMap<(usize, u16), PendingDescriptor>,
+}
+// TODO - Not auto send because the iovecs in the `Operation` have a raw pointer. However, that
+// pointer will always be to guest memory so it can be sent where ever we want.
+unsafe impl Send for URingState {}
+
+impl URingState {
+    fn new(max_ops: usize) -> URingState {
+        URingState {
+            uring_ctx: URingContext::new(max_ops).unwrap(),
+            uring_idx: 0,
+            pending_operations: BTreeMap::new(),
+            pending_descriptors: BTreeMap::new(),
+        }
+    }
+}
+
+enum OpStarted {
+    ASync,
+    Sync,
+}
+
+// TODO - maybe move this to desc_utils: desc.read_write_status(&mem)
+// ->(reader,writer,status_writer)
+fn decompose_desc<'a>(
+    mem: &'a GuestMemory,
+    avail_desc: DescriptorChain<'a>,
+) -> std::result::Result<(Reader<'a>, Writer<'a>, Writer<'a>), ExecuteError> {
+    let reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
+    let mut writer = Writer::new(mem, avail_desc).map_err(ExecuteError::Descriptor)?;
+    // The last byte of the buffer is virtio_blk_req::status.
+    // Split it into a separate Writer so that status_writer is the final byte and
+    // the original writer is left with just the actual block I/O data.
+    let available_bytes = writer.available_bytes();
+    let status_offset = available_bytes
+        .checked_sub(1)
+        .ok_or(ExecuteError::MissingStatus)?;
+    let status_writer = writer.split_at(status_offset);
+    Ok((reader, writer, status_writer))
+}
+
+struct DiskState<'a> {
+    disk_size: u64,
+    read_only: bool,
+    sparse: bool,
+    disk_image: &'a mut dyn DiskFile,
+}
+
 struct Worker {
     interrupt: Interrupt,
     queues: Vec<Queue>,
-    mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
     disk_size: Arc<Mutex<u64>>,
     read_only: bool,
     sparse: bool,
     control_socket: DiskControlResponseSocket,
+    uring_state: URingState,
 }
 
 impl Worker {
-    fn process_one_request(
-        avail_desc: DescriptorChain,
-        read_only: bool,
-        sparse: bool,
-        disk: &mut dyn DiskFile,
-        disk_size: u64,
-        flush_timer: &mut TimerFd,
-        flush_timer_armed: &mut bool,
+    // returns true if the op was complete, false if it needs to wait for uring completions.
+    fn start_op(
         mem: &GuestMemory,
-    ) -> result::Result<usize, ExecuteError> {
-        let mut reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
-        let mut writer = Writer::new(mem, avail_desc).map_err(ExecuteError::Descriptor)?;
-
-        // The last byte of the buffer is virtio_blk_req::status.
-        // Split it into a separate Writer so that status_writer is the final byte and
-        // the original writer is left with just the actual block I/O data.
-        let available_bytes = writer.available_bytes();
-        let status_offset = available_bytes
-            .checked_sub(1)
-            .ok_or(ExecuteError::MissingStatus)?;
-        let mut status_writer = writer.split_at(status_offset);
-
-        let status = match Block::execute_request(
-            &mut reader,
-            &mut writer,
-            read_only,
-            sparse,
-            disk,
-            disk_size,
-            flush_timer,
-            flush_timer_armed,
-        ) {
-            Ok(()) => VIRTIO_BLK_S_OK,
-            Err(e) => {
-                error!("failed executing disk request: {}", e);
-                e.status()
+        op: &Operation,
+        uring_state: &mut URingState,
+        disk_state: &mut DiskState,
+    ) -> io_uring::Result<OpStarted> {
+        match &op.type_.0 {
+            // Safe because we know both guest memory and the fd will live
+            // until we collect the completion.
+            OperationType::FSync => uring_state
+                .uring_ctx
+                .add_fsync(disk_state.disk_image.as_raw_fds()[0], uring_state.uring_idx)
+                .map(|_| OpStarted::ASync),
+            OperationType::PunchHole { offset, length } => {
+                // Since Discard is just a hint and some filesystems may not implement
+                // FALLOC_FL_PUNCH_HOLE, ignore punch_hole errors or attempts to
+                // puch holes in non-sparse files.
+                if !disk_state.sparse {
+                    let _ = disk_state.disk_image.punch_hole(*offset, *length);
+                }
+                // TODO - make this async
+                Ok(OpStarted::Sync)
             }
-        };
-
-        status_writer
-            .write_all(&[status])
-            .map_err(ExecuteError::WriteStatus)?;
-        Ok(available_bytes)
+            OperationType::Read(rw_op) => unsafe {
+                uring_state
+                    .uring_ctx
+                    .add_readv_iter(
+                        rw_op.iovecs.iter().cloned(),
+                        disk_state.disk_image.as_raw_fds()[0],
+                        rw_op.offset,
+                        uring_state.uring_idx,
+                    )
+                    .map(|_| OpStarted::ASync)
+            },
+            OperationType::Write(rw_op) => {
+                /* TODO - should we be flushing this much?
+                // Delay after a write when the file is auto-flushed.
+                let flush_delay = Duration::from_secs(60);
+                if !*flush_timer_armed {
+                    match flush_timer
+                        .reset(flush_delay, None)
+                        .map_err(ExecuteError::TimerFd)
+                    {
+                        Ok(_) => *flush_timer_armed = true,
+                        Err(e) => error!("Failed to set the flush timer{}.", e),
+                    }
+                }
+                */
+                unsafe {
+                    uring_state
+                        .uring_ctx
+                        .add_writev_iter(
+                            rw_op.iovecs.iter().cloned(),
+                            disk_state.disk_image.as_raw_fds()[0],
+                            rw_op.offset,
+                            uring_state.uring_idx,
+                        )
+                        .map(|_| OpStarted::ASync)
+                }
+            }
+            OperationType::WriteZeros {
+                offset,
+                length,
+                sector,
+                num_sectors,
+                flags,
+            } => {
+                //TODO async.
+                disk_state
+                    .disk_image
+                    .write_zeroes_all_at(*offset, *length as usize)
+                    .map_err(|e| ExecuteError::DiscardWriteZeroes {
+                        ioerr: Some(e),
+                        sector: *sector,
+                        num_sectors: *num_sectors,
+                        flags: *flags,
+                    })
+                    .unwrap(); //TODO -can fail here
+                               // TODO - make this async and not return here
+                Ok(OpStarted::Sync)
+            }
+        }
     }
 
     fn process_queue(
         &mut self,
+        mem: &GuestMemory,
         queue_index: usize,
         flush_timer: &mut TimerFd,
         flush_timer_armed: &mut bool,
     ) {
-        let queue = &mut self.queues[queue_index];
+        // TODO weird lock trickery to avoid borrowing self.
+        let local_disk_size_lock = self.disk_size.clone();
+        let disk_size = local_disk_size_lock.lock();
 
-        let disk_size = self.disk_size.lock();
-
-        while let Some(avail_desc) = queue.pop(&self.mem) {
-            queue.set_notify(&self.mem, false);
+        while let Some(avail_desc) = self.queues[queue_index].pop(mem) {
+            self.queues[queue_index].set_notify(mem, false);
             let desc_index = avail_desc.index;
 
-            let len = match Worker::process_one_request(
-                avail_desc,
-                self.read_only,
-                self.sparse,
-                &mut *self.disk_image,
-                *disk_size,
-                flush_timer,
-                flush_timer_armed,
-                &self.mem,
-            ) {
-                Ok(len) => len,
+            // save parts of self that are used to bulid the closure which is borrowed during the
+            // loop where a mutable borrow of self is needed. Both `read_only` and `sparse` are
+            // const for the lifetime of the device so sampling them here doesn't hurt.
+            let mut disk_state = DiskState {
+                disk_size: *disk_size,
+                read_only: self.read_only,
+                sparse: self.sparse,
+                disk_image: &mut *self.disk_image,
+            };
+
+            /*
+            // TODO (maybe)
+            // commands are from the descriptor, N commands per descriptor
+            // operations are uring ops, M operation per command
+            // avail_desc -> block_desc(reader,writer,ops) -> ops -> pending or complete descriptor
+            BlockDescriptor::new(mem, avail_desc)
+                .and_then(|bd| {
+                let commands = bd.command_iterator();
+                for each command in the commands, get a list of ops needed, start them.
+                maybe, disk.start_command()?? impls of start command for composite,sparse, etc. Each
+                can decide to be async or not.  start_command can return an iterator of pending ops
+                })
+            */
+
+            // TODO unwrap
+            let (reader, writer, status_writer) = decompose_desc(mem, avail_desc).unwrap();
+            let status_addr = status_writer.first_offset().unwrap();
+            let available_bytes = writer.available_bytes();
+
+            // Get a list of operations requested in this descriptor.
+            let op_iter = match OpIter::new(reader, writer) {
+                Ok(o) => o,
                 Err(e) => {
+                    self.queues[queue_index].add_used(mem, desc_index, available_bytes as u32);
+                    self.queues[queue_index].trigger_interrupt(mem, &self.interrupt);
                     error!("block: failed to handle request: {}", e);
-                    0
+                    continue;
                 }
             };
 
-            queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
-            queue.set_notify(&self.mem, true);
+            let mut num_async_ops = 0;
+            // TODO - do something with errors besides filter and drop.
+            for op_type in op_iter.filter(|r| r.is_ok()) {
+                // TODO unwrap of new
+                let op = Operation::new(
+                    op_type.unwrap(),
+                    queue_index,
+                    desc_index,
+                    disk_state.disk_image.as_raw_fds()[0], // TODO, composite etc.
+                    *disk_size,
+                    disk_state.read_only,
+                    disk_state.sparse,
+                )
+                .unwrap();
+                'free_sqe: loop {
+                    match Self::start_op(mem, &op, &mut self.uring_state, &mut disk_state) {
+                        Ok(OpStarted::ASync) => {
+                            num_async_ops += 1;
+                            self.uring_state
+                                .pending_operations
+                                .insert(self.uring_state.uring_idx, op);
+                            self.uring_state.uring_idx = self.uring_state.uring_idx.wrapping_add(1);
+                            break 'free_sqe;
+                        }
+                        Ok(OpStarted::Sync) => break 'free_sqe,
+                        // If there isn't space to submit more operations, block processing some
+                        // completions.
+                        Err(io_uring::Error::NoSpace) => {
+                            let queues = &mut self.queues;
+                            let interrupt = &self.interrupt;
+                            Worker::handle_uring_ready(
+                                &mut self.uring_state,
+                                |queue_index, desc_index, len| {
+                                    let queue = &mut queues[queue_index];
+                                    queue.add_used(mem, desc_index, len as u32);
+                                    queue.trigger_interrupt(mem, interrupt);
+                                },
+                            )
+                            .unwrap(); // TODO - .map_err(ExecuteError::URing)?,
+                            continue;
+                        }
+
+                        Err(e) => {
+                            error!("block: failed to submit uring operation: {}", e);
+                            break 'free_sqe; //  TODO, report this error Complete with an error
+                        }
+                    }
+                }
+            }
+            if num_async_ops > 0 {
+                // There are async ops pending, remember to return the used descriptor when all the
+                // operations complete.
+                let pending_descriptor = PendingDescriptor {
+                    desc_len: available_bytes,
+                    pending_op_count: num_async_ops,
+                    status_byte: status_addr as *mut u8,
+                };
+                pending_descriptor.set_error(VIRTIO_BLK_S_OK);
+                self.uring_state
+                    .pending_descriptors
+                    .insert((queue_index, desc_index), pending_descriptor);
+            } else {
+                // If not pending any ops, release the descriptor.
+                let queue = &mut self.queues[queue_index];
+                queue.add_used(mem, desc_index, available_bytes as u32);
+                queue.trigger_interrupt(mem, &self.interrupt);
+            }
+
+            self.queues[queue_index].set_notify(mem, true);
         }
     }
 
@@ -357,15 +827,13 @@ impl Worker {
         DiskControlResult::Ok
     }
 
-    fn run(&mut self, queue_evt: EventFd, kill_evt: EventFd) {
-        #[derive(PollToken)]
-        enum Token {
-            FlushTimer,
-            QueueAvailable,
-            ControlRequest,
-            InterruptResample,
-            Kill,
-        }
+    fn run(&mut self, mem: &GuestMemory, queue_evts: Vec<EventFd>, kill_evt: EventFd) {
+        const FLUSH_TIMER: u64 = 0u64;
+        const CONTROL_REQUEST: u64 = 1u64;
+        const INTERRUPT_RESAMPLE: u64 = 2u64;
+        const KILL: u64 = 3u64;
+        const URING_READY: u64 = 4u64;
+        const QUEUE_AVAILABLE: u64 = 5u64;
 
         let mut flush_timer = match TimerFd::new() {
             Ok(t) => t,
@@ -376,12 +844,12 @@ impl Worker {
         };
         let mut flush_timer_armed = false;
 
-        let poll_ctx: PollContext<Token> = match PollContext::build_with(&[
-            (&flush_timer, Token::FlushTimer),
-            (&queue_evt, Token::QueueAvailable),
-            (&self.control_socket, Token::ControlRequest),
-            (self.interrupt.get_resample_evt(), Token::InterruptResample),
-            (&kill_evt, Token::Kill),
+        let poll_ctx: PollContext<u64> = match PollContext::build_with(&[
+            (&flush_timer, FLUSH_TIMER),
+            (&self.control_socket, CONTROL_REQUEST),
+            (self.interrupt.get_resample_evt(), INTERRUPT_RESAMPLE),
+            (&kill_evt, KILL),
+            (&self.uring_state.uring_ctx, URING_READY),
         ]) {
             Ok(pc) => pc,
             Err(e) => {
@@ -389,6 +857,10 @@ impl Worker {
                 return;
             }
         };
+
+        for (i, evt) in queue_evts.iter().enumerate() {
+            poll_ctx.add(evt, QUEUE_AVAILABLE + i as u64).unwrap();
+        }
 
         'poll: loop {
             let events = match poll_ctx.wait() {
@@ -402,7 +874,7 @@ impl Worker {
             let mut needs_config_interrupt = false;
             for event in events.iter_readable() {
                 match event.token() {
-                    Token::FlushTimer => {
+                    FLUSH_TIMER => {
                         if let Err(e) = self.disk_image.fsync() {
                             error!("Failed to flush the disk: {}", e);
                             break 'poll;
@@ -412,14 +884,7 @@ impl Worker {
                             break 'poll;
                         }
                     }
-                    Token::QueueAvailable => {
-                        if let Err(e) = queue_evt.read() {
-                            error!("failed reading queue EventFd: {}", e);
-                            break 'poll;
-                        }
-                        self.process_queue(0, &mut flush_timer, &mut flush_timer_armed);
-                    }
-                    Token::ControlRequest => {
+                    CONTROL_REQUEST => {
                         let req = match self.control_socket.recv() {
                             Ok(req) => req,
                             Err(e) => {
@@ -440,16 +905,178 @@ impl Worker {
                             break 'poll;
                         }
                     }
-                    Token::InterruptResample => {
+                    INTERRUPT_RESAMPLE => {
                         self.interrupt.interrupt_resample();
                     }
-                    Token::Kill => break 'poll,
+                    KILL => break 'poll,
+                    URING_READY => {
+                        let queues = &mut self.queues;
+                        let interrupt = &self.interrupt;
+                        if let Err(_) = Worker::handle_uring_ready(
+                            &mut self.uring_state,
+                            |queue_index, desc_index, len| {
+                                let queue = &mut queues[queue_index];
+                                queue.add_used(mem, desc_index, len as u32);
+                                queue.trigger_interrupt(mem, interrupt);
+                            },
+                        ) {
+                            error!("Error processing uring events");
+                            break 'poll;
+                        }
+                    }
+                    // All other are queue notifications.
+                    n => {
+                        let queue_index = (n - QUEUE_AVAILABLE) as usize;
+                        if let Err(e) = queue_evts[queue_index].read() {
+                            error!("failed reading queue EventFd: {}", e);
+                            break 'poll;
+                        }
+                        self.process_queue(
+                            mem,
+                            queue_index,
+                            &mut flush_timer,
+                            &mut flush_timer_armed,
+                        );
+                    }
                 }
             }
+            self.uring_state.uring_ctx.submit().unwrap();
             if needs_config_interrupt {
                 self.interrupt.signal_config_changed();
             }
         }
+    }
+
+    fn handle_uring_ready(
+        uring_state: &mut URingState,
+        mut queue_complete: impl FnMut(usize, u16, usize),
+    ) -> std::result::Result<(), ()> {
+        let events = match uring_state.uring_ctx.wait() {
+            Ok(e) => e,
+            Err(_) => return Err(()),
+        };
+
+        let mut new_ops = Vec::new(); // TODO - another allocation...
+
+        for (id, op_res) in events {
+            // update id's status and send the result to the virt queue.
+            if let Some(Operation {
+                queue_index,
+                desc_index,
+                fd,
+                type_: op_type,
+            }) = uring_state.pending_operations.remove(&id)
+            {
+                match op_res {
+                    Err(res) => {
+                        uring_state
+                            .pending_descriptors
+                            .get_mut(&(queue_index, desc_index))
+                            .map(|pd| pd.set_error(VIRTIO_BLK_S_IOERR));
+                    }
+                    Ok(r) => match op_type.0 {
+                        OperationType::Read(rw_op) => {
+                            let op_len =
+                                rw_op.iovecs.iter().fold(0, |a, iovec| a + iovec.iov_len) as u32;
+                            if r < op_len {
+                                // re-add this operation below as soon as the current borrow of
+                                // the ring is over.
+                                let op = Operation {
+                                    queue_index,
+                                    desc_index,
+                                    fd,
+                                    type_: ValidOperationType(OperationType::Read(
+                                        rw_op.bytes_processed(r as usize),
+                                    )),
+                                };
+                                new_ops.push(op);
+                                // no need to check if the descriptor is done as this op still
+                                // needs to complete
+                                continue;
+                            }
+                        }
+                        OperationType::Write(rw_op) => {
+                            let op_len =
+                                rw_op.iovecs.iter().fold(0, |a, iovec| a + iovec.iov_len) as u32;
+                            if r < op_len {
+                                // re-add this operation below as soon as the current borrow of
+                                // the ring is over.
+                                let op = Operation {
+                                    queue_index,
+                                    desc_index,
+                                    fd,
+                                    type_: ValidOperationType(OperationType::Write(
+                                        rw_op.bytes_processed(r as usize),
+                                    )),
+                                };
+                                new_ops.push(op);
+                                // no need to check if the descriptor is done as this op still
+                                // needs to complete
+                                continue;
+                            }
+                        }
+                        _ => (),
+                    },
+                }
+                let mut pd = uring_state
+                    .pending_descriptors
+                    .remove(&(queue_index, desc_index))
+                    .unwrap();
+                if pd.pending_op_count == 1 {
+                    //complete now.
+                    queue_complete(queue_index, desc_index, pd.desc_len);
+                } else {
+                    pd.pending_op_count -= 1;
+                    uring_state
+                        .pending_descriptors
+                        .insert((queue_index, desc_index), pd);
+                }
+            }
+        }
+
+        for op in new_ops.into_iter() {
+            // TODO - handle write too.
+            match &op.type_.0 {
+                OperationType::Read(rw_state) => {
+                    unsafe {
+                        // Ok because we know both guest memory and the fd will
+                        // survive until we collect the completion.
+                        uring_state
+                            .uring_ctx
+                            .add_readv_iter(
+                                rw_state.iovecs.iter().cloned(),
+                                op.fd,
+                                rw_state.offset,
+                                uring_state.uring_idx,
+                            )
+                            .unwrap(); //TODO
+                    }
+                }
+                OperationType::Write(rw_state) => {
+                    unsafe {
+                        // Ok because we know both guest memory and the fd will
+                        // survive until we collect the completion.
+                        uring_state
+                            .uring_ctx
+                            .add_writev_iter(
+                                rw_state.iovecs.iter().cloned(),
+                                op.fd,
+                                rw_state.offset,
+                                uring_state.uring_idx,
+                            )
+                            .unwrap(); //TODO
+                    }
+                }
+                _ => unreachable!(),
+            }
+            uring_state
+                .pending_operations
+                .insert(uring_state.uring_idx, op);
+            uring_state.uring_idx = uring_state.uring_idx.wrapping_add(1);
+            uring_state.uring_ctx.submit().unwrap();
+        }
+
+        Ok(())
     }
 }
 
@@ -473,6 +1100,7 @@ fn build_config_space(disk_size: u64, seg_max: u32, block_size: u32) -> virtio_b
         capacity: Le64::from(disk_size >> SECTOR_SHIFT),
         seg_max: Le32::from(seg_max),
         blk_size: Le32::from(block_size),
+        num_queues: Le16::from(NUM_QUEUES),
         max_discard_sectors: Le32::from(MAX_DISCARD_SECTORS),
         discard_sector_alignment: Le32::from(DISCARD_SECTOR_ALIGNMENT),
         max_write_zeroes_sectors: Le32::from(MAX_WRITE_ZEROES_SECTORS),
@@ -521,6 +1149,7 @@ impl Block {
         avail_features |= 1 << VIRTIO_F_VERSION_1;
         avail_features |= 1 << VIRTIO_BLK_F_SEG_MAX;
         avail_features |= 1 << VIRTIO_BLK_F_BLK_SIZE;
+        avail_features |= 1 << VIRTIO_BLK_F_MQ;
 
         let seg_max = min(max(iov_max(), 1), u32::max_value() as usize) as u32;
 
@@ -541,147 +1170,6 @@ impl Block {
             block_size,
             control_socket,
         })
-    }
-
-    // Execute a single block device request.
-    // `writer` includes the data region only; the status byte is not included.
-    // It is up to the caller to convert the result of this function into a status byte
-    // and write it to the expected location in guest memory.
-    fn execute_request(
-        reader: &mut Reader,
-        writer: &mut Writer,
-        read_only: bool,
-        sparse: bool,
-        disk: &mut dyn DiskFile,
-        disk_size: u64,
-        flush_timer: &mut TimerFd,
-        flush_timer_armed: &mut bool,
-    ) -> result::Result<(), ExecuteError> {
-        let req_header: virtio_blk_req_header = reader.read_obj().map_err(ExecuteError::Read)?;
-
-        let req_type = req_header.req_type.to_native();
-        let sector = req_header.sector.to_native();
-        // Delay after a write when the file is auto-flushed.
-        let flush_delay = Duration::from_secs(60);
-
-        if read_only && req_type != VIRTIO_BLK_T_IN {
-            return Err(ExecuteError::ReadOnly {
-                request_type: req_type,
-            });
-        }
-
-        /// Check that a request accesses only data within the disk's current size.
-        /// All parameters are in units of bytes.
-        fn check_range(
-            io_start: u64,
-            io_length: u64,
-            disk_size: u64,
-        ) -> result::Result<(), ExecuteError> {
-            let io_end = io_start
-                .checked_add(io_length)
-                .ok_or(ExecuteError::OutOfRange)?;
-            if io_end > disk_size {
-                Err(ExecuteError::OutOfRange)
-            } else {
-                Ok(())
-            }
-        }
-
-        match req_type {
-            VIRTIO_BLK_T_IN => {
-                let data_len = writer.available_bytes();
-                let offset = sector
-                    .checked_shl(u32::from(SECTOR_SHIFT))
-                    .ok_or(ExecuteError::OutOfRange)?;
-                check_range(offset, data_len as u64, disk_size)?;
-                writer
-                    .write_all_from_at(disk, data_len, offset)
-                    .map_err(|desc_error| ExecuteError::ReadIo {
-                        length: data_len,
-                        sector,
-                        desc_error,
-                    })?;
-            }
-            VIRTIO_BLK_T_OUT => {
-                let data_len = reader.available_bytes();
-                let offset = sector
-                    .checked_shl(u32::from(SECTOR_SHIFT))
-                    .ok_or(ExecuteError::OutOfRange)?;
-                check_range(offset, data_len as u64, disk_size)?;
-                reader
-                    .read_exact_to_at(disk, data_len, offset)
-                    .map_err(|desc_error| ExecuteError::WriteIo {
-                        length: data_len,
-                        sector,
-                        desc_error,
-                    })?;
-                if !*flush_timer_armed {
-                    flush_timer
-                        .reset(flush_delay, None)
-                        .map_err(ExecuteError::TimerFd)?;
-                    *flush_timer_armed = true;
-                }
-            }
-            VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
-                if req_type == VIRTIO_BLK_T_DISCARD && !sparse {
-                    // Discard is a hint; if this is a non-sparse disk, just ignore it.
-                    return Ok(());
-                }
-
-                while reader.available_bytes() >= size_of::<virtio_blk_discard_write_zeroes>() {
-                    let seg: virtio_blk_discard_write_zeroes =
-                        reader.read_obj().map_err(ExecuteError::Read)?;
-
-                    let sector = seg.sector.to_native();
-                    let num_sectors = seg.num_sectors.to_native();
-                    let flags = seg.flags.to_native();
-
-                    let valid_flags = if req_type == VIRTIO_BLK_T_WRITE_ZEROES {
-                        VIRTIO_BLK_DISCARD_WRITE_ZEROES_FLAG_UNMAP
-                    } else {
-                        0
-                    };
-
-                    if (flags & !valid_flags) != 0 {
-                        return Err(ExecuteError::DiscardWriteZeroes {
-                            ioerr: None,
-                            sector,
-                            num_sectors,
-                            flags,
-                        });
-                    }
-
-                    let offset = sector
-                        .checked_shl(u32::from(SECTOR_SHIFT))
-                        .ok_or(ExecuteError::OutOfRange)?;
-                    let length = u64::from(num_sectors)
-                        .checked_shl(u32::from(SECTOR_SHIFT))
-                        .ok_or(ExecuteError::OutOfRange)?;
-                    check_range(offset, length, disk_size)?;
-
-                    if req_type == VIRTIO_BLK_T_DISCARD {
-                        // Since Discard is just a hint and some filesystems may not implement
-                        // FALLOC_FL_PUNCH_HOLE, ignore punch_hole errors.
-                        let _ = disk.punch_hole(offset, length);
-                    } else {
-                        disk.write_zeroes_all_at(offset, length as usize)
-                            .map_err(|e| ExecuteError::DiscardWriteZeroes {
-                                ioerr: Some(e),
-                                sector,
-                                num_sectors,
-                                flags,
-                            })?;
-                    }
-                }
-            }
-            VIRTIO_BLK_T_FLUSH => {
-                disk.fsync().map_err(ExecuteError::Flush)?;
-                flush_timer.clear().map_err(ExecuteError::TimerFd)?;
-                *flush_timer_armed = false;
-            }
-            t => return Err(ExecuteError::Unsupported(t)),
-        };
-        Ok(())
     }
 }
 
@@ -738,12 +1226,9 @@ impl VirtioDevice for Block {
         mem: GuestMemory,
         interrupt: Interrupt,
         queues: Vec<Queue>,
-        mut queue_evts: Vec<EventFd>,
+        queue_evts: Vec<EventFd>,
     ) {
-        if queues.len() != 1 || queue_evts.len() != 1 {
-            return;
-        }
-
+        info!("have {} queues for block", queues.len());
         let (self_kill_evt, kill_evt) = match EventFd::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
@@ -765,14 +1250,18 @@ impl VirtioDevice for Block {
                             let mut worker = Worker {
                                 interrupt,
                                 queues,
-                                mem,
                                 disk_image,
                                 disk_size,
                                 read_only,
                                 sparse,
                                 control_socket,
+                                uring_state: URingState::new(
+                                    // allocate two ring entries for each possible virtio
+                                    // descriptor, most use one entry.
+                                    2 * QUEUE_SIZE as usize * NUM_QUEUES as usize,
+                                ),
                             };
-                            worker.run(queue_evts.remove(0), kill_evt);
+                            worker.run(&mem, queue_evts, kill_evt);
                             worker
                         });
 
@@ -817,6 +1306,7 @@ impl VirtioDevice for Block {
 #[cfg(test)]
 mod tests {
     use std::fs::{File, OpenOptions};
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of_val;
     use sys_util::GuestAddress;
     use tempfile::TempDir;
@@ -871,8 +1361,8 @@ mod tests {
             let b = Block::new(Box::new(f), false, true, 512, None).unwrap();
             // writable device should set VIRTIO_BLK_F_FLUSH + VIRTIO_BLK_F_DISCARD
             // + VIRTIO_BLK_F_WRITE_ZEROES + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE
-            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX
-            assert_eq!(0x120006244, b.features());
+            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX + VIRTIO_BLK_F_MQ
+            assert_eq!(0x120007244, b.features());
         }
 
         // read-write block device, non-sparse
@@ -881,8 +1371,8 @@ mod tests {
             let b = Block::new(Box::new(f), false, false, 512, None).unwrap();
             // writable device should set VIRTIO_BLK_F_FLUSH
             // + VIRTIO_BLK_F_WRITE_ZEROES + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE
-            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX
-            assert_eq!(0x120004244, b.features());
+            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX + VIRTIO_BLK_F_MQ
+            assert_eq!(0x120005244, b.features());
         }
 
         // read-only block device
@@ -891,8 +1381,8 @@ mod tests {
             let b = Block::new(Box::new(f), true, true, 512, None).unwrap();
             // read-only device should set VIRTIO_BLK_F_FLUSH and VIRTIO_BLK_F_RO
             // + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE + VIRTIO_BLK_F_SEG_MAX
-            // + VIRTIO_RING_F_EVENT_IDX
-            assert_eq!(0x120000264, b.features());
+            // + VIRTIO_RING_F_EVENT_IDX + VIRTIO_BLK_F_MQ
+            assert_eq!(0x120001264, b.features());
         }
     }
 
@@ -909,6 +1399,9 @@ mod tests {
             .unwrap();
         let disk_size = 0x1000;
         f.set_len(disk_size).unwrap();
+        for i in 0..0x400 {
+            f.write(&(i as u32).to_ne_bytes()).unwrap();
+        }
 
         let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
             .expect("Creating guest memory failed.");
@@ -939,8 +1432,13 @@ mod tests {
 
         let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
         let mut flush_timer_armed = false;
+        let mut uring_state = URingState::new(256);
 
-        Worker::process_one_request(
+        // Set status to something non-zero so the test for it being zero later is legit.
+        let status_offset = GuestAddress((0x1000 + size_of_val(&req_hdr) + 512) as u64);
+        mem.write_at_addr(&[55u8], status_offset).unwrap();
+
+        let result = Worker::process_one_request(
             avail_desc,
             false,
             true,
@@ -949,12 +1447,27 @@ mod tests {
             &mut flush_timer,
             &mut flush_timer_armed,
             &mem,
+            &mut uring_state,
+            5,
         )
         .expect("execute failed");
 
-        let status_offset = GuestAddress((0x1000 + size_of_val(&req_hdr) + 512) as u64);
+        Worker::handle_uring_ready(&mut uring_state, |queue_index, desc_index, len| {
+            assert_eq!(queue_index, 5);
+            assert_eq!(desc_index, 0);
+            assert_eq!(len, 513); // 512 bytes plus status.
+        })
+        .unwrap();
+
         let status = mem.read_obj_from_addr::<u8>(status_offset).unwrap();
         assert_eq!(status, VIRTIO_BLK_S_OK);
+
+        f.seek(SeekFrom::Start(0)).unwrap();
+        for i in 0..0x400 {
+            let mut read_back = [0u8; 0x4];
+            f.read(&mut read_back).unwrap();
+            assert_eq!(i as u32, u32::from_ne_bytes(read_back));
+        }
     }
 
     #[test]
@@ -1000,6 +1513,7 @@ mod tests {
 
         let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
         let mut flush_timer_armed = false;
+        let mut uring_state = URingState::new(256);
 
         Worker::process_one_request(
             avail_desc,
@@ -1010,6 +1524,8 @@ mod tests {
             &mut flush_timer,
             &mut flush_timer_armed,
             &mem,
+            &mut uring_state,
+            0,
         )
         .expect("execute failed");
 

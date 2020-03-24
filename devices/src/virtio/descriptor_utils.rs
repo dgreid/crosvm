@@ -164,6 +164,10 @@ impl<'a> DescriptorChainConsumer<'a> {
 
         other
     }
+
+    fn first_offset(&self) -> Option<*const u8> {
+        self.buffers.get(0).map(|vs| vs.as_ptr() as *const u8)
+    }
 }
 
 /// Provides high-level interface over the sequence of memory regions
@@ -443,6 +447,10 @@ impl<'a> Writer<'a> {
         })
     }
 
+    pub fn first_offset(&self) -> Option<*const u8> {
+        self.buffer.first_offset()
+    }
+
     /// Writes an object to the descriptor chain buffer.
     pub fn write_obj<T: DataInit>(&mut self, val: T) -> io::Result<()> {
         self.write_all(val.as_slice())
@@ -548,6 +556,19 @@ impl<'a> Writer<'a> {
     /// Returns number of bytes already written to the descriptor chain buffer.
     pub fn bytes_written(&self) -> usize {
         self.buffer.bytes_consumed()
+    }
+
+    /// Returns a `&[VolatileSlice]` that represents all the remaining data in this `Writer`.
+    /// Calling this method does not actually consume any data from the `Writer` and callers should
+    /// call `consume` to advance the `Writer`.
+    pub fn get_remaining(&self) -> &[VolatileSlice] {
+        self.buffer.get_remaining()
+    }
+
+    /// Consumes `amt` bytes from the underlying descriptor chain. If `amt` is larger than the
+    /// remaining data left in this `Writer`, then all remaining data will be consumed.
+    pub fn consume_gotten(&mut self, amt: usize) {
+        self.buffer.consume(amt)
     }
 
     /// Splits this `Writer` into two at the given offset in the `DescriptorChain` buffer. After the

@@ -26,6 +26,7 @@ gpu_display = { path = "../gpu_display", optional = true }
 gpu_renderer = { path = "../gpu_renderer", optional = true }
 hypervisor = { path = "../hypervisor" }
 io_jail = { path = "../io_jail" }
+io_uring = { path = "../io_uring" }
 kvm = { path = "../kvm" }
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"

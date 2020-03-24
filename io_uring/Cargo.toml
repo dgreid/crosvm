@@ -11,5 +11,3 @@ sys_util = { path = "../sys_util" }
 
 [dev-dependencies]
 tempfile = { path = "../tempfile" }
-
-[workspace]
