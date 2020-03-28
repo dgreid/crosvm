@@ -269,6 +269,10 @@ impl Queue {
         self.last_used = Wrapping(0);
     }
 
+    pub fn ready(&self) -> bool {
+        self.ready
+    }
+
     pub fn is_valid(&self, mem: &GuestMemory) -> bool {
         let queue_size = self.actual_size() as usize;
         let desc_table = self.desc_table;
