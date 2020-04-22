@@ -2,24 +2,33 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::RefCell;
 use std::cmp::{max, min};
+use std::convert::TryFrom;
 use std::fmt::{self, Display};
 use std::io::{self, Write};
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::rc::Rc;
 use std::result;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use futures::pin_mut;
+
+use async_core::EventFd as AsyncEventFd;
+use async_core::TimerFd as AsyncTimerFd;
+use cros_async::select5;
 use data_model::{DataInit, Le16, Le32, Le64};
 use disk::DiskFile;
-use msg_socket::{MsgReceiver, MsgSender};
+use msg_socket::{MsgError, MsgSender};
 use sync::Mutex;
 use sys_util::Error as SysError;
 use sys_util::Result as SysResult;
-use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, PollContext, PollToken, TimerFd};
+use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, TimerFd};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_control::{DiskControlCommand, DiskControlResponseSocket, DiskControlResult};
 
@@ -130,8 +139,12 @@ unsafe impl DataInit for virtio_blk_discard_write_zeroes {}
 
 #[derive(Debug)]
 enum ExecuteError {
+    // Error creating a receiver for command messages.
+    CreatingMessageReceiver(MsgError),
     Descriptor(DescriptorError),
     Read(io::Error),
+    ReceivingCommand(MsgError),
+    SendingResponse(MsgError),
     WriteStatus(io::Error),
     /// Error arming the flush timer.
     Flush(io::Error),
@@ -165,8 +178,11 @@ impl Display for ExecuteError {
         use self::ExecuteError::*;
 
         match self {
+            CreatingMessageReceiver(e) => write!(f, "couldn't create a message receiver: {}", e),
             Descriptor(e) => write!(f, "virtio descriptor error: {}", e),
             Read(e) => write!(f, "failed to read message: {}", e),
+            ReceivingCommand(e) => write!(f, "failed to read command message: {}", e),
+            SendingResponse(e) => write!(f, "failed to send command response: {}", e),
             WriteStatus(e) => write!(f, "failed to write request status: {}", e),
             Flush(e) => write!(f, "failed to flush: {}", e),
             ReadIo {
@@ -219,8 +235,11 @@ impl Display for ExecuteError {
 impl ExecuteError {
     fn status(&self) -> u8 {
         match self {
+            ExecuteError::CreatingMessageReceiver(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Descriptor(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Read(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::ReceivingCommand(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::SendingResponse(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::WriteStatus(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Flush(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::ReadIo { .. } => VIRTIO_BLK_S_IOERR,
@@ -235,6 +254,24 @@ impl ExecuteError {
     }
 }
 
+#[derive(Debug)]
+enum TimerError {
+    TimerFdCreate(sys_util::Error),
+    AsyncTimerCreate(async_core::TimerFdError),
+}
+
+impl Display for TimerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::TimerError::*;
+
+        match self {
+            TimerFdCreate(e) => write!(f, "couldn't create a timer FD: {}", e),
+            AsyncTimerCreate(e) => write!(f, "couldn't create an async timer: {}", e),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct DiskState {
     disk_image: Box<dyn DiskFile>,
     disk_size: Arc<Mutex<u64>>,
@@ -248,8 +285,8 @@ fn process_one_request(
     sparse: bool,
     disk: &mut dyn DiskFile,
     disk_size: u64,
-    flush_timer: &mut TimerFd,
-    flush_timer_armed: &mut bool,
+    flush_timer: &TimerFd,
+    flush_timer_armed: &AtomicBool,
     mem: &GuestMemory,
 ) -> result::Result<usize, ExecuteError> {
     let mut reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
@@ -289,20 +326,31 @@ fn process_one_request(
     Ok(available_bytes)
 }
 
-fn process_queue(
+async fn handle_queue(
     mem: &GuestMemory,
-    disk_state: &mut DiskState,
-    queues: &mut [Queue],
-    queue_index: usize,
-    flush_timer: &mut TimerFd,
-    flush_timer_armed: &mut bool,
-    interrupt: &Interrupt,
+    disk_state: Rc<RefCell<DiskState>>,
+    mut queue: Queue,
+    mut queue_evt: AsyncEventFd,
+    flush_timer: &AsyncTimerFd,
+    flush_timer_armed: &AtomicBool,
+    interrupt: Rc<RefCell<Interrupt>>,
 ) {
-    let queue = &mut queues[queue_index];
+    loop {
+        let avail_desc = queue.next_async(mem, &mut queue_evt).await;
+        let avail_desc = match avail_desc {
+            Err(e) => {
+                error!("Failed to read the next descriptor from the queue: {}", e);
+                return;
+            }
+            Ok(a) => a,
+        };
 
-    let disk_size = disk_state.disk_size.lock();
+        let mut disk_state = disk_state.borrow_mut();
 
-    while let Some(avail_desc) = queue.pop(&mem) {
+        // tricky lock work to prevent borrowing disk_state for the entire loop.
+        let disk_size_lock = disk_state.disk_size.clone();
+        let disk_size = disk_size_lock.lock();
+
         queue.set_notify(&mem, false);
         let desc_index = avail_desc.index;
 
@@ -312,7 +360,7 @@ fn process_queue(
             disk_state.sparse,
             &mut *disk_state.disk_image,
             *disk_size,
-            flush_timer,
+            flush_timer.as_ref(),
             flush_timer_armed,
             &mem,
         ) {
@@ -324,8 +372,77 @@ fn process_queue(
         };
 
         queue.add_used(&mem, desc_index, len as u32);
-        queue.trigger_interrupt(&mem, &interrupt);
+        interrupt.borrow_mut().signal_used_queue(queue.vector);
         queue.set_notify(&mem, true);
+    }
+}
+
+async fn flush_timer(
+    disk_state: Rc<RefCell<DiskState>>,
+    timer: &AsyncTimerFd,
+    timer_armed: &AtomicBool,
+) {
+    loop {
+        let t = timer.next_expiration().await;
+        if let Err(e) = t {
+            error!("Error with flush timer: {}", e);
+            return;
+        }
+        timer_armed.store(false, Ordering::Relaxed);
+        let mut disk_state = disk_state.borrow_mut();
+        if let Err(e) = disk_state.disk_image.fsync() {
+            error!("Failed to flush the disk: {}", e);
+        }
+    }
+}
+
+async fn handle_irq_resample(interrupt: Rc<RefCell<Interrupt>>) {
+    let resample_evt = interrupt
+        .borrow_mut()
+        .get_resample_evt()
+        .try_clone()
+        .unwrap();
+    let mut resample_evt = AsyncEventFd::try_from(resample_evt).unwrap();
+    loop {
+        if let Ok(_) = resample_evt.read_next().await {
+            interrupt.borrow_mut().interrupt_resample();
+        } else {
+            break;
+        }
+    }
+}
+
+async fn wait_kill(kill_evt: EventFd) {
+    let mut kill_evt = AsyncEventFd::try_from(kill_evt).unwrap();
+    // Once this event is readable, exit. Exiting this future will cause the main loop to
+    // break and the device process to exit.
+    let _ = kill_evt.read_next().await;
+}
+
+async fn handle_command_socket(
+    command_socket: &DiskControlResponseSocket,
+    interrupt: Rc<RefCell<Interrupt>>,
+    disk_state: Rc<RefCell<DiskState>>,
+) -> Result<(), ExecuteError> {
+    let mut async_messages = command_socket
+        .async_receiver()
+        .map_err(ExecuteError::CreatingMessageReceiver)?;
+    loop {
+        match async_messages.next().await {
+            Ok(command) => {
+                let resp = match command {
+                    DiskControlCommand::Resize { new_size } => {
+                        resize(&mut disk_state.borrow_mut(), new_size)
+                    }
+                };
+
+                command_socket
+                    .send(&resp)
+                    .map_err(ExecuteError::SendingResponse)?;
+                interrupt.borrow_mut().signal_config_changed();
+            }
+            Err(e) => return Err(ExecuteError::ReceivingCommand(e)),
+        }
     }
 }
 
@@ -361,111 +478,62 @@ fn run_worker(
     interrupt: Interrupt,
     mut queues: Vec<Queue>,
     mem: GuestMemory,
-    disk_state: &mut DiskState,
+    disk_state: &Rc<RefCell<DiskState>>,
     control_socket: &DiskControlResponseSocket,
     queue_evt: EventFd,
     kill_evt: EventFd,
 ) {
-    #[derive(PollToken)]
-    enum Token {
-        FlushTimer,
-        QueueAvailable,
-        ControlRequest,
-        InterruptResample,
-        Kill,
-    }
+    // Wrap the interupt in a `RefCell` so it can be shared between async functions.
+    let interrupt = Rc::new(RefCell::new(interrupt));
 
-    let mut flush_timer = match TimerFd::new() {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to create the flush timer: {}", e);
-            return;
-        }
-    };
-    let mut flush_timer_armed = false;
-
-    let poll_ctx: PollContext<Token> = match PollContext::build_with(&[
-        (&flush_timer, Token::FlushTimer),
-        (&queue_evt, Token::QueueAvailable),
-        (control_socket, Token::ControlRequest),
-        (interrupt.get_resample_evt(), Token::InterruptResample),
-        (&kill_evt, Token::Kill),
-    ]) {
-        Ok(pc) => pc,
-        Err(e) => {
-            error!("failed creating PollContext: {}", e);
-            return;
-        }
-    };
-
-    'poll: loop {
-        let events = match poll_ctx.wait() {
-            Ok(v) => v,
+    let async_timer =
+        match TimerFd::new()
+            .map_err(TimerError::TimerFdCreate)
+            .and_then(|sync_timer| {
+                AsyncTimerFd::try_from(sync_timer).map_err(TimerError::AsyncTimerCreate)
+            }) {
+            Ok(t) => t,
             Err(e) => {
-                error!("failed polling for events: {}", e);
-                break;
+                error!("Failed to create the flush timer: {}", e);
+                return;
             }
         };
+    let flush_timer_armed = AtomicBool::new(false);
+    let flush_timer = flush_timer(disk_state.clone(), &async_timer, &flush_timer_armed);
+    pin_mut!(flush_timer);
 
-        let mut needs_config_interrupt = false;
-        for event in events.iter_readable() {
-            match event.token() {
-                Token::FlushTimer => {
-                    if let Err(e) = disk_state.disk_image.fsync() {
-                        error!("Failed to flush the disk: {}", e);
-                        break 'poll;
-                    }
-                    if let Err(e) = flush_timer.wait() {
-                        error!("Failed to clear flush timer: {}", e);
-                        break 'poll;
-                    }
-                }
-                Token::QueueAvailable => {
-                    if let Err(e) = queue_evt.read() {
-                        error!("failed reading queue EventFd: {}", e);
-                        break 'poll;
-                    }
-                    process_queue(
-                        &mem,
-                        disk_state,
-                        &mut queues,
-                        0,
-                        &mut flush_timer,
-                        &mut flush_timer_armed,
-                        &interrupt,
-                    );
-                }
-                Token::ControlRequest => {
-                    let req = match control_socket.recv() {
-                        Ok(req) => req,
-                        Err(e) => {
-                            error!("control socket failed recv: {}", e);
-                            break 'poll;
-                        }
-                    };
-
-                    let resp = match req {
-                        DiskControlCommand::Resize { new_size } => {
-                            needs_config_interrupt = true;
-                            resize(disk_state, new_size)
-                        }
-                    };
-
-                    if let Err(e) = control_socket.send(&resp) {
-                        error!("control socket failed send: {}", e);
-                        break 'poll;
-                    }
-                }
-                Token::InterruptResample => {
-                    interrupt.interrupt_resample();
-                }
-                Token::Kill => break 'poll,
-            }
+    // The first queue is used for block messages from the guest
+    let queue_evt = match AsyncEventFd::try_from(queue_evt) {
+        Ok(e) => e,
+        Err(e) => {
+            error!("Failed to set up queue ready event: {}", e);
+            return;
         }
-        if needs_config_interrupt {
-            interrupt.signal_config_changed();
-        }
-    }
+    };
+    let queue = handle_queue(
+        &mem,
+        disk_state.clone(),
+        queues.remove(0),
+        queue_evt,
+        &async_timer,
+        &flush_timer_armed,
+        interrupt.clone(),
+    );
+    pin_mut!(queue);
+
+    // Handles control requests.
+    let control = handle_command_socket(control_socket, interrupt.clone(), disk_state.clone());
+    pin_mut!(control);
+
+    // Process any requests to resample the irq value.
+    let resample = handle_irq_resample(interrupt.clone());
+    pin_mut!(resample);
+    // Exit if the kill event is triggered.
+    let kill = wait_kill(kill_evt);
+    pin_mut!(kill);
+
+    // And return once any future exits.
+    let _ = select5(queue, control, flush_timer, resample, kill);
 }
 
 /// Virtio device for exposing block level read/write operations on a host file.
@@ -569,8 +637,8 @@ impl Block {
         sparse: bool,
         disk: &mut dyn DiskFile,
         disk_size: u64,
-        flush_timer: &mut TimerFd,
-        flush_timer_armed: &mut bool,
+        flush_timer: &TimerFd,
+        flush_timer_armed: &AtomicBool,
     ) -> result::Result<(), ExecuteError> {
         let req_header: virtio_blk_req_header = reader.read_obj().map_err(ExecuteError::Read)?;
 
@@ -630,11 +698,11 @@ impl Block {
                         sector,
                         desc_error,
                     })?;
-                if !*flush_timer_armed {
+                if !flush_timer_armed.load(Ordering::Relaxed) {
                     flush_timer
                         .reset(flush_delay, None)
                         .map_err(ExecuteError::TimerFd)?;
-                    *flush_timer_armed = true;
+                    flush_timer_armed.store(true, Ordering::Relaxed);
                 }
             }
             VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
@@ -692,7 +760,7 @@ impl Block {
             VIRTIO_BLK_T_FLUSH => {
                 disk.fsync().map_err(ExecuteError::Flush)?;
                 flush_timer.clear().map_err(ExecuteError::TimerFd)?;
-                *flush_timer_armed = false;
+                flush_timer_armed.store(false, Ordering::Relaxed);
             }
             t => return Err(ExecuteError::Unsupported(t)),
         };
@@ -777,21 +845,22 @@ impl VirtioDevice for Block {
                     thread::Builder::new()
                         .name("virtio_blk".to_string())
                         .spawn(move || {
-                            let mut disk_state = DiskState {
+                            let disk_state = Rc::new(RefCell::new(DiskState {
                                 disk_image,
                                 disk_size,
                                 read_only,
                                 sparse,
-                            };
+                            }));
                             run_worker(
                                 interrupt,
                                 queues,
                                 mem,
-                                &mut disk_state,
+                                &disk_state,
                                 &control_socket,
                                 queue_evts.remove(0),
                                 kill_evt,
                             );
+                            let disk_state = Rc::try_unwrap(disk_state).unwrap().into_inner();
                             (disk_state.disk_image, control_socket)
                         });
 
@@ -956,8 +1025,8 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
-        let mut flush_timer_armed = false;
+        let flush_timer = TimerFd::new().expect("failed to create flush_timer");
+        let flush_timer_armed = AtomicBool::new(false);
 
         process_one_request(
             avail_desc,
@@ -965,8 +1034,8 @@ mod tests {
             true,
             &mut f,
             disk_size,
-            &mut flush_timer,
-            &mut flush_timer_armed,
+            &flush_timer,
+            &flush_timer_armed,
             &mem,
         )
         .expect("execute failed");
@@ -1017,8 +1086,8 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
-        let mut flush_timer_armed = false;
+        let flush_timer = TimerFd::new().expect("failed to create flush_timer");
+        let flush_timer_armed = AtomicBool::new(false);
 
         process_one_request(
             avail_desc,
@@ -1026,8 +1095,8 @@ mod tests {
             true,
             &mut f,
             disk_size,
-            &mut flush_timer,
-            &mut flush_timer_armed,
+            &flush_timer,
+            &flush_timer_armed,
             &mem,
         )
         .expect("execute failed");
