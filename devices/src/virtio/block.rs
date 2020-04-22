@@ -235,14 +235,18 @@ impl ExecuteError {
     }
 }
 
-struct Worker {
-    interrupt: Interrupt,
-    queues: Vec<Queue>,
-    mem: GuestMemory,
+struct DiskState {
     disk_image: Box<dyn DiskFile>,
     disk_size: Arc<Mutex<u64>>,
     read_only: bool,
     sparse: bool,
+}
+
+struct Worker {
+    interrupt: Interrupt,
+    queues: Vec<Queue>,
+    mem: GuestMemory,
+    disk_state: DiskState,
     control_socket: DiskControlResponseSocket,
 }
 
@@ -302,7 +306,7 @@ impl Worker {
     ) {
         let queue = &mut self.queues[queue_index];
 
-        let disk_size = self.disk_size.lock();
+        let disk_size = self.disk_state.disk_size.lock();
 
         while let Some(avail_desc) = queue.pop(&self.mem) {
             queue.set_notify(&self.mem, false);
@@ -310,9 +314,9 @@ impl Worker {
 
             let len = match Worker::process_one_request(
                 avail_desc,
-                self.read_only,
-                self.sparse,
-                &mut *self.disk_image,
+                self.disk_state.read_only,
+                self.disk_state.sparse,
+                &mut *self.disk_state.disk_image,
                 *disk_size,
                 flush_timer,
                 flush_timer_armed,
@@ -332,28 +336,28 @@ impl Worker {
     }
 
     fn resize(&mut self, new_size: u64) -> DiskControlResult {
-        if self.read_only {
+        if self.disk_state.read_only {
             error!("Attempted to resize read-only block device");
             return DiskControlResult::Err(SysError::new(libc::EROFS));
         }
 
         info!("Resizing block device to {} bytes", new_size);
 
-        if let Err(e) = self.disk_image.set_len(new_size) {
+        if let Err(e) = self.disk_state.disk_image.set_len(new_size) {
             error!("Resizing disk failed! {}", e);
             return DiskControlResult::Err(SysError::new(libc::EIO));
         }
 
         // Allocate new space if the disk image is not sparse.
-        if let Err(e) = self.disk_image.allocate(0, new_size) {
+        if let Err(e) = self.disk_state.disk_image.allocate(0, new_size) {
             error!("Allocating disk space after resize failed! {}", e);
             return DiskControlResult::Err(SysError::new(libc::EIO));
         }
 
-        self.sparse = false;
+        self.disk_state.sparse = false;
 
-        if let Ok(new_disk_size) = self.disk_image.get_len() {
-            let mut disk_size = self.disk_size.lock();
+        if let Ok(new_disk_size) = self.disk_state.disk_image.get_len() {
+            let mut disk_size = self.disk_state.disk_size.lock();
             *disk_size = new_disk_size;
         }
         DiskControlResult::Ok
@@ -405,7 +409,7 @@ impl Worker {
             for event in events.iter_readable() {
                 match event.token() {
                     Token::FlushTimer => {
-                        if let Err(e) = self.disk_image.fsync() {
+                        if let Err(e) = self.disk_state.disk_image.fsync() {
                             error!("Failed to flush the disk: {}", e);
                             break 'poll;
                         }
@@ -764,14 +768,17 @@ impl VirtioDevice for Block {
                     thread::Builder::new()
                         .name("virtio_blk".to_string())
                         .spawn(move || {
-                            let mut worker = Worker {
-                                interrupt,
-                                queues,
-                                mem,
+                            let disk_state = DiskState {
                                 disk_image,
                                 disk_size,
                                 read_only,
                                 sparse,
+                            };
+                            let mut worker = Worker {
+                                interrupt,
+                                queues,
+                                mem,
+                                disk_state,
                                 control_socket,
                             };
                             worker.run(queue_evts.remove(0), kill_evt);
@@ -806,7 +813,7 @@ impl VirtioDevice for Block {
                     return false;
                 }
                 Ok(worker) => {
-                    self.disk_image = Some(worker.disk_image);
+                    self.disk_image = Some(worker.disk_state.disk_image);
                     self.control_socket = Some(worker.control_socket);
                     return true;
                 }
