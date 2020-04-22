@@ -2,24 +2,32 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fmt::{self, Display};
 use std::io::{self, Write};
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::rc::Rc;
 use std::result;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use futures::lock::Mutex as AsyncMutex;
+use futures::pin_mut;
+use futures::stream::{FuturesUnordered, StreamExt};
+
+use cros_async::{select4, AsyncError, U64Source};
 use data_model::{DataInit, Le16, Le32, Le64};
 use disk::DiskFile;
-use msg_socket::{MsgReceiver, MsgSender};
+use msg_socket::{MsgError, MsgSender};
 use sync::Mutex;
 use sys_util::Error as SysError;
 use sys_util::Result as SysResult;
-use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, PollContext, PollToken, TimerFd};
+use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, TimerFd};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_control::{DiskControlCommand, DiskControlResponseSocket, DiskControlResult};
 
@@ -29,7 +37,8 @@ use super::{
 };
 
 const QUEUE_SIZE: u16 = 256;
-const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
+const NUM_QUEUES: u16 = 1;
+const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES as usize];
 const SECTOR_SHIFT: u8 = 9;
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 const MAX_DISCARD_SECTORS: u32 = u32::MAX;
@@ -55,6 +64,7 @@ const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
 const VIRTIO_BLK_F_RO: u32 = 5;
 const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
 const VIRTIO_BLK_F_FLUSH: u32 = 9;
+const VIRTIO_BLK_F_MQ: u32 = 12;
 const VIRTIO_BLK_F_DISCARD: u32 = 13;
 const VIRTIO_BLK_F_WRITE_ZEROES: u32 = 14;
 
@@ -91,7 +101,8 @@ struct virtio_blk_config {
     blk_size: Le32,
     topology: virtio_blk_topology,
     writeback: u8,
-    unused0: [u8; 3],
+    unused0: u8,
+    num_queues: Le16,
     max_discard_sectors: Le32,
     max_discard_seg: Le32,
     discard_sector_alignment: Le32,
@@ -130,8 +141,12 @@ unsafe impl DataInit for virtio_blk_discard_write_zeroes {}
 
 #[derive(Debug)]
 enum ExecuteError {
+    // Error creating a receiver for command messages.
+    CreatingMessageReceiver(MsgError),
     Descriptor(DescriptorError),
     Read(io::Error),
+    ReceivingCommand(MsgError),
+    SendingResponse(MsgError),
     WriteStatus(io::Error),
     /// Error arming the flush timer.
     Flush(io::Error),
@@ -165,8 +180,11 @@ impl Display for ExecuteError {
         use self::ExecuteError::*;
 
         match self {
+            CreatingMessageReceiver(e) => write!(f, "couldn't create a message receiver: {}", e),
             Descriptor(e) => write!(f, "virtio descriptor error: {}", e),
             Read(e) => write!(f, "failed to read message: {}", e),
+            ReceivingCommand(e) => write!(f, "failed to read command message: {}", e),
+            SendingResponse(e) => write!(f, "failed to send command response: {}", e),
             WriteStatus(e) => write!(f, "failed to write request status: {}", e),
             Flush(e) => write!(f, "failed to flush: {}", e),
             ReadIo {
@@ -219,8 +237,11 @@ impl Display for ExecuteError {
 impl ExecuteError {
     fn status(&self) -> u8 {
         match self {
+            ExecuteError::CreatingMessageReceiver(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Descriptor(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Read(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::ReceivingCommand(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::SendingResponse(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::WriteStatus(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Flush(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::ReadIo { .. } => VIRTIO_BLK_S_IOERR,
@@ -235,9 +256,27 @@ impl ExecuteError {
     }
 }
 
+#[derive(Debug)]
+enum TimerError {
+    TimerFdCreate(sys_util::Error),
+    AsyncTimerCreate(AsyncError),
+}
+
+impl Display for TimerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::TimerError::*;
+
+        match self {
+            TimerFdCreate(e) => write!(f, "couldn't create a timer FD: {}", e),
+            AsyncTimerCreate(e) => write!(f, "couldn't create an async timer: {}", e),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct DiskState {
     disk_image: Box<dyn DiskFile>,
-    disk_size: Arc<Mutex<u64>>,
+    disk_size: Arc<RwLock<u64>>,
     read_only: bool,
     sparse: bool,
 }
@@ -248,8 +287,8 @@ fn process_one_request(
     sparse: bool,
     disk: &mut dyn DiskFile,
     disk_size: u64,
-    flush_timer: &mut TimerFd,
-    flush_timer_armed: &mut bool,
+    flush_timer: &TimerFd,
+    flush_timer_armed: &AtomicBool,
     mem: &GuestMemory,
 ) -> result::Result<usize, ExecuteError> {
     let mut reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
@@ -287,21 +326,36 @@ fn process_one_request(
     Ok(available_bytes)
 }
 
-fn process_queue(
+async fn handle_queue(
     mem: &GuestMemory,
-    disk_state: &mut DiskState,
-    queues: &mut [Queue],
-    queue_index: usize,
-    flush_timer: &mut TimerFd,
-    flush_timer_armed: &mut bool,
-    interrupt: &Interrupt,
+    disk_state: Rc<RefCell<DiskState>>,
+    queue_mutex: Arc<AsyncMutex<Queue>>,
+    evt_mutex: Arc<AsyncMutex<U64Source<EventFd>>>,
+    flush_timer: &TimerFd,
+    flush_timer_armed: &AtomicBool,
+    interrupt: Rc<RefCell<Interrupt>>,
 ) {
-    let queue = &mut queues[queue_index];
+    loop {
+        let avail_desc = {
+            let mut queue = queue_mutex.lock().await;
+            let mut evt = evt_mutex.lock().await;
+            let avail_desc = queue.next_async(mem, &mut evt).await;
+            match avail_desc {
+                Err(e) => {
+                    error!("Failed to read the next descriptor from the queue: {}", e);
+                    continue;
+                }
+                Ok(a) => a,
+            }
+        };
 
-    let disk_size = disk_state.disk_size.lock();
+        let mut disk_state = disk_state.borrow_mut();
 
-    while let Some(avail_desc) = queue.pop(&mem) {
-        queue.set_notify(&mem, false);
+        // tricky lock work to prevent borrowing disk_state for the entire loop.
+        let disk_size_lock = disk_state.disk_size.clone();
+        let disk_size = disk_size_lock.read().unwrap();
+
+        //queue.set_notify(&mem, false); // TODO - might need to set notify to counter of contexts that disabled it.
         let desc_index = avail_desc.index;
 
         let len = match process_one_request(
@@ -321,9 +375,81 @@ fn process_queue(
             }
         };
 
-        queue.add_used(&mem, desc_index, len as u32);
-        queue.trigger_interrupt(&mem, &interrupt);
-        queue.set_notify(&mem, true);
+        {
+            let mut queue = queue_mutex.lock().await;
+            queue.add_used(&mem, desc_index, len as u32);
+            interrupt.borrow_mut().signal_used_queue(queue.vector);
+            //    queue.set_notify(&mem, true);
+        }
+    }
+}
+
+async fn flush_timer(
+    disk_state: Rc<RefCell<DiskState>>,
+    mut timer: U64Source<TimerFd>,
+    timer_armed: &AtomicBool,
+) {
+    loop {
+        let t = timer.next_val().await;
+        if let Err(e) = t {
+            error!("Error with flush timer: {}", e);
+            return;
+        }
+        timer_armed.store(false, Ordering::Relaxed);
+        let mut disk_state = disk_state.borrow_mut();
+        if let Err(e) = disk_state.disk_image.fsync() {
+            error!("Failed to flush the disk: {}", e);
+        }
+    }
+}
+
+async fn handle_irq_resample(interrupt: Rc<RefCell<Interrupt>>) {
+    let resample_evt = interrupt
+        .borrow_mut()
+        .get_resample_evt()
+        .try_clone()
+        .unwrap();
+    let mut resample_evt = U64Source::new(resample_evt).unwrap();
+    loop {
+        if let Ok(_) = resample_evt.next_val().await {
+            interrupt.borrow_mut().interrupt_resample();
+        } else {
+            break;
+        }
+    }
+}
+
+async fn wait_kill(kill_evt: EventFd) {
+    let mut kill_evt = U64Source::new(kill_evt).unwrap();
+    // Once this event is readable, exit. Exiting this future will cause the main loop to
+    // break and the device process to exit.
+    let _ = kill_evt.next_val().await;
+}
+
+async fn handle_command_socket(
+    command_socket: &DiskControlResponseSocket,
+    interrupt: Rc<RefCell<Interrupt>>,
+    disk_state: Rc<RefCell<DiskState>>,
+) -> Result<(), ExecuteError> {
+    let mut async_messages = command_socket
+        .async_receiver()
+        .map_err(ExecuteError::CreatingMessageReceiver)?;
+    loop {
+        match async_messages.next().await {
+            Ok(command) => {
+                let resp = match command {
+                    DiskControlCommand::Resize { new_size } => {
+                        resize(&mut disk_state.borrow_mut(), new_size)
+                    }
+                };
+
+                command_socket
+                    .send(&resp)
+                    .map_err(ExecuteError::SendingResponse)?;
+                interrupt.borrow_mut().signal_config_changed();
+            }
+            Err(e) => return Err(ExecuteError::ReceivingCommand(e)),
+        }
     }
 }
 
@@ -349,7 +475,7 @@ fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult {
     disk_state.sparse = false;
 
     if let Ok(new_disk_size) = disk_state.disk_image.get_len() {
-        let mut disk_size = disk_state.disk_size.lock();
+        let mut disk_size = disk_state.disk_size.write().unwrap();
         *disk_size = new_disk_size;
     }
     DiskControlResult::Ok
@@ -357,113 +483,77 @@ fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult {
 
 fn run_worker(
     interrupt: Interrupt,
-    mut queues: Vec<Queue>,
+    queues: Vec<Queue>,
     mem: GuestMemory,
-    disk_state: &mut DiskState,
+    disk_state: &Rc<RefCell<DiskState>>,
     control_socket: &DiskControlResponseSocket,
-    queue_evt: EventFd,
+    queue_evts: Vec<EventFd>,
     kill_evt: EventFd,
-) {
-    #[derive(PollToken)]
-    enum Token {
-        FlushTimer,
-        QueueAvailable,
-        ControlRequest,
-        InterruptResample,
-        Kill,
-    }
+) -> Result<(), String> {
+    // Wrap the interupt in a `RefCell` so it can be shared between async functions.
+    let interrupt = Rc::new(RefCell::new(interrupt));
 
-    let mut flush_timer = match TimerFd::new() {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to create the flush timer: {}", e);
-            return;
-        }
-    };
-    let mut flush_timer_armed = false;
+    let timer = TimerFd::new().map_err(TimerError::TimerFdCreate).unwrap();
+    // TODO - better timerfd handling   let async_timer =
+    //       U64Source::new(timer.try_clone().map_err(TimerError::AsyncTimerCreate)?).unwrap();
+    let flush_timer_armed = AtomicBool::new(false);
+    //let flush_timer = flush_timer(disk_state.clone(), async_timer, &flush_timer_armed);
+    //pin_mut!(flush_timer);
 
-    let poll_ctx: PollContext<Token> = match PollContext::build_with(&[
-        (&flush_timer, Token::FlushTimer),
-        (&queue_evt, Token::QueueAvailable),
-        (control_socket, Token::ControlRequest),
-        (interrupt.get_resample_evt(), Token::InterruptResample),
-        (&kill_evt, Token::Kill),
-    ]) {
-        Ok(pc) => pc,
-        Err(e) => {
-            error!("failed creating PollContext: {}", e);
-            return;
-        }
-    };
+    // Handle all the queues in one sub-select call.
+    let queue_handlers = queues
+        .into_iter()
+        .map(|q| Arc::new(AsyncMutex::new(q)))
+        .zip(
+            queue_evts
+                .into_iter()
+                .map(|e| U64Source::new(e).unwrap())
+                .map(|e| Arc::new(AsyncMutex::new(e))),
+        )
+        .flat_map(|(queue, event)| {
+            // alias some refs so the lifetimes work.
+            let mem = &mem;
+            let timer = &timer;
+            let timer_armed = &flush_timer_armed;
+            let disk_state = &disk_state;
+            let interrupt = &interrupt;
+            std::iter::repeat_with(move || {
+                handle_queue(
+                    mem,
+                    (*disk_state).clone(),
+                    queue.clone(),
+                    event.clone(),
+                    timer,
+                    timer_armed,
+                    interrupt.clone(),
+                )
+            })
+            .take(2) // TODO - more or less? Skip this and do something better.
+        })
+        .map(Box::pin)
+        .collect::<FuturesUnordered<_>>()
+        .into_future();
 
-    'poll: loop {
-        let events = match poll_ctx.wait() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed polling for events: {}", e);
-                break;
-            }
-        };
+    // Handles control requests.
+    let control = handle_command_socket(control_socket, interrupt.clone(), disk_state.clone());
+    pin_mut!(control);
 
-        let mut needs_config_interrupt = false;
-        for event in events.iter_readable() {
-            match event.token() {
-                Token::FlushTimer => {
-                    if let Err(e) = disk_state.disk_image.fsync() {
-                        error!("Failed to flush the disk: {}", e);
-                        break 'poll;
-                    }
-                    if let Err(e) = flush_timer.wait() {
-                        error!("Failed to clear flush timer: {}", e);
-                        break 'poll;
-                    }
-                }
-                Token::QueueAvailable => {
-                    if let Err(e) = queue_evt.read() {
-                        error!("failed reading queue EventFd: {}", e);
-                        break 'poll;
-                    }
-                    process_queue(
-                        &mem,
-                        disk_state,
-                        &mut queues,
-                        0,
-                        &mut flush_timer,
-                        &mut flush_timer_armed,
-                        &interrupt,
-                    );
-                }
-                Token::ControlRequest => {
-                    let req = match control_socket.recv() {
-                        Ok(req) => req,
-                        Err(e) => {
-                            error!("control socket failed recv: {}", e);
-                            break 'poll;
-                        }
-                    };
+    // Process any requests to resample the irq value.
+    let resample = handle_irq_resample(interrupt.clone());
+    pin_mut!(resample);
+    // Exit if the kill event is triggered.
+    let kill = wait_kill(kill_evt);
+    pin_mut!(kill);
 
-                    let resp = match req {
-                        DiskControlCommand::Resize { new_size } => {
-                            needs_config_interrupt = true;
-                            resize(disk_state, new_size)
-                        }
-                    };
+    // And return once any future exits.
+    let _ = select4(
+        queue_handlers,
+        control,
+        /*flush_timer,*/ resample,
+        kill,
+    );
 
-                    if let Err(e) = control_socket.send(&resp) {
-                        error!("control socket failed send: {}", e);
-                        break 'poll;
-                    }
-                }
-                Token::InterruptResample => {
-                    interrupt.interrupt_resample();
-                }
-                Token::Kill => break 'poll,
-            }
-        }
-        if needs_config_interrupt {
-            interrupt.signal_config_changed();
-        }
-    }
+    Ok(())
 }
 
 /// Virtio device for exposing block level read/write operations on a host file.
@@ -471,7 +561,7 @@ pub struct Block {
     kill_evt: Option<EventFd>,
     worker_thread: Option<thread::JoinHandle<(Box<dyn DiskFile>, DiskControlResponseSocket)>>,
     disk_image: Option<Box<dyn DiskFile>>,
-    disk_size: Arc<Mutex<u64>>,
+    disk_size: Arc<RwLock<u64>>,
     avail_features: u64,
     read_only: bool,
     sparse: bool,
@@ -486,6 +576,7 @@ fn build_config_space(disk_size: u64, seg_max: u32, block_size: u32) -> virtio_b
         capacity: Le64::from(disk_size >> SECTOR_SHIFT),
         seg_max: Le32::from(seg_max),
         blk_size: Le32::from(block_size),
+        num_queues: Le16::from(NUM_QUEUES),
         max_discard_sectors: Le32::from(MAX_DISCARD_SECTORS),
         discard_sector_alignment: Le32::from(DISCARD_SECTOR_ALIGNMENT),
         max_write_zeroes_sectors: Le32::from(MAX_WRITE_ZEROES_SECTORS),
@@ -534,6 +625,7 @@ impl Block {
         avail_features |= 1 << VIRTIO_F_VERSION_1;
         avail_features |= 1 << VIRTIO_BLK_F_SEG_MAX;
         avail_features |= 1 << VIRTIO_BLK_F_BLK_SIZE;
+        avail_features |= 1 << VIRTIO_BLK_F_MQ;
 
         let seg_max = min(max(iov_max(), 1), u32::max_value() as usize) as u32;
 
@@ -546,7 +638,7 @@ impl Block {
             kill_evt: None,
             worker_thread: None,
             disk_image: Some(disk_image),
-            disk_size: Arc::new(Mutex::new(disk_size)),
+            disk_size: Arc::new(RwLock::new(disk_size)),
             avail_features,
             read_only,
             sparse,
@@ -567,8 +659,8 @@ impl Block {
         sparse: bool,
         disk: &mut dyn DiskFile,
         disk_size: u64,
-        flush_timer: &mut TimerFd,
-        flush_timer_armed: &mut bool,
+        flush_timer: &TimerFd,
+        flush_timer_armed: &AtomicBool,
     ) -> result::Result<(), ExecuteError> {
         let req_header: virtio_blk_req_header = reader.read_obj().map_err(ExecuteError::Read)?;
 
@@ -628,11 +720,11 @@ impl Block {
                         sector,
                         desc_error,
                     })?;
-                if !*flush_timer_armed {
+                if !flush_timer_armed.load(Ordering::Relaxed) {
                     flush_timer
                         .reset(flush_delay, None)
                         .map_err(ExecuteError::TimerFd)?;
-                    *flush_timer_armed = true;
+                    flush_timer_armed.store(true, Ordering::Relaxed);
                 }
             }
             VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
@@ -690,7 +782,7 @@ impl Block {
             VIRTIO_BLK_T_FLUSH => {
                 disk.fsync().map_err(ExecuteError::Flush)?;
                 flush_timer.clear().map_err(ExecuteError::TimerFd)?;
-                *flush_timer_armed = false;
+                flush_timer_armed.store(false, Ordering::Relaxed);
             }
             t => return Err(ExecuteError::Unsupported(t)),
         };
@@ -740,7 +832,7 @@ impl VirtioDevice for Block {
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let config_space = {
-            let disk_size = self.disk_size.lock();
+            let disk_size = self.disk_size.read().unwrap();
             build_config_space(*disk_size, self.seg_max, self.block_size)
         };
         copy_config(data, 0, config_space.as_slice(), offset);
@@ -751,12 +843,8 @@ impl VirtioDevice for Block {
         mem: GuestMemory,
         interrupt: Interrupt,
         queues: Vec<Queue>,
-        mut queue_evts: Vec<EventFd>,
+        queue_evts: Vec<EventFd>,
     ) {
-        if queues.len() != 1 || queue_evts.len() != 1 {
-            return;
-        }
-
         let (self_kill_evt, kill_evt) = match EventFd::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
@@ -775,21 +863,25 @@ impl VirtioDevice for Block {
                     thread::Builder::new()
                         .name("virtio_blk".to_string())
                         .spawn(move || {
-                            let mut disk_state = DiskState {
+                            let disk_state = Rc::new(RefCell::new(DiskState {
                                 disk_image,
                                 disk_size,
                                 read_only,
                                 sparse,
-                            };
-                            run_worker(
+                            }));
+                            if let Err(err_string) = run_worker(
                                 interrupt,
                                 queues,
                                 mem,
-                                &mut disk_state,
+                                &disk_state,
                                 &control_socket,
-                                queue_evts.remove(0),
+                                queue_evts,
                                 kill_evt,
-                            );
+                            ) {
+                                error!("{}", err_string);
+                            }
+
+                            let disk_state = Rc::try_unwrap(disk_state).unwrap().into_inner();
                             (disk_state.disk_image, control_socket)
                         });
 
@@ -888,8 +980,8 @@ mod tests {
             let b = Block::new(Box::new(f), false, true, 512, None).unwrap();
             // writable device should set VIRTIO_BLK_F_FLUSH + VIRTIO_BLK_F_DISCARD
             // + VIRTIO_BLK_F_WRITE_ZEROES + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE
-            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX
-            assert_eq!(0x120006244, b.features());
+            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX + VIRTIO_BLK_F_MQ
+            assert_eq!(0x120007244, b.features());
         }
 
         // read-write block device, non-sparse
@@ -898,8 +990,8 @@ mod tests {
             let b = Block::new(Box::new(f), false, false, 512, None).unwrap();
             // writable device should set VIRTIO_BLK_F_FLUSH
             // + VIRTIO_BLK_F_WRITE_ZEROES + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE
-            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX
-            assert_eq!(0x120004244, b.features());
+            // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_RING_F_EVENT_IDX + VIRTIO_BLK_F_MQ
+            assert_eq!(0x120005244, b.features());
         }
 
         // read-only block device
@@ -908,8 +1000,8 @@ mod tests {
             let b = Block::new(Box::new(f), true, true, 512, None).unwrap();
             // read-only device should set VIRTIO_BLK_F_FLUSH and VIRTIO_BLK_F_RO
             // + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE + VIRTIO_BLK_F_SEG_MAX
-            // + VIRTIO_RING_F_EVENT_IDX
-            assert_eq!(0x120000264, b.features());
+            // + VIRTIO_RING_F_EVENT_IDX + VIRTIO_BLK_F_MQ
+            assert_eq!(0x120001264, b.features());
         }
     }
 
@@ -954,8 +1046,8 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
-        let mut flush_timer_armed = false;
+        let flush_timer = TimerFd::new().expect("failed to create flush_timer");
+        let flush_timer_armed = AtomicBool::new(false);
 
         process_one_request(
             avail_desc,
@@ -963,8 +1055,8 @@ mod tests {
             true,
             &mut f,
             disk_size,
-            &mut flush_timer,
-            &mut flush_timer_armed,
+            &flush_timer,
+            &flush_timer_armed,
             &mem,
         )
         .expect("execute failed");
@@ -1015,8 +1107,8 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
-        let mut flush_timer_armed = false;
+        let flush_timer = TimerFd::new().expect("failed to create flush_timer");
+        let flush_timer_armed = AtomicBool::new(false);
 
         process_one_request(
             avail_desc,
@@ -1024,8 +1116,8 @@ mod tests {
             true,
             &mut f,
             disk_size,
-            &mut flush_timer,
-            &mut flush_timer_armed,
+            &flush_timer,
+            &flush_timer_armed,
             &mem,
         )
         .expect("execute failed");
