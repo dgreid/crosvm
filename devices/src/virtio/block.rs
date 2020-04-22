@@ -242,219 +242,228 @@ struct DiskState {
     sparse: bool,
 }
 
-struct Worker {
-    interrupt: Interrupt,
-    queues: Vec<Queue>,
-    mem: GuestMemory,
-    disk_state: DiskState,
-    control_socket: DiskControlResponseSocket,
+fn process_one_request(
+    avail_desc: DescriptorChain,
+    read_only: bool,
+    sparse: bool,
+    disk: &mut dyn DiskFile,
+    disk_size: u64,
+    flush_timer: &mut TimerFd,
+    flush_timer_armed: &mut bool,
+    mem: &GuestMemory,
+) -> result::Result<usize, ExecuteError> {
+    let mut reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
+    let mut writer = Writer::new(mem, avail_desc).map_err(ExecuteError::Descriptor)?;
+
+    // The last byte of the buffer is virtio_blk_req::status.
+    // Split it into a separate Writer so that status_writer is the final byte and
+    // the original writer is left with just the actual block I/O data.
+    let available_bytes = writer.available_bytes();
+    let status_offset = available_bytes
+        .checked_sub(1)
+        .ok_or(ExecuteError::MissingStatus)?;
+    let mut status_writer = writer
+        .split_at(status_offset)
+        .map_err(ExecuteError::Descriptor)?;
+
+    let status = match Block::execute_request(
+        &mut reader,
+        &mut writer,
+        read_only,
+        sparse,
+        disk,
+        disk_size,
+        flush_timer,
+        flush_timer_armed,
+    ) {
+        Ok(()) => VIRTIO_BLK_S_OK,
+        Err(e) => {
+            error!("failed executing disk request: {}", e);
+            e.status()
+        }
+    };
+
+    status_writer
+        .write_all(&[status])
+        .map_err(ExecuteError::WriteStatus)?;
+    Ok(available_bytes)
 }
 
-impl Worker {
-    fn process_one_request(
-        avail_desc: DescriptorChain,
-        read_only: bool,
-        sparse: bool,
-        disk: &mut dyn DiskFile,
-        disk_size: u64,
-        flush_timer: &mut TimerFd,
-        flush_timer_armed: &mut bool,
-        mem: &GuestMemory,
-    ) -> result::Result<usize, ExecuteError> {
-        let mut reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
-        let mut writer = Writer::new(mem, avail_desc).map_err(ExecuteError::Descriptor)?;
+fn process_queue(
+    mem: &GuestMemory,
+    disk_state: &mut DiskState,
+    queues: &mut [Queue],
+    queue_index: usize,
+    flush_timer: &mut TimerFd,
+    flush_timer_armed: &mut bool,
+    interrupt: &Interrupt,
+) {
+    let queue = &mut queues[queue_index];
 
-        // The last byte of the buffer is virtio_blk_req::status.
-        // Split it into a separate Writer so that status_writer is the final byte and
-        // the original writer is left with just the actual block I/O data.
-        let available_bytes = writer.available_bytes();
-        let status_offset = available_bytes
-            .checked_sub(1)
-            .ok_or(ExecuteError::MissingStatus)?;
-        let mut status_writer = writer
-            .split_at(status_offset)
-            .map_err(ExecuteError::Descriptor)?;
+    let disk_size = disk_state.disk_size.lock();
 
-        let status = match Block::execute_request(
-            &mut reader,
-            &mut writer,
-            read_only,
-            sparse,
-            disk,
-            disk_size,
+    while let Some(avail_desc) = queue.pop(&mem) {
+        queue.set_notify(&mem, false);
+        let desc_index = avail_desc.index;
+
+        let len = match process_one_request(
+            avail_desc,
+            disk_state.read_only,
+            disk_state.sparse,
+            &mut *disk_state.disk_image,
+            *disk_size,
             flush_timer,
             flush_timer_armed,
+            &mem,
         ) {
-            Ok(()) => VIRTIO_BLK_S_OK,
+            Ok(len) => len,
             Err(e) => {
-                error!("failed executing disk request: {}", e);
-                e.status()
+                error!("block: failed to handle request: {}", e);
+                0
             }
         };
 
-        status_writer
-            .write_all(&[status])
-            .map_err(ExecuteError::WriteStatus)?;
-        Ok(available_bytes)
+        queue.add_used(&mem, desc_index, len as u32);
+        queue.trigger_interrupt(&mem, &interrupt);
+        queue.set_notify(&mem, true);
+    }
+}
+
+fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult {
+    if disk_state.read_only {
+        error!("Attempted to resize read-only block device");
+        return DiskControlResult::Err(SysError::new(libc::EROFS));
     }
 
-    fn process_queue(
-        &mut self,
-        queue_index: usize,
-        flush_timer: &mut TimerFd,
-        flush_timer_armed: &mut bool,
-    ) {
-        let queue = &mut self.queues[queue_index];
+    info!("Resizing block device to {} bytes", new_size);
 
-        let disk_size = self.disk_state.disk_size.lock();
-
-        while let Some(avail_desc) = queue.pop(&self.mem) {
-            queue.set_notify(&self.mem, false);
-            let desc_index = avail_desc.index;
-
-            let len = match Worker::process_one_request(
-                avail_desc,
-                self.disk_state.read_only,
-                self.disk_state.sparse,
-                &mut *self.disk_state.disk_image,
-                *disk_size,
-                flush_timer,
-                flush_timer_armed,
-                &self.mem,
-            ) {
-                Ok(len) => len,
-                Err(e) => {
-                    error!("block: failed to handle request: {}", e);
-                    0
-                }
-            };
-
-            queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
-            queue.set_notify(&self.mem, true);
-        }
+    if let Err(e) = disk_state.disk_image.set_len(new_size) {
+        error!("Resizing disk failed! {}", e);
+        return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
-    fn resize(&mut self, new_size: u64) -> DiskControlResult {
-        if self.disk_state.read_only {
-            error!("Attempted to resize read-only block device");
-            return DiskControlResult::Err(SysError::new(libc::EROFS));
-        }
-
-        info!("Resizing block device to {} bytes", new_size);
-
-        if let Err(e) = self.disk_state.disk_image.set_len(new_size) {
-            error!("Resizing disk failed! {}", e);
-            return DiskControlResult::Err(SysError::new(libc::EIO));
-        }
-
-        // Allocate new space if the disk image is not sparse.
-        if let Err(e) = self.disk_state.disk_image.allocate(0, new_size) {
-            error!("Allocating disk space after resize failed! {}", e);
-            return DiskControlResult::Err(SysError::new(libc::EIO));
-        }
-
-        self.disk_state.sparse = false;
-
-        if let Ok(new_disk_size) = self.disk_state.disk_image.get_len() {
-            let mut disk_size = self.disk_state.disk_size.lock();
-            *disk_size = new_disk_size;
-        }
-        DiskControlResult::Ok
+    // Allocate new space if the disk image is not sparse.
+    if let Err(e) = disk_state.disk_image.allocate(0, new_size) {
+        error!("Allocating disk space after resize failed! {}", e);
+        return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
-    fn run(&mut self, queue_evt: EventFd, kill_evt: EventFd) {
-        #[derive(PollToken)]
-        enum Token {
-            FlushTimer,
-            QueueAvailable,
-            ControlRequest,
-            InterruptResample,
-            Kill,
-        }
+    disk_state.sparse = false;
 
-        let mut flush_timer = match TimerFd::new() {
-            Ok(t) => t,
+    if let Ok(new_disk_size) = disk_state.disk_image.get_len() {
+        let mut disk_size = disk_state.disk_size.lock();
+        *disk_size = new_disk_size;
+    }
+    DiskControlResult::Ok
+}
+
+fn run_worker(
+    interrupt: Interrupt,
+    mut queues: Vec<Queue>,
+    mem: GuestMemory,
+    disk_state: &mut DiskState,
+    control_socket: &DiskControlResponseSocket,
+    queue_evt: EventFd,
+    kill_evt: EventFd,
+) {
+    #[derive(PollToken)]
+    enum Token {
+        FlushTimer,
+        QueueAvailable,
+        ControlRequest,
+        InterruptResample,
+        Kill,
+    }
+
+    let mut flush_timer = match TimerFd::new() {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to create the flush timer: {}", e);
+            return;
+        }
+    };
+    let mut flush_timer_armed = false;
+
+    let poll_ctx: PollContext<Token> = match PollContext::build_with(&[
+        (&flush_timer, Token::FlushTimer),
+        (&queue_evt, Token::QueueAvailable),
+        (control_socket, Token::ControlRequest),
+        (interrupt.get_resample_evt(), Token::InterruptResample),
+        (&kill_evt, Token::Kill),
+    ]) {
+        Ok(pc) => pc,
+        Err(e) => {
+            error!("failed creating PollContext: {}", e);
+            return;
+        }
+    };
+
+    'poll: loop {
+        let events = match poll_ctx.wait() {
+            Ok(v) => v,
             Err(e) => {
-                error!("Failed to create the flush timer: {}", e);
-                return;
-            }
-        };
-        let mut flush_timer_armed = false;
-
-        let poll_ctx: PollContext<Token> = match PollContext::build_with(&[
-            (&flush_timer, Token::FlushTimer),
-            (&queue_evt, Token::QueueAvailable),
-            (&self.control_socket, Token::ControlRequest),
-            (self.interrupt.get_resample_evt(), Token::InterruptResample),
-            (&kill_evt, Token::Kill),
-        ]) {
-            Ok(pc) => pc,
-            Err(e) => {
-                error!("failed creating PollContext: {}", e);
-                return;
+                error!("failed polling for events: {}", e);
+                break;
             }
         };
 
-        'poll: loop {
-            let events = match poll_ctx.wait() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("failed polling for events: {}", e);
-                    break;
+        let mut needs_config_interrupt = false;
+        for event in events.iter_readable() {
+            match event.token() {
+                Token::FlushTimer => {
+                    if let Err(e) = disk_state.disk_image.fsync() {
+                        error!("Failed to flush the disk: {}", e);
+                        break 'poll;
+                    }
+                    if let Err(e) = flush_timer.wait() {
+                        error!("Failed to clear flush timer: {}", e);
+                        break 'poll;
+                    }
                 }
-            };
-
-            let mut needs_config_interrupt = false;
-            for event in events.iter_readable() {
-                match event.token() {
-                    Token::FlushTimer => {
-                        if let Err(e) = self.disk_state.disk_image.fsync() {
-                            error!("Failed to flush the disk: {}", e);
-                            break 'poll;
-                        }
-                        if let Err(e) = flush_timer.wait() {
-                            error!("Failed to clear flush timer: {}", e);
-                            break 'poll;
-                        }
+                Token::QueueAvailable => {
+                    if let Err(e) = queue_evt.read() {
+                        error!("failed reading queue EventFd: {}", e);
+                        break 'poll;
                     }
-                    Token::QueueAvailable => {
-                        if let Err(e) = queue_evt.read() {
-                            error!("failed reading queue EventFd: {}", e);
-                            break 'poll;
-                        }
-                        self.process_queue(0, &mut flush_timer, &mut flush_timer_armed);
-                    }
-                    Token::ControlRequest => {
-                        let req = match self.control_socket.recv() {
-                            Ok(req) => req,
-                            Err(e) => {
-                                error!("control socket failed recv: {}", e);
-                                break 'poll;
-                            }
-                        };
-
-                        let resp = match req {
-                            DiskControlCommand::Resize { new_size } => {
-                                needs_config_interrupt = true;
-                                self.resize(new_size)
-                            }
-                        };
-
-                        if let Err(e) = self.control_socket.send(&resp) {
-                            error!("control socket failed send: {}", e);
-                            break 'poll;
-                        }
-                    }
-                    Token::InterruptResample => {
-                        self.interrupt.interrupt_resample();
-                    }
-                    Token::Kill => break 'poll,
+                    process_queue(
+                        &mem,
+                        disk_state,
+                        &mut queues,
+                        0,
+                        &mut flush_timer,
+                        &mut flush_timer_armed,
+                        &interrupt,
+                    );
                 }
+                Token::ControlRequest => {
+                    let req = match control_socket.recv() {
+                        Ok(req) => req,
+                        Err(e) => {
+                            error!("control socket failed recv: {}", e);
+                            break 'poll;
+                        }
+                    };
+
+                    let resp = match req {
+                        DiskControlCommand::Resize { new_size } => {
+                            needs_config_interrupt = true;
+                            resize(disk_state, new_size)
+                        }
+                    };
+
+                    if let Err(e) = control_socket.send(&resp) {
+                        error!("control socket failed send: {}", e);
+                        break 'poll;
+                    }
+                }
+                Token::InterruptResample => {
+                    interrupt.interrupt_resample();
+                }
+                Token::Kill => break 'poll,
             }
-            if needs_config_interrupt {
-                self.interrupt.signal_config_changed();
-            }
+        }
+        if needs_config_interrupt {
+            interrupt.signal_config_changed();
         }
     }
 }
@@ -462,7 +471,7 @@ impl Worker {
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct Block {
     kill_evt: Option<EventFd>,
-    worker_thread: Option<thread::JoinHandle<Worker>>,
+    worker_thread: Option<thread::JoinHandle<(Box<dyn DiskFile>, DiskControlResponseSocket)>>,
     disk_image: Option<Box<dyn DiskFile>>,
     disk_size: Arc<Mutex<u64>>,
     avail_features: u64,
@@ -768,21 +777,22 @@ impl VirtioDevice for Block {
                     thread::Builder::new()
                         .name("virtio_blk".to_string())
                         .spawn(move || {
-                            let disk_state = DiskState {
+                            let mut disk_state = DiskState {
                                 disk_image,
                                 disk_size,
                                 read_only,
                                 sparse,
                             };
-                            let mut worker = Worker {
+                            run_worker(
                                 interrupt,
                                 queues,
                                 mem,
-                                disk_state,
-                                control_socket,
-                            };
-                            worker.run(queue_evts.remove(0), kill_evt);
-                            worker
+                                &mut disk_state,
+                                &control_socket,
+                                queue_evts.remove(0),
+                                kill_evt,
+                            );
+                            (disk_state.disk_image, control_socket)
                         });
 
                 match worker_result {
@@ -812,9 +822,9 @@ impl VirtioDevice for Block {
                     error!("{}: failed to get back resources", self.debug_label());
                     return false;
                 }
-                Ok(worker) => {
-                    self.disk_image = Some(worker.disk_state.disk_image);
-                    self.control_socket = Some(worker.control_socket);
+                Ok((disk_image, control_socket)) => {
+                    self.disk_image = Some(disk_image);
+                    self.control_socket = Some(control_socket);
                     return true;
                 }
             }
@@ -949,7 +959,7 @@ mod tests {
         let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
         let mut flush_timer_armed = false;
 
-        Worker::process_one_request(
+        process_one_request(
             avail_desc,
             false,
             true,
@@ -1010,7 +1020,7 @@ mod tests {
         let mut flush_timer = TimerFd::new().expect("failed to create flush_timer");
         let mut flush_timer_armed = false;
 
-        Worker::process_one_request(
+        process_one_request(
             avail_desc,
             false,
             true,
