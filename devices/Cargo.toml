@@ -13,9 +13,11 @@ gfxstream = ["gpu"]
 
 [dependencies]
 acpi_tables = {path = "../acpi_tables" }
+async_core = { path = "../async_core" }
 audio_streams = "*"
 bit_field = { path = "../bit_field" }
 bitflags = "1"
+cros_async = { path = "../cros_async" }
 data_model = { path = "../data_model" }
 disk = { path = "../disk" }
 enumn = { path = "../enumn" }

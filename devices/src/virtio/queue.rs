@@ -6,6 +6,7 @@ use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 
+use async_core::EventFd;
 use sys_util::{error, GuestAddress, GuestMemory};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 
@@ -371,6 +372,22 @@ impl Queue {
     /// A consuming iterator over all available descriptor chain heads offered by the driver.
     pub fn iter<'a, 'b>(&'b mut self, mem: &'a GuestMemory) -> AvailIter<'a, 'b> {
         AvailIter { mem, queue: self }
+    }
+
+    /// Asynchronously read the next descriptor chain from the queue.
+    /// Returns a `DescriptorChain` when it is `await`ed.
+    pub async fn next_async<'mem>(
+        &mut self,
+        mem: &'mem GuestMemory,
+        eventfd: &mut EventFd,
+    ) -> std::result::Result<DescriptorChain<'mem>, async_core::EventFdError> {
+        loop {
+            // Check if there are more descriptors available.
+            if let Some(chain) = self.pop(mem) {
+                return Ok(chain);
+            }
+            eventfd.read_next().await?;
+        }
     }
 
     /// Puts an available descriptor head into the used ring for use by the guest.
