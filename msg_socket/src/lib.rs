@@ -4,16 +4,16 @@
 
 mod msg_on_socket;
 
+use std::future::Future;
 use std::io::Result;
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::Stream;
 use libc::{EWOULDBLOCK, O_NONBLOCK};
 
-use cros_async::add_read_waker;
+use cros_async::{add_read_waker, cancel_waker, WakerToken};
 use sys_util::{
     add_fd_flags, clear_fd_flags, error, handle_eintr, net::UnixSeqpacket, Error as SysError,
     ScmSocket,
@@ -204,16 +204,19 @@ impl<O: MsgOnSocket> MsgReceiver for Receiver<O> {
 /// Asynchronous adaptor for `MsgSocket`.
 pub struct AsyncReceiver<'a, I: MsgOnSocket, O: MsgOnSocket> {
     inner: &'a MsgSocket<I, O>,
-    done: bool, // Have hit an error and the Stream should return null when polled.
 }
 
 impl<'a, I: MsgOnSocket, O: MsgOnSocket> AsyncReceiver<'a, I, O> {
     fn new(msg_socket: &MsgSocket<I, O>) -> MsgResult<AsyncReceiver<I, O>> {
         add_fd_flags(msg_socket.as_raw_fd(), O_NONBLOCK).map_err(MsgError::SettingFdFlags)?;
-        Ok(AsyncReceiver {
-            inner: msg_socket,
-            done: false,
-        })
+        Ok(AsyncReceiver { inner: msg_socket })
+    }
+
+    pub fn next(&mut self) -> MsgFuture<'a, I, O> {
+        MsgFuture {
+            inner: self.inner,
+            waker_token: None,
+        }
     }
 }
 
@@ -228,20 +231,26 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> Drop for AsyncReceiver<'a, I, O> {
     }
 }
 
-impl<'a, I: MsgOnSocket, O: MsgOnSocket> Stream for AsyncReceiver<'a, I, O> {
-    type Item = MsgResult<O>;
+/// A Future that returns a message when waited on.
+pub struct MsgFuture<'a, I: MsgOnSocket, O: MsgOnSocket> {
+    inner: &'a MsgSocket<I, O>,
+    waker_token: Option<WakerToken>,
+}
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if self.done {
-            return Poll::Ready(None);
-        }
+impl<'a, I: MsgOnSocket, O: MsgOnSocket> Future for MsgFuture<'a, I, O> {
+    type Output = MsgResult<O>;
 
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        self.waker_token = None;
         let ret = match self.inner.recv() {
-            Ok(msg) => Ok(Poll::Ready(Some(Ok(msg)))),
+            Ok(msg) => Ok(Poll::Ready(Ok(msg))),
             Err(MsgError::Recv(e)) => {
                 if e.errno() == EWOULDBLOCK {
                     add_read_waker(self.inner.as_raw_fd(), cx.waker().clone())
-                        .map(|_| Poll::Pending)
+                        .map(|token| {
+                            self.waker_token = Some(token);
+                            Poll::Pending
+                        })
                         .map_err(MsgError::AddingWaker)
                 } else {
                     Err(MsgError::Recv(e))
@@ -252,11 +261,15 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> Stream for AsyncReceiver<'a, I, O> {
 
         match ret {
             Ok(p) => p,
-            Err(e) => {
-                // Indicate something went wrong and no more events will be provided.
-                self.done = true;
-                Poll::Ready(Some(Err(e)))
-            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+impl<'a, I: MsgOnSocket, O: MsgOnSocket> Drop for MsgFuture<'a, I, O> {
+    fn drop(&mut self) {
+        if let Some(token) = self.waker_token.take() {
+            let _ = cancel_waker(token);
         }
     }
 }
