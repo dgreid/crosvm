@@ -367,7 +367,7 @@ impl URingContext {
     pub fn add_poll_fd(
         &mut self,
         fd: RawFd,
-        events: WatchingEvents,
+        events: &WatchingEvents,
         user_data: UserData,
     ) -> Result<()> {
         self.prep_next_sqe(|sqe, _iovec| {
@@ -389,7 +389,7 @@ impl URingContext {
     pub fn remove_poll_fd(
         &mut self,
         fd: RawFd,
-        events: WatchingEvents,
+        events: &WatchingEvents,
         user_data: UserData,
     ) -> Result<()> {
         self.prep_next_sqe(|sqe, _iovec| {

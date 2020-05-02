@@ -16,7 +16,7 @@ use data_model::*;
 use sync::Mutex;
 use sys_util::{Error as SysError, EventFd};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 /// An error during transaction or serialization/deserialization.
 pub enum MsgError {
     /// Error adding a waker for async read.
