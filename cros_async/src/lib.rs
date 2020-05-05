@@ -13,6 +13,10 @@
 //!
 //! Use helper functions based the desired behavior of your application.
 //!
+//! ## Running one future.
+//!
+//! If there is only one top-level future to run, use the [`run_one`](fn.run_one.html) function.
+//!
 //! ## Completing one of several futures.
 //!
 //! If there are several top level tasks that should run until any one completes, use the "select"
@@ -32,12 +36,6 @@
 //! executor and to poll only when necessary. See the docs for [`complete2`](fn.complete2.html),
 //! [`complete3`](fn.complete3.html), [`complete4`](fn.complete4.html), and
 //! [`complete5`](fn.complete5.html).
-//!
-//! ## Many futures all returning `()`
-//!
-//! It there are futures that produce side effects and return `()`, the
-//! [`empty_executor`](fn.empty_executor.html) function provides an Executor that runs futures
-//! returning `()`. Futures are added using the [`add_future`](fn.add_future.html) function.
 //!
 //! # Implementing new FD-based futures.
 //!
@@ -59,24 +57,29 @@ mod complete;
 mod executor;
 mod fd_executor;
 mod select;
+mod uring_executor;
 mod waker;
 
 pub use executor::{Executor, WakerToken};
 pub use select::SelectResult;
 
-use executor::{RunOne, UnitFutures};
+use executor::{FutureList, RunOne};
 use fd_executor::FdExecutor;
+use uring_executor::URingExecutor;
 
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::os::unix::io::RawFd;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Waker;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Error {
     /// Error from the FD executor.
     FdExecutor(fd_executor::Error),
+    /// Error from the uring executor.
+    URingExecutor(uring_executor::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -86,28 +89,47 @@ impl Display for Error {
 
         match self {
             FdExecutor(e) => write!(f, "Failure in the FD executor: {}", e),
+            URingExecutor(e) => write!(f, "Failure in the uring executor: {}", e),
         }
     }
 }
 
-/// Creates an empty FdExecutor that can have futures returning `()` added via
-/// [`add_future`](fn.add_future.html).
-///
-///  # Example
-///
-///    ```
-///    use cros_async::{empty_executor, Executor};
-///    use cros_async::fd_executor::add_future;
-///    use futures::future::pending;
-///
-///    let fut = async { () };
-///    let mut ex = empty_executor().expect("Failed to create executor");
-///
-///    add_future(Box::pin(fut));
-///    ex.run();
-///    ```
-pub fn empty_executor() -> Result<impl Executor> {
-    FdExecutor::new(UnitFutures::new()).map_err(Error::FdExecutor)
+// Checks if the uring executor is available and if it us use it.
+// Caches the result so that the check is only run once.
+// Useful for falling back to the FD executor on pre-uring kernels.
+fn use_uring() -> bool {
+    const UNKNOWN: u32 = 0;
+    const URING: u32 = 1;
+    const FD: u32 = 2;
+    static USE_URING: AtomicU32 = AtomicU32::new(UNKNOWN);
+    match USE_URING.load(Ordering::Relaxed) {
+        UNKNOWN => {
+            if uring_executor::supported() {
+                USE_URING.store(URING, Ordering::Relaxed);
+                true
+            } else {
+                USE_URING.store(FD, Ordering::Relaxed);
+                false
+            }
+        }
+        URING => true,
+        FD => false,
+        _ => unreachable!("invalid use uring state"),
+    }
+}
+
+// Runs an executor with the given future list.
+// Chooses the uring executor if available, otherwise falls back to the FD executor.
+fn run_executor<T: FutureList>(future_list: T) -> Result<T::Output> {
+    if use_uring() {
+        URingExecutor::new(future_list)
+            .and_then(|mut ex| ex.run())
+            .map_err(Error::URingExecutor)
+    } else {
+        FdExecutor::new(future_list)
+            .and_then(|mut ex| ex.run())
+            .map_err(Error::FdExecutor)
+    }
 }
 
 /// Creates a FdExecutor that runs one future to completion.
@@ -118,12 +140,10 @@ pub fn empty_executor() -> Result<impl Executor> {
 ///    use cros_async::run_one;
 ///
 ///    let fut = async { 55 };
-///    assert_eq!(Ok(55),run_one(Box::pin(fut)));
+///    assert_eq!(55, run_one(Box::pin(fut)).unwrap());
 ///    ```
 pub fn run_one<F: Future + Unpin>(fut: F) -> Result<F::Output> {
-    FdExecutor::new(RunOne::new(fut))
-        .and_then(|mut ex| ex.run())
-        .map_err(Error::FdExecutor)
+    run_executor(RunOne::new(fut))
 }
 
 // Select helpers to run until any future completes.
@@ -134,8 +154,7 @@ pub fn run_one<F: Future + Unpin>(fut: F) -> Result<F::Output> {
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, select2, SelectResult};
-///    use cros_async::fd_executor::add_future;
+///    use cros_async::{Executor, select2, SelectResult};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -152,9 +171,7 @@ pub fn select2<F1: Future + Unpin, F2: Future + Unpin>(
     f1: F1,
     f2: F2,
 ) -> Result<(SelectResult<F1>, SelectResult<F2>)> {
-    FdExecutor::new(select::Select2::new(f1, f2))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(select::Select2::new(f1, f2))
 }
 
 /// Creates an executor that runs the three given futures until one or more completes, returning a
@@ -163,8 +180,7 @@ pub fn select2<F1: Future + Unpin, F2: Future + Unpin>(
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, select3, SelectResult};
-///    use cros_async::fd_executor::add_future;
+///    use cros_async::{Executor, select3, SelectResult};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -186,9 +202,7 @@ pub fn select3<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin>(
     f2: F2,
     f3: F3,
 ) -> Result<(SelectResult<F1>, SelectResult<F2>, SelectResult<F3>)> {
-    FdExecutor::new(select::Select3::new(f1, f2, f3))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(select::Select3::new(f1, f2, f3))
 }
 
 /// Creates an executor that runs the four given futures until one or more completes, returning a
@@ -197,8 +211,7 @@ pub fn select3<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin>(
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, select4, SelectResult};
-///    use cros_async::fd_executor::add_future;
+///    use cros_async::{Executor, select4, SelectResult};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -227,9 +240,7 @@ pub fn select4<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin, F4: F
     SelectResult<F3>,
     SelectResult<F4>,
 )> {
-    FdExecutor::new(select::Select4::new(f1, f2, f3, f4))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(select::Select4::new(f1, f2, f3, f4))
 }
 
 /// Creates an executor that runs the five given futures until one or more completes, returning a
@@ -238,8 +249,7 @@ pub fn select4<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin, F4: F
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, select5, SelectResult};
-///    use cros_async::fd_executor::add_future;
+///    use cros_async::{Executor, select5, SelectResult};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -279,9 +289,7 @@ pub fn select5<
     SelectResult<F4>,
     SelectResult<F5>,
 )> {
-    FdExecutor::new(select::Select5::new(f1, f2, f3, f4, f5))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(select::Select5::new(f1, f2, f3, f4, f5))
 }
 
 /// Creates an executor that runs the six given futures until one or more completes, returning a
@@ -290,8 +298,7 @@ pub fn select5<
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, select6, SelectResult};
-///    use cros_async::fd_executor::add_future;
+///    use cros_async::{Executor, select6, SelectResult};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -336,9 +343,7 @@ pub fn select6<
     SelectResult<F5>,
     SelectResult<F6>,
 )> {
-    FdExecutor::new(select::Select6::new(f1, f2, f3, f4, f5, f6))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(select::Select6::new(f1, f2, f3, f4, f5, f6))
 }
 
 // Combination helpers to run until all futures are complete.
@@ -349,7 +354,7 @@ pub fn select6<
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, complete2};
+///    use cros_async::{Executor, complete2};
 ///    use futures::pin_mut;
 ///
 ///    let first = async {5};
@@ -362,9 +367,7 @@ pub fn complete2<F1: Future + Unpin, F2: Future + Unpin>(
     f1: F1,
     f2: F2,
 ) -> Result<(F1::Output, F2::Output)> {
-    FdExecutor::new(complete::Complete2::new(f1, f2))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(complete::Complete2::new(f1, f2))
 }
 
 /// Creates an executor that runs the three given futures to completion, returning a tuple of the
@@ -373,7 +376,7 @@ pub fn complete2<F1: Future + Unpin, F2: Future + Unpin>(
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, complete3};
+///    use cros_async::{Executor, complete3};
 ///    use futures::pin_mut;
 ///
 ///    let first = async {5};
@@ -389,9 +392,7 @@ pub fn complete3<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin>(
     f2: F2,
     f3: F3,
 ) -> Result<(F1::Output, F2::Output, F3::Output)> {
-    FdExecutor::new(complete::Complete3::new(f1, f2, f3))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(complete::Complete3::new(f1, f2, f3))
 }
 
 /// Creates an executor that runs the four given futures to completion, returning a tuple of the
@@ -400,7 +401,7 @@ pub fn complete3<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin>(
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, complete4};
+///    use cros_async::{Executor, complete4};
 ///    use futures::pin_mut;
 ///
 ///    let first = async {5};
@@ -419,9 +420,7 @@ pub fn complete4<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin, F4:
     f3: F3,
     f4: F4,
 ) -> Result<(F1::Output, F2::Output, F3::Output, F4::Output)> {
-    FdExecutor::new(complete::Complete4::new(f1, f2, f3, f4))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(complete::Complete4::new(f1, f2, f3, f4))
 }
 
 /// Creates an executor that runs the five given futures to completion, returning a tuple of the
@@ -430,7 +429,7 @@ pub fn complete4<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin, F4:
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{empty_executor, Executor, complete5};
+///    use cros_async::{Executor, complete5};
 ///    use futures::pin_mut;
 ///
 ///    let first = async {5};
@@ -459,9 +458,7 @@ pub fn complete5<
     f4: F4,
     f5: F5,
 ) -> Result<(F1::Output, F2::Output, F3::Output, F4::Output, F5::Output)> {
-    FdExecutor::new(complete::Complete5::new(f1, f2, f3, f4, f5))
-        .and_then(|mut f| f.run())
-        .map_err(Error::FdExecutor)
+    run_executor(complete::Complete5::new(f1, f2, f3, f4, f5))
 }
 
 // Functions to be used by `Future` implementations
@@ -472,7 +469,11 @@ pub fn complete5<
 /// opened on top of it causing the next poll to access the new target file.
 /// Returns a `WakerToken` that can be used to cancel the waker before it completes.
 pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
-    fd_executor::add_read_waker(fd, waker).map_err(Error::FdExecutor)
+    if use_uring() {
+        uring_executor::add_read_waker(fd, waker).map_err(Error::URingExecutor)
+    } else {
+        fd_executor::add_read_waker(fd, waker).map_err(Error::FdExecutor)
+    }
 }
 
 /// Tells the waking system to wake `waker` when `fd` becomes writable.
@@ -481,16 +482,28 @@ pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
 /// opened on top of it causing the next poll to access the new target file.
 /// Returns a `WakerToken` that can be used to cancel the waker before it completes.
 pub fn add_write_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
-    fd_executor::add_write_waker(fd, waker).map_err(Error::FdExecutor)
+    if use_uring() {
+        uring_executor::add_write_waker(fd, waker).map_err(Error::URingExecutor)
+    } else {
+        fd_executor::add_write_waker(fd, waker).map_err(Error::FdExecutor)
+    }
 }
 
 /// Cancels the waker that returned the given token if the waker hasn't yet fired.
 pub fn cancel_waker(token: WakerToken) -> Result<()> {
-    fd_executor::cancel_waker(token).map_err(Error::FdExecutor)
+    if use_uring() {
+        uring_executor::cancel_waker(token).map_err(Error::URingExecutor)
+    } else {
+        fd_executor::cancel_waker(token).map_err(Error::FdExecutor)
+    }
 }
 
 /// Adds a new top level future to the Executor.
 /// These futures must return `()`, indicating they are intended to create side-effects only.
 pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
-    fd_executor::add_future(future).map_err(Error::FdExecutor)
+    if use_uring() {
+        uring_executor::add_future(future).map_err(Error::URingExecutor)
+    } else {
+        fd_executor::add_future(future).map_err(Error::FdExecutor)
+    }
 }
