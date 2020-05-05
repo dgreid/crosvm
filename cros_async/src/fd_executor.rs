@@ -38,7 +38,7 @@ use std::task::Waker;
 
 use sys_util::{PollContext, WatchingEvents};
 
-use crate::executor::{ExecutableFuture, Executor, FutureList};
+use crate::executor::{ExecutableFuture, Executor, FutureList, WakerToken};
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -79,9 +79,6 @@ impl Display for Error {
 
 // Tracks active wakers and the futures they are associated with.
 thread_local!(static STATE: RefCell<Option<FdWakerState>> = RefCell::new(None));
-
-/// A token returned from `add_waker` that can be used to cancel the waker before it completes.
-pub struct WakerToken(u64);
 
 fn add_waker(fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<WakerToken> {
     STATE.with(|state| {
