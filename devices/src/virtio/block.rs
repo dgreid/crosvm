@@ -341,15 +341,17 @@ async fn handle_queue(
     interrupt: Rc<RefCell<Interrupt>>,
 ) {
     loop {
-        let mut queue = queue_mutex.lock().await;
-        let mut evt = evt_mutex.lock().await;
-        let avail_desc = queue.next_async(mem, &mut evt).await;
-        let avail_desc = match avail_desc {
-            Err(e) => {
-                error!("Failed to read the next descriptor from the queue: {}", e);
-                return;
+        let avail_desc = {
+            let mut queue = queue_mutex.lock().await;
+            let mut evt = evt_mutex.lock().await;
+            let avail_desc = queue.next_async(mem, &mut evt).await;
+            match avail_desc {
+                Err(e) => {
+                    error!("Failed to read the next descriptor from the queue: {}", e);
+                    return;
+                }
+                Ok(a) => a,
             }
-            Ok(a) => a,
         };
 
         let mut disk_state = disk_state.borrow_mut();
@@ -358,7 +360,7 @@ async fn handle_queue(
         let disk_size_lock = disk_state.disk_size.clone();
         let disk_size = disk_size_lock.lock();
 
-        queue.set_notify(&mem, false);
+        //queue.set_notify(&mem, false); // TODO - might need to set notify to counter of contexts that disabled it.
         let desc_index = avail_desc.index;
 
         let len = match process_one_request(
@@ -378,9 +380,12 @@ async fn handle_queue(
             }
         };
 
-        queue.add_used(&mem, desc_index, len as u32);
-        interrupt.borrow_mut().signal_used_queue(queue.vector);
-        queue.set_notify(&mem, true);
+        {
+            let mut queue = queue_mutex.lock().await;
+            queue.add_used(&mem, desc_index, len as u32);
+            interrupt.borrow_mut().signal_used_queue(queue.vector);
+            //    queue.set_notify(&mem, true);
+        }
     }
 }
 
