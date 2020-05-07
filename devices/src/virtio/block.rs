@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use futures::lock::Mutex as AsyncMutex;
 use futures::pin_mut;
 use futures::stream::{FuturesUnordered, StreamExt};
 
@@ -333,22 +334,16 @@ fn process_one_request(
 async fn handle_queue(
     mem: &GuestMemory,
     disk_state: Rc<RefCell<DiskState>>,
-    mut queue: Queue,
-    queue_evt: EventFd,
+    queue_mutex: Arc<AsyncMutex<Queue>>,
+    evt_mutex: Arc<AsyncMutex<AsyncEventFd>>,
     flush_timer: &AsyncTimerFd,
     flush_timer_armed: &AtomicBool,
     interrupt: Rc<RefCell<Interrupt>>,
 ) {
-    let mut queue_evt = match AsyncEventFd::try_from(queue_evt) {
-        Ok(event) => event,
-        Err(e) => {
-            error!("Failed to set up queue ready event: {}", e);
-            return;
-        }
-    };
-
     loop {
-        let avail_desc = queue.next_async(mem, &mut queue_evt).await;
+        let mut queue = queue_mutex.lock().await;
+        let mut evt = evt_mutex.lock().await;
+        let avail_desc = queue.next_async(mem, &mut evt).await;
         let avail_desc = match avail_desc {
             Err(e) => {
                 error!("Failed to read the next descriptor from the queue: {}", e);
@@ -511,17 +506,32 @@ fn run_worker(
     // Handle all the queues in one sub-select call.
     let queue_handlers = queues
         .into_iter()
-        .zip(queue_evts)
-        .map(|(queue, event)| {
-            handle_queue(
-                &mem,
-                disk_state.clone(),
-                queue,
-                event,
-                &async_timer,
-                &flush_timer_armed,
-                interrupt.clone(),
-            )
+        .map(|q| Arc::new(AsyncMutex::new(q)))
+        .zip(
+            queue_evts
+                .into_iter()
+                .map(|e| AsyncEventFd::try_from(e).unwrap())
+                .map(|e| Arc::new(AsyncMutex::new(e))),
+        )
+        .flat_map(|(queue, event)| {
+            // alias some refs so the lifetimes work.
+            let mem = &mem;
+            let timer = &async_timer;
+            let timer_armed = &flush_timer_armed;
+            let disk_state = &disk_state;
+            let interrupt = &interrupt;
+            std::iter::repeat_with(move || {
+                handle_queue(
+                    mem,
+                    (*disk_state).clone(),
+                    queue.clone(),
+                    event.clone(),
+                    timer,
+                    timer_armed,
+                    interrupt.clone(),
+                )
+            })
+            .take(2)
         })
         .map(Box::pin)
         .collect::<FuturesUnordered<_>>()
