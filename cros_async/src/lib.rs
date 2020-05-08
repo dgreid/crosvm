@@ -507,3 +507,11 @@ pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
         fd_executor::add_future(future).map_err(Error::FdExecutor)
     }
 }
+
+pub fn get_result(token: WakerToken) -> Result<std::io::Result<u32>> {
+    if use_uring() {
+        uring_executor::get_result(token).map_err(Error::URingExecutor)
+    } else {
+        fd_executor::get_result(token).map_err(Error::FdExecutor)
+    }
+}

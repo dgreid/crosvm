@@ -104,6 +104,10 @@ pub fn cancel_waker(token: WakerToken) -> Result<()> {
     })
 }
 
+pub fn get_result(_token: WakerToken) -> Result<std::io::Result<u32>> {
+    Ok(Ok(0))
+}
+
 /// Adds a new top level future to the Executor.
 /// These futures must return `()`, indicating they are intended to create side-effects only.
 pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {

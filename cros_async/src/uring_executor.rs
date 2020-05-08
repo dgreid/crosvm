@@ -27,6 +27,8 @@ use crate::executor::{ExecutableFuture, Executor, FutureList, WakerToken};
 pub enum Error {
     /// Attempts to create two Executors on the same thread fail.
     AttemptedDuplicateExecutor,
+    /// Failed to get results from the uring operation.
+    GettingResult,
     /// Failed to copy the FD for the polling context.
     DuplicatingFd(sys_util::Error),
     /// Failed accessing the thread local storage for wakers.
@@ -51,6 +53,7 @@ impl Display for Error {
         match self {
             AttemptedDuplicateExecutor => write!(f, "Cannot have two executors on one thread."),
             DuplicatingFd(e) => write!(f, "Failed to copy the FD for the polling context: {}", e),
+            GettingResult => write!(f, "Getting uring result for unknown token"),
             InvalidContext => write!(
                 f,
                 "Invalid context, was the Fd executor created successfully?"
@@ -114,6 +117,17 @@ pub fn cancel_waker(token: WakerToken) -> Result<()> {
     })
 }
 
+pub fn get_result(token: WakerToken) -> Result<std::io::Result<u32>> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(state) = state.as_mut() {
+            state.get_result(token)
+        } else {
+            Err(Error::InvalidContext)
+        }
+    })
+}
+
 /// Adds a new top level future to the Executor.
 /// These futures must return `()`, indicating they are intended to create side-effects only.
 pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
@@ -133,6 +147,7 @@ struct RingWakerState {
     ctx: URingContext,
     pending_ops: BTreeMap<u64, (File, WatchingEvents, Waker)>,
     next_token: u64, // Next token for adding to the context.
+    completed_ops: BTreeMap<u64, std::io::Result<u32>>,
     new_futures: VecDeque<ExecutableFuture<()>>,
 }
 
@@ -142,6 +157,7 @@ impl RingWakerState {
             ctx: URingContext::new(256).map_err(Error::CreatingContext)?,
             pending_ops: BTreeMap::new(),
             next_token: 0,
+            completed_ops: BTreeMap::new(),
             new_futures: VecDeque::new(),
         })
     }
@@ -176,13 +192,22 @@ impl RingWakerState {
     // Waits until one of the FDs is readable and wakes the associated waker.
     fn wait_wake_event(&mut self) -> Result<()> {
         let events = self.ctx.wait().map_err(Error::URingEnter)?;
-        for (token, _result) in events {
-            // TODO - store the result and make accessible to the future.
+        for (token, result) in events {
             if let Some((_file, _event, waker)) = self.pending_ops.remove(&token) {
+                // Store the result so it can be retrieved after the future is woken.
+                self.completed_ops.insert(token, result);
                 waker.wake_by_ref();
             }
         }
         Ok(())
+    }
+
+    fn get_result(&mut self, token: WakerToken) -> Result<std::io::Result<u32>> {
+        if let Some(result) = self.completed_ops.remove(&token.0) {
+            Ok(result)
+        } else {
+            Err(Error::GettingResult)
+        }
     }
 }
 
