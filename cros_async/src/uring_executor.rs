@@ -131,7 +131,7 @@ pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
 // Tracks active wakers and associates wakers with the futures that registered them.
 struct RingWakerState {
     ctx: URingContext,
-    token_map: BTreeMap<u64, (File, WatchingEvents, Waker)>,
+    pending_ops: BTreeMap<u64, (File, WatchingEvents, Waker)>,
     next_token: u64, // Next token for adding to the context.
     new_futures: VecDeque<ExecutableFuture<()>>,
 }
@@ -140,7 +140,7 @@ impl RingWakerState {
     fn new() -> Result<Self> {
         Ok(RingWakerState {
             ctx: URingContext::new(256).map_err(Error::CreatingContext)?,
-            token_map: BTreeMap::new(),
+            pending_ops: BTreeMap::new(),
             next_token: 0,
             new_futures: VecDeque::new(),
         })
@@ -157,14 +157,15 @@ impl RingWakerState {
             .add_poll_fd(duped_fd.as_raw_fd(), &events, self.next_token)
             .map_err(Error::SubmittingWaker)?;
         let next_token = self.next_token;
-        self.token_map.insert(next_token, (duped_fd, events, waker));
+        self.pending_ops
+            .insert(next_token, (duped_fd, events, waker));
         self.next_token += 1;
         Ok(WakerToken(next_token))
     }
 
     // Remove the waker for the given token if it hasn't fired yet.
     fn cancel_waker(&mut self, token: WakerToken) -> Result<()> {
-        if let Some((file, events, _waker)) = self.token_map.remove(&token.0) {
+        if let Some((file, events, _waker)) = self.pending_ops.remove(&token.0) {
             self.ctx
                 .remove_poll_fd(file.as_raw_fd(), &events, token.0)
                 .map_err(Error::RemovingWaker)?
@@ -177,7 +178,7 @@ impl RingWakerState {
         let events = self.ctx.wait().map_err(Error::URingEnter)?;
         for (token, _result) in events {
             // TODO - store the result and make accessible to the future.
-            if let Some((_file, _event, waker)) = self.token_map.remove(&token) {
+            if let Some((_file, _event, waker)) = self.pending_ops.remove(&token) {
                 waker.wake_by_ref();
             }
         }
@@ -329,7 +330,7 @@ mod test {
         ex.run().unwrap();
         STATE.with(|state| {
             let state = state.borrow_mut();
-            assert!(state.as_ref().unwrap().token_map.is_empty());
+            assert!(state.as_ref().unwrap().pending_ops.is_empty());
         });
     }
 
