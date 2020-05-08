@@ -151,14 +151,6 @@ impl<'a> Future for TimerFuture<'a> {
     }
 }
 
-impl<'a> Drop for TimerFuture<'a> {
-    fn drop(&mut self) {
-        if let Some(mut pending_waker) = self.pending_waker.take() {
-            let _ = pending_waker.cancel();
-        }
-    }
-}
-
 impl AsRef<sys_util::TimerFd> for TimerFd {
     fn as_ref(&self) -> &sys_util::TimerFd {
         &self.0

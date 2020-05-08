@@ -265,11 +265,3 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> Future for MsgFuture<'a, I, O> {
         }
     }
 }
-
-impl<'a, I: MsgOnSocket, O: MsgOnSocket> Drop for MsgFuture<'a, I, O> {
-    fn drop(&mut self) {
-        if let Some(mut pending_waker) = self.pending_waker.take() {
-            let _ = pending_waker.cancel();
-        }
-    }
-}

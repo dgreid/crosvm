@@ -150,14 +150,6 @@ impl<'a> Future for NextValFuture<'a> {
     }
 }
 
-impl<'a> Drop for NextValFuture<'a> {
-    fn drop(&mut self) {
-        if let Some(mut pending_waker) = self.pending_waker.take() {
-            let _ = pending_waker.cancel();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

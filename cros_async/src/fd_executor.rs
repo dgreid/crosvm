@@ -105,8 +105,15 @@ pub(crate) fn cancel_waker(token: &WakerToken) -> Result<()> {
     })
 }
 
-pub(crate) fn get_result(_token: &WakerToken) -> Option<std::io::Result<u32>> {
-    Some(Ok(0))
+pub(crate) fn get_result(token: &WakerToken) -> Option<std::io::Result<u32>> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(state) = state.as_mut() {
+            state.get_result(token)
+        } else {
+            None
+        }
+    })
 }
 
 /// Adds a new top level future to the Executor.
@@ -176,6 +183,15 @@ impl FdWakerState {
             self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
         }
         Ok(())
+    }
+
+    // Checks if there is a result saved for this waker.
+    fn get_result(&mut self, token: &WakerToken) -> Option<std::io::Result<u32>> {
+        if self.token_map.contains_key(token) {
+            None
+        } else {
+            Some(Ok(0))
+        }
     }
 }
 
@@ -249,7 +265,15 @@ impl<T: FutureList> Drop for FdExecutor<T> {
     }
 }
 
-// Used to dup the FDs passed to the executor so there is a guarantee they aren't closed while
+// test function to get the number of pending wakers.
+pub(crate) fn pending_ops() -> usize {
+    STATE.with(|state| {
+        let state = state.borrow_mut();
+        state.as_ref().unwrap().token_map.len()
+    })
+}
+
+// Used to `dup` the FDs passed to the executor so there is a guarantee they aren't closed while
 // waiting in TLS to be added to the main polling context.
 unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
     let ret = libc::dup(fd);
@@ -257,97 +281,5 @@ unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
         Err(Error::DuplicatingFd(sys_util::Error::last()))
     } else {
         Ok(ret)
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::cell::RefCell;
-    use std::future::Future;
-    use std::os::unix::io::AsRawFd;
-    use std::rc::Rc;
-    use std::sync::atomic::Ordering;
-    use std::task::{Context, Poll};
-
-    use futures::future::Either;
-    use futures::pin_mut;
-
-    use super::*;
-    use crate::executor::UnitFutures;
-    use crate::PendingWaker;
-
-    struct TestFut {
-        f: File,
-        pending_waker: Option<PendingWaker>,
-    }
-
-    impl TestFut {
-        fn new(f: File) -> TestFut {
-            TestFut {
-                f,
-                pending_waker: None,
-            }
-        }
-    }
-
-    impl Future for TestFut {
-        type Output = u64;
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            if self.pending_waker.is_none() {
-                self.pending_waker =
-                    Some(crate::add_read_waker(self.f.as_raw_fd(), cx.waker().clone()).unwrap());
-            }
-            Poll::Pending
-        }
-    }
-
-    impl Drop for TestFut {
-        fn drop(&mut self) {
-            if let Some(mut pending_waker) = self.pending_waker.take() {
-                pending_waker.cancel().unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn cancel() {
-        crate::executor_commands::TEST_DISABLE_URING.store(true, Ordering::Relaxed);
-
-        async fn do_test() {
-            let (r, _w) = sys_util::pipe(true).unwrap();
-            let done = async { 5usize };
-            let pending = TestFut::new(r);
-            pin_mut!(done);
-            pin_mut!(pending);
-            match futures::future::select(pending, done).await {
-                Either::Right((5, _pending)) => (),
-                _ => panic!("unexpected select result"),
-            }
-        }
-
-        let fut = do_test();
-
-        let mut ex = FdExecutor::new(UnitFutures::new()).expect("Failed creating executor");
-        add_future(Box::pin(fut)).unwrap();
-        ex.run().unwrap();
-        STATE.with(|state| {
-            let state = state.borrow_mut();
-            assert!(state.as_ref().unwrap().token_map.is_empty());
-        });
-    }
-
-    #[test]
-    fn run() {
-        crate::executor_commands::TEST_DISABLE_URING.store(true, Ordering::Relaxed);
-        // Example of starting the framework and running a future:
-        async fn my_async(x: Rc<RefCell<u64>>) {
-            x.replace(4);
-        }
-
-        let mut ex = FdExecutor::new(UnitFutures::new()).expect("Failed creating executor");
-        let x = Rc::new(RefCell::new(0));
-        crate::fd_executor::add_future(Box::pin(my_async(x.clone()))).unwrap();
-        ex.run().unwrap();
-        assert_eq!(*x.borrow(), 4);
     }
 }
