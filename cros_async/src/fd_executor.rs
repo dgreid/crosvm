@@ -21,7 +21,8 @@ use std::task::Waker;
 
 use sys_util::{PollContext, WatchingEvents};
 
-use crate::executor::{ExecutableFuture, Executor, FutureList, WakerToken};
+use crate::executor::{ExecutableFuture, Executor, FutureList};
+use crate::WakerToken;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -79,7 +80,7 @@ fn add_waker(fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<WakerTok
 /// next time the future is polled. If the fd is closed, there is a race where another FD can be
 /// opened on top of it causing the next poll to access the new target file.
 /// Returns a `WakerToken` that can be used to cancel the waker before it completes.
-pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
+pub(crate) fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
     add_waker(fd, waker, WatchingEvents::empty().set_read())
 }
 
@@ -88,12 +89,12 @@ pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
 /// next time the future is polled. If the fd is closed, there is a race where another FD can be
 /// opened on top of it causing the next poll to access the new target file.
 /// Returns a `WakerToken` that can be used to cancel the waker before it completes.
-pub fn add_write_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
+pub(crate) fn add_write_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
     add_waker(fd, waker, WatchingEvents::empty().set_write())
 }
 
 /// Cancels the waker that returned the given token if the waker hasn't yet fired.
-pub fn cancel_waker(token: WakerToken) -> Result<()> {
+pub(crate) fn cancel_waker(token: &WakerToken) -> Result<()> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
@@ -104,13 +105,13 @@ pub fn cancel_waker(token: WakerToken) -> Result<()> {
     })
 }
 
-pub fn get_result(_token: WakerToken) -> Result<std::io::Result<u32>> {
-    Ok(Ok(0))
+pub(crate) fn get_result(_token: &WakerToken) -> Option<std::io::Result<u32>> {
+    Some(Ok(0))
 }
 
 /// Adds a new top level future to the Executor.
 /// These futures must return `()`, indicating they are intended to create side-effects only.
-pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
+pub(crate) fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
@@ -125,7 +126,7 @@ pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
 // Tracks active wakers and associates wakers with the futures that registered them.
 struct FdWakerState {
     poll_ctx: PollContext<u64>,
-    token_map: BTreeMap<u64, (File, Waker)>,
+    token_map: BTreeMap<WakerToken, (File, Waker)>,
     next_token: u64, // Next token for adding to the context.
     new_futures: VecDeque<ExecutableFuture<()>>,
 }
@@ -150,17 +151,18 @@ impl FdWakerState {
         self.poll_ctx
             .add_fd_with_events(&duped_fd, events, self.next_token)
             .map_err(Error::SubmittingWaker)?;
-        let next_token = self.next_token;
-        self.token_map.insert(next_token, (duped_fd, waker));
+        let next_token = WakerToken(self.next_token);
+        self.token_map.insert(next_token.clone(), (duped_fd, waker));
         self.next_token += 1;
-        Ok(WakerToken(next_token))
+        Ok(next_token)
     }
 
     // Waits until one of the FDs is readable and wakes the associated waker.
     fn wait_wake_event(&mut self) -> Result<()> {
         let events = self.poll_ctx.wait().map_err(Error::PollContextError)?;
         for e in events.iter() {
-            if let Some((fd, waker)) = self.token_map.remove(&e.token()) {
+            let waker_token = WakerToken(e.token());
+            if let Some((fd, waker)) = self.token_map.remove(&waker_token) {
                 self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
                 waker.wake_by_ref();
             }
@@ -169,8 +171,8 @@ impl FdWakerState {
     }
 
     // Remove the waker for the given token if it hasn't fired yet.
-    fn cancel_waker(&mut self, token: WakerToken) -> Result<()> {
-        if let Some((fd, _waker)) = self.token_map.remove(&token.0) {
+    fn cancel_waker(&mut self, token: &WakerToken) -> Result<()> {
+        if let Some((fd, _waker)) = self.token_map.remove(token) {
             self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
         }
         Ok(())
@@ -264,29 +266,36 @@ mod test {
     use std::future::Future;
     use std::os::unix::io::AsRawFd;
     use std::rc::Rc;
+    use std::sync::atomic::Ordering;
     use std::task::{Context, Poll};
 
     use futures::future::Either;
     use futures::pin_mut;
 
     use super::*;
+    use crate::executor::UnitFutures;
+    use crate::PendingWaker;
 
     struct TestFut {
         f: File,
-        token: Option<WakerToken>,
+        pending_waker: Option<PendingWaker>,
     }
 
     impl TestFut {
         fn new(f: File) -> TestFut {
-            TestFut { f, token: None }
+            TestFut {
+                f,
+                pending_waker: None,
+            }
         }
     }
 
     impl Future for TestFut {
         type Output = u64;
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            if self.token.is_none() {
-                self.token = Some(add_read_waker(self.f.as_raw_fd(), cx.waker().clone()).unwrap());
+            if self.pending_waker.is_none() {
+                self.pending_waker =
+                    Some(crate::add_read_waker(self.f.as_raw_fd(), cx.waker().clone()).unwrap());
             }
             Poll::Pending
         }
@@ -294,14 +303,16 @@ mod test {
 
     impl Drop for TestFut {
         fn drop(&mut self) {
-            if let Some(token) = self.token.take() {
-                cancel_waker(token).unwrap();
+            if let Some(mut pending_waker) = self.pending_waker.take() {
+                pending_waker.cancel().unwrap();
             }
         }
     }
 
     #[test]
     fn cancel() {
+        crate::executor_commands::TEST_DISABLE_URING.store(true, Ordering::Relaxed);
+
         async fn do_test() {
             let (r, _w) = sys_util::pipe(true).unwrap();
             let done = async { 5usize };
@@ -316,7 +327,7 @@ mod test {
 
         let fut = do_test();
 
-        let mut ex = FdExecutor::new(crate::UnitFutures::new()).expect("Failed creating executor");
+        let mut ex = FdExecutor::new(UnitFutures::new()).expect("Failed creating executor");
         add_future(Box::pin(fut)).unwrap();
         ex.run().unwrap();
         STATE.with(|state| {
@@ -327,12 +338,13 @@ mod test {
 
     #[test]
     fn run() {
+        crate::executor_commands::TEST_DISABLE_URING.store(true, Ordering::Relaxed);
         // Example of starting the framework and running a future:
         async fn my_async(x: Rc<RefCell<u64>>) {
             x.replace(4);
         }
 
-        let mut ex = FdExecutor::new(crate::UnitFutures::new()).expect("Failed creating executor");
+        let mut ex = FdExecutor::new(UnitFutures::new()).expect("Failed creating executor");
         let x = Rc::new(RefCell::new(0));
         crate::fd_executor::add_future(Box::pin(my_async(x.clone()))).unwrap();
         ex.run().unwrap();

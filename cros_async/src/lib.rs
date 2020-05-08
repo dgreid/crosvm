@@ -55,82 +55,19 @@
 
 mod complete;
 mod executor;
+mod executor_commands;
 mod fd_executor;
 mod select;
 mod uring_executor;
 mod waker;
 
-pub use executor::{Executor, WakerToken};
+pub use executor::Executor;
+pub use executor_commands::*;
 pub use select::SelectResult;
 
-use executor::{FutureList, RunOne};
-use fd_executor::FdExecutor;
-use uring_executor::URingExecutor;
+use executor::RunOne;
 
-use std::fmt::{self, Display};
 use std::future::Future;
-use std::os::unix::io::RawFd;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::task::Waker;
-
-#[derive(Debug)]
-pub enum Error {
-    /// Error from the FD executor.
-    FdExecutor(fd_executor::Error),
-    /// Error from the uring executor.
-    URingExecutor(uring_executor::Error),
-}
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::Error::*;
-
-        match self {
-            FdExecutor(e) => write!(f, "Failure in the FD executor: {}", e),
-            URingExecutor(e) => write!(f, "Failure in the uring executor: {}", e),
-        }
-    }
-}
-
-// Checks if the uring executor is available and if it us use it.
-// Caches the result so that the check is only run once.
-// Useful for falling back to the FD executor on pre-uring kernels.
-fn use_uring() -> bool {
-    const UNKNOWN: u32 = 0;
-    const URING: u32 = 1;
-    const FD: u32 = 2;
-    static USE_URING: AtomicU32 = AtomicU32::new(UNKNOWN);
-    match USE_URING.load(Ordering::Relaxed) {
-        UNKNOWN => {
-            if uring_executor::supported() {
-                USE_URING.store(URING, Ordering::Relaxed);
-                true
-            } else {
-                USE_URING.store(FD, Ordering::Relaxed);
-                false
-            }
-        }
-        URING => true,
-        FD => false,
-        _ => unreachable!("invalid use uring state"),
-    }
-}
-
-// Runs an executor with the given future list.
-// Chooses the uring executor if available, otherwise falls back to the FD executor.
-fn run_executor<T: FutureList>(future_list: T) -> Result<T::Output> {
-    if use_uring() {
-        URingExecutor::new(future_list)
-            .and_then(|mut ex| ex.run())
-            .map_err(Error::URingExecutor)
-    } else {
-        FdExecutor::new(future_list)
-            .and_then(|mut ex| ex.run())
-            .map_err(Error::FdExecutor)
-    }
-}
 
 /// Creates a FdExecutor that runs one future to completion.
 ///
@@ -459,59 +396,4 @@ pub fn complete5<
     f5: F5,
 ) -> Result<(F1::Output, F2::Output, F3::Output, F4::Output, F5::Output)> {
     run_executor(complete::Complete5::new(f1, f2, f3, f4, f5))
-}
-
-// Functions to be used by `Future` implementations
-
-/// Tells the waking system to wake `waker` when `fd` becomes readable.
-/// The 'fd' must be fully owned by the future adding the waker, and must not be closed until the
-/// next time the future is polled. If the fd is closed, there is a race where another FD can be
-/// opened on top of it causing the next poll to access the new target file.
-/// Returns a `WakerToken` that can be used to cancel the waker before it completes.
-pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
-    if use_uring() {
-        uring_executor::add_read_waker(fd, waker).map_err(Error::URingExecutor)
-    } else {
-        fd_executor::add_read_waker(fd, waker).map_err(Error::FdExecutor)
-    }
-}
-
-/// Tells the waking system to wake `waker` when `fd` becomes writable.
-/// The 'fd' must be fully owned by the future adding the waker, and must not be closed until the
-/// next time the future is polled. If the fd is closed, there is a race where another FD can be
-/// opened on top of it causing the next poll to access the new target file.
-/// Returns a `WakerToken` that can be used to cancel the waker before it completes.
-pub fn add_write_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
-    if use_uring() {
-        uring_executor::add_write_waker(fd, waker).map_err(Error::URingExecutor)
-    } else {
-        fd_executor::add_write_waker(fd, waker).map_err(Error::FdExecutor)
-    }
-}
-
-/// Cancels the waker that returned the given token if the waker hasn't yet fired.
-pub fn cancel_waker(token: WakerToken) -> Result<()> {
-    if use_uring() {
-        uring_executor::cancel_waker(token).map_err(Error::URingExecutor)
-    } else {
-        fd_executor::cancel_waker(token).map_err(Error::FdExecutor)
-    }
-}
-
-/// Adds a new top level future to the Executor.
-/// These futures must return `()`, indicating they are intended to create side-effects only.
-pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
-    if use_uring() {
-        uring_executor::add_future(future).map_err(Error::URingExecutor)
-    } else {
-        fd_executor::add_future(future).map_err(Error::FdExecutor)
-    }
-}
-
-pub fn get_result(token: WakerToken) -> Result<std::io::Result<u32>> {
-    if use_uring() {
-        uring_executor::get_result(token).map_err(Error::URingExecutor)
-    } else {
-        fd_executor::get_result(token).map_err(Error::FdExecutor)
-    }
 }

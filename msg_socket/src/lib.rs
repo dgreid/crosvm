@@ -13,7 +13,7 @@ use std::task::{Context, Poll};
 
 use libc::{EWOULDBLOCK, O_NONBLOCK};
 
-use cros_async::{add_read_waker, cancel_waker, WakerToken};
+use cros_async::{add_read_waker, PendingWaker};
 use sys_util::{
     add_fd_flags, clear_fd_flags, error, handle_eintr, net::UnixSeqpacket, Error as SysError,
     ScmSocket,
@@ -215,7 +215,7 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> AsyncReceiver<'a, I, O> {
     pub fn next(&mut self) -> MsgFuture<'a, I, O> {
         MsgFuture {
             inner: self.inner,
-            waker_token: None,
+            pending_waker: None,
         }
     }
 }
@@ -234,21 +234,21 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> Drop for AsyncReceiver<'a, I, O> {
 /// A Future that returns a message when waited on.
 pub struct MsgFuture<'a, I: MsgOnSocket, O: MsgOnSocket> {
     inner: &'a MsgSocket<I, O>,
-    waker_token: Option<WakerToken>,
+    pending_waker: Option<PendingWaker>,
 }
 
 impl<'a, I: MsgOnSocket, O: MsgOnSocket> Future for MsgFuture<'a, I, O> {
     type Output = MsgResult<O>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        self.waker_token = None;
+        self.pending_waker = None;
         let ret = match self.inner.recv() {
             Ok(msg) => Ok(Poll::Ready(Ok(msg))),
             Err(MsgError::Recv(e)) => {
                 if e.errno() == EWOULDBLOCK {
                     add_read_waker(self.inner.as_raw_fd(), cx.waker().clone())
-                        .map(|token| {
-                            self.waker_token = Some(token);
+                        .map(|pending_waker| {
+                            self.pending_waker = Some(pending_waker);
                             Poll::Pending
                         })
                         .map_err(MsgError::AddingWaker)
@@ -268,8 +268,8 @@ impl<'a, I: MsgOnSocket, O: MsgOnSocket> Future for MsgFuture<'a, I, O> {
 
 impl<'a, I: MsgOnSocket, O: MsgOnSocket> Drop for MsgFuture<'a, I, O> {
     fn drop(&mut self) {
-        if let Some(token) = self.waker_token.take() {
-            let _ = cancel_waker(token);
+        if let Some(mut pending_waker) = self.pending_waker.take() {
+            let _ = pending_waker.cancel();
         }
     }
 }

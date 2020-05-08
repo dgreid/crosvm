@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 
 use libc::{EWOULDBLOCK, O_NONBLOCK};
 
-use cros_async::{self, add_read_waker, cancel_waker, WakerToken};
+use cros_async::{self, add_read_waker, PendingWaker};
 use sys_util::{self, add_fd_flags};
 
 /// Errors generated while polling for events.
@@ -111,14 +111,14 @@ impl TryFrom<sys_util::EventFd> for EventFd {
 /// A Future that yields the next value from the eventfd when it is ready.
 pub struct NextValFuture<'a> {
     eventfd: &'a mut EventFd,
-    waker_token: Option<WakerToken>,
+    pending_waker: Option<PendingWaker>,
 }
 
 impl<'a> NextValFuture<'a> {
     fn new(eventfd: &'a mut EventFd) -> NextValFuture<'a> {
         NextValFuture {
             eventfd,
-            waker_token: None,
+            pending_waker: None,
         }
     }
 }
@@ -127,8 +127,8 @@ impl<'a> Future for NextValFuture<'a> {
     type Output = Result<u64>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        if let Some(token) = self.waker_token.take() {
-            let _ = cancel_waker(token);
+        if let Some(mut pending_waker) = self.pending_waker.take() {
+            let _ = pending_waker.cancel();
         }
 
         match self.eventfd.inner.read() {
@@ -136,8 +136,8 @@ impl<'a> Future for NextValFuture<'a> {
             Err(e) => {
                 if e.errno() == EWOULDBLOCK {
                     match add_read_waker(self.eventfd.inner.as_raw_fd(), cx.waker().clone()) {
-                        Ok(token) => {
-                            self.waker_token = Some(token);
+                        Ok(pending_waker) => {
+                            self.pending_waker = Some(pending_waker);
                             Poll::Pending
                         }
                         Err(e) => Poll::Ready(Err(Error::AddingWaker(e))),
@@ -152,8 +152,8 @@ impl<'a> Future for NextValFuture<'a> {
 
 impl<'a> Drop for NextValFuture<'a> {
     fn drop(&mut self) {
-        if let Some(token) = self.waker_token.take() {
-            let _ = cancel_waker(token);
+        if let Some(mut pending_waker) = self.pending_waker.take() {
+            let _ = pending_waker.cancel();
         }
     }
 }
