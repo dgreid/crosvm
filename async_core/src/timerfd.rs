@@ -127,14 +127,14 @@ impl<'a> Future for TimerFuture<'a> {
     type Output = Result<u64>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        if let Some(mut pending_waker) = self.pending_waker.take() {
-            let _ = pending_waker.cancel();
-        }
-
         match self.inner.wait() {
             Ok(count) => Poll::Ready(Ok(count)),
             Err(e) => {
                 if e.errno() == EWOULDBLOCK {
+                    if self.pending_waker.is_some() {
+                        // Already waiting.
+                        return Poll::Pending;
+                    }
                     match add_read_waker(self.inner.as_raw_fd(), cx.waker().clone()) {
                         Ok(pending_waker) => {
                             self.pending_waker = Some(pending_waker);
