@@ -85,7 +85,14 @@ pub trait VolatileMemory {
     /// Gets a slice of memory at `offset` that is `count` bytes in length and supports volatile
     /// access.
     fn get_slice(&self, offset: u64, count: u64) -> Result<VolatileSlice>;
+}
 
+pub trait GetVolatileRef {
+    /// Gets a `VolatileRef` at `offset`.
+    fn get_ref<T: DataInit>(&self, offset: u64) -> Result<VolatileRef<T>>;
+}
+
+impl<M: VolatileMemory> GetVolatileRef for M {
     /// Gets a `VolatileRef` at `offset`.
     fn get_ref<T: DataInit>(&self, offset: u64) -> Result<VolatileRef<T>> {
         let slice = self.get_slice(offset, size_of::<T>() as u64)?;
@@ -281,7 +288,7 @@ impl<'a> VolatileSlice<'a> {
     /// ```
     /// # use std::fs::File;
     /// # use std::path::Path;
-    /// # use data_model::VolatileMemory;
+    /// # use data_model::{GetVolatileRef, VolatileMemory};
     /// # fn test_write_null() -> Result<(), ()> {
     /// let mut mem = [0u8; 32];
     /// let mem_ref = &mut mem[..];

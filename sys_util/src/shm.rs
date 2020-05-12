@@ -296,7 +296,7 @@ mod tests {
 
     use std::ffi::CString;
 
-    use data_model::VolatileMemory;
+    use data_model::{GetVolatileRef, VolatileMemory};
 
     use crate::MemoryMapping;
 
