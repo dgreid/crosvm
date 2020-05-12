@@ -14,10 +14,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display};
 use std::fs::File;
 use std::future::Future;
+use std::io::IoSlice;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::Waker;
 
+use data_model::VolatileMemory;
 use io_uring::URingContext;
 use sys_util::WatchingEvents;
 
@@ -115,6 +118,23 @@ pub(crate) fn cancel_waker(token: &WakerToken) -> Result<()> {
     })
 }
 
+pub(crate) fn submit_readv<M: VolatileMemory>(
+    fd: RawFd,
+    offset: u64,
+    mem: Rc<M>,
+    iovecs: &[crate::uring_io::MemVec],
+    waker: Waker,
+) -> Result<WakerToken> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(state) = state.as_mut() {
+            state.submit_readv(fd, offset, mem, iovecs, waker)
+        } else {
+            Err(Error::InvalidContext)
+        }
+    })
+}
+
 pub(crate) fn get_result(token: &WakerToken) -> Option<std::io::Result<u32>> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -158,6 +178,44 @@ impl RingWakerState {
             completed_ops: BTreeMap::new(),
             new_futures: VecDeque::new(),
         })
+    }
+
+    fn submit_readv<M: VolatileMemory>(
+        &mut self,
+        fd: RawFd,
+        offset: u64,
+        mem: Rc<M>,
+        mem_offsets: &[crate::uring_io::MemVec],
+        waker: Waker,
+    ) -> Result<WakerToken> {
+        // TODO - remove this dup ioctl, it's not cheap.
+        let duped_fd = unsafe {
+            // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
+            // will only be added to the poll loop.
+            File::from_raw_fd(dup_fd(fd)?)
+        };
+        unsafe {
+            // Safe because all the addresses are within the Memory that an Rc is kept for.
+            // TODO - remove this allocation.
+            let iovecs = mem_offsets
+                .iter()
+                .map(|mem_off| {
+                    let vs = mem.get_slice(mem_off.offset, mem_off.len as u64).unwrap();
+                    IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
+                })
+                .collect::<Vec<_>>();
+            self.ctx
+                .add_readv(&iovecs, fd, offset, self.next_token)
+                .map_err(Error::SubmittingWaker)?;
+        }
+        let next_token = WakerToken(self.next_token);
+        // TODO, must save an Rc to mem in the ops.
+        self.pending_ops.insert(
+            next_token.clone(),
+            (duped_fd, WatchingEvents::empty(), waker),
+        );
+        self.next_token += 1;
+        Ok(next_token)
     }
 
     // Adds an fd that, when and event is ready, will trigger the given waker.

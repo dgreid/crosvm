@@ -59,6 +59,7 @@ mod executor_commands;
 mod fd_executor;
 mod select;
 mod uring_executor;
+mod uring_io;
 mod waker;
 
 pub use executor::Executor;

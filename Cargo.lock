@@ -107,6 +107,7 @@ dependencies = [
 name = "cros_async"
 version = "0.1.0"
 dependencies = [
+ "data_model 0.1.0",
  "futures 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "io_uring 0.1.0",
  "libc 0.2.44 (registry+https://github.com/rust-lang/crates.io-index)",
