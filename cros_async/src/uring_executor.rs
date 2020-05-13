@@ -14,15 +14,15 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display};
 use std::fs::File;
 use std::future::Future;
-use std::io::IoSlice;
+use std::io::{self, IoSlice};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Waker;
+use std::task::{Context, Poll};
 
 use data_model::VolatileMemory;
 use io_uring::URingContext;
-use sys_util::WatchingEvents;
 
 use crate::executor::{ExecutableFuture, Executor, FutureList};
 use crate::WakerToken;
@@ -35,12 +35,16 @@ pub enum Error {
     DuplicatingFd(sys_util::Error),
     /// Failed accessing the thread local storage for wakers.
     InvalidContext,
+    /// Invalid IoPair.
+    InvalidPair,
+    /// Error doing the IO.
+    Io(io::Error),
     /// Creating a context to wait on FDs failed.
     CreatingContext(io_uring::Error),
     /// Failed to remove the waker remove the polling context.
     RemovingWaker(io_uring::Error),
-    /// Failed to submit the waker to the polling context.
-    SubmittingWaker(io_uring::Error),
+    /// Failed to submit the operation to the polling context.
+    SubmittingOp(io_uring::Error),
     /// URingContext failure.
     URingContextError(io_uring::Error),
     /// Failed to submit or wait for io_uring events.
@@ -59,9 +63,11 @@ impl Display for Error {
                 f,
                 "Invalid context, was the Fd executor created successfully?"
             ),
+            InvalidPair => write!(f, "Invalid or unregistered the memory/FD pair."),
+            Io(e) => write!(f, "Error during IO: {}", e),
             CreatingContext(e) => write!(f, "Error creating the fd waiting context: {}.", e),
             RemovingWaker(e) => write!(f, "Error removing from the URing context: {}.", e),
-            SubmittingWaker(e) => write!(f, "Error adding to the URing context: {}.", e),
+            SubmittingOp(e) => write!(f, "Error adding to the URing context: {}.", e),
             URingContextError(e) => write!(f, "URingContext failure: {}", e),
             URingEnter(e) => write!(f, "URing::enter: {}", e),
         }
@@ -77,37 +83,8 @@ pub(crate) fn supported() -> bool {
 // Tracks active wakers and the futures they are associated with.
 thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
 
-fn notify_fd_ready(fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<WakerToken> {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.add_fd(fd, waker, events)
-        } else {
-            Err(Error::InvalidContext)
-        }
-    })
-}
-
-/// Tells the waking system to wake `waker` when `fd` becomes readable.
-/// The 'fd' must be fully owned by the future adding the waker, and must not be closed until the
-/// next time the future is polled. If the fd is closed, there is a race where another FD can be
-/// opened on top of it causing the next poll to access the new target file.
-/// Returns a `WakerToken` that can be used to cancel the waker before it completes.
-pub(crate) fn add_read_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
-    notify_fd_ready(fd, waker, WatchingEvents::empty().set_read())
-}
-
-/// Tells the waking system to wake `waker` when `fd` becomes writable.
-/// The 'fd' must be fully owned by the future adding the waker, and must not be closed until the
-/// next time the future is polled. If the fd is closed, there is a race where another FD can be
-/// opened on top of it causing the next poll to access the new target file.
-/// Returns a `WakerToken` that can be used to cancel the waker before it completes.
-pub(crate) fn add_write_waker(fd: RawFd, waker: Waker) -> Result<WakerToken> {
-    notify_fd_ready(fd, waker, WatchingEvents::empty().set_write())
-}
-
 /// Cancels the waker that returned the given token if the waker hasn't yet fired.
-pub(crate) fn cancel_waker(token: &WakerToken) -> Result<()> {
+fn cancel_waker(token: &WakerToken) -> Result<()> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
@@ -118,28 +95,22 @@ pub(crate) fn cancel_waker(token: &WakerToken) -> Result<()> {
     })
 }
 
-pub(crate) fn submit_readv<M: VolatileMemory>(
-    fd: RawFd,
-    offset: u64,
-    mem: Rc<M>,
-    iovecs: &[crate::uring_io::MemVec],
-    waker: Waker,
-) -> Result<WakerToken> {
+fn submit_readv(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Result<WakerToken> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
-            state.submit_readv(fd, offset, mem, iovecs, waker)
+            state.submit_readv(tag, offset, iovecs)
         } else {
             Err(Error::InvalidContext)
         }
     })
 }
 
-pub(crate) fn get_result(token: &WakerToken) -> Option<std::io::Result<u32>> {
+fn get_result(token: &WakerToken, waker: Waker) -> Option<std::io::Result<u32>> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
-            state.get_result(token)
+            state.get_result(token, waker)
         } else {
             None
         }
@@ -160,13 +131,49 @@ pub(crate) fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()
     })
 }
 
+/// Register a file and memory pair for buffered asynchronous operation.
+pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc<RegisteredIo>> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(state) = state.as_mut() {
+            state.register_io(fd, mem)
+        } else {
+            Err(Error::InvalidContext)
+        }
+    })
+}
+
+struct IoPair {
+    mem: Rc<dyn VolatileMemory>,
+    fd: File,
+}
+
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
+struct RegisteredIoToken(u64);
+pub struct RegisteredIo {
+    io_pair: Rc<IoPair>, // Ref counted so each op can ensure memory and fd live.
+    tag: RegisteredIoToken,
+}
+impl RegisteredIo {
+    pub async fn do_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
+        let op = IoOperation::ReadVectored {
+            file_offset,
+            iovecs,
+        };
+        op.submit(&self.tag)?.await
+    }
+}
+
 // Tracks active wakers and associates wakers with the futures that registered them.
 struct RingWakerState {
     ctx: URingContext,
-    pending_ops: BTreeMap<WakerToken, (File, WatchingEvents, Waker)>,
-    next_token: u64, // Next token for adding to the context.
+    pending_ops: BTreeMap<WakerToken, Rc<IoPair>>,
+    waiting_ops: BTreeMap<WakerToken, Waker>,
+    next_op_token: u64, // Next token for adding to the context.
     completed_ops: BTreeMap<WakerToken, std::io::Result<u32>>,
     new_futures: VecDeque<ExecutableFuture<()>>,
+    registered_io: BTreeMap<RegisteredIoToken, Rc<RegisteredIo>>,
+    next_io_token: u64,
 }
 
 impl RingWakerState {
@@ -174,75 +181,90 @@ impl RingWakerState {
         Ok(RingWakerState {
             ctx: URingContext::new(256).map_err(Error::CreatingContext)?,
             pending_ops: BTreeMap::new(),
-            next_token: 0,
+            waiting_ops: BTreeMap::new(),
+            next_op_token: 0,
             completed_ops: BTreeMap::new(),
             new_futures: VecDeque::new(),
+            registered_io: BTreeMap::new(),
+            next_io_token: 0,
         })
     }
 
-    fn submit_readv<M: VolatileMemory>(
+    fn register_io<F: AsRawFd>(
         &mut self,
-        fd: RawFd,
-        offset: u64,
-        mem: Rc<M>,
-        mem_offsets: &[crate::uring_io::MemVec],
-        waker: Waker,
-    ) -> Result<WakerToken> {
-        // TODO - remove this dup ioctl, it's not cheap.
+        fd: &F,
+        mem: Rc<dyn VolatileMemory>,
+    ) -> Result<Rc<RegisteredIo>> {
         let duped_fd = unsafe {
             // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
             // will only be added to the poll loop.
-            File::from_raw_fd(dup_fd(fd)?)
+            File::from_raw_fd(dup_fd(fd.as_raw_fd())?)
         };
-        unsafe {
-            // Safe because all the addresses are within the Memory that an Rc is kept for.
-            // TODO - remove this allocation.
-            let iovecs = mem_offsets
-                .iter()
-                .map(|mem_off| {
-                    let vs = mem.get_slice(mem_off.offset, mem_off.len as u64).unwrap();
-                    IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                })
-                .collect::<Vec<_>>();
-            self.ctx
-                .add_readv(&iovecs, fd, offset, self.next_token)
-                .map_err(Error::SubmittingWaker)?;
-        }
-        let next_token = WakerToken(self.next_token);
-        // TODO, must save an Rc to mem in the ops.
-        self.pending_ops.insert(
-            next_token.clone(),
-            (duped_fd, WatchingEvents::empty(), waker),
-        );
-        self.next_token += 1;
-        Ok(next_token)
+        let tag = RegisteredIoToken(self.next_io_token);
+        let registered_io = Rc::new(RegisteredIo {
+            io_pair: Rc::new(IoPair { mem, fd: duped_fd }),
+            tag: tag.clone(),
+        });
+        self.registered_io.insert(tag, registered_io.clone());
+        self.next_io_token += 1;
+        Ok(registered_io)
     }
 
-    // Adds an fd that, when and event is ready, will trigger the given waker.
-    fn add_fd(&mut self, fd: RawFd, waker: Waker, events: WatchingEvents) -> Result<WakerToken> {
-        let duped_fd = unsafe {
-            // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
-            // will only be added to the poll loop.
-            File::from_raw_fd(dup_fd(fd)?)
-        };
-        self.ctx
-            .add_poll_fd(duped_fd.as_raw_fd(), &events, self.next_token)
-            .map_err(Error::SubmittingWaker)?;
-        let next_token = WakerToken(self.next_token);
-        self.pending_ops
-            .insert(next_token.clone(), (duped_fd, events, waker));
-        self.next_token += 1;
-        Ok(next_token)
+    fn deregister_io(&mut self, tag: &RegisteredIoToken) {
+        // RegisteredIo is refcounted. There isn't any need to pull pending ops out, let them
+        // complete. deregister is not a common path.
+        let _ = self.registered_io.remove(tag);
+    }
+
+    fn submit_readv(
+        &mut self,
+        io_tag: &RegisteredIoToken,
+        offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<WakerToken> {
+        if let Some(registered_io) = self.registered_io.get(io_tag) {
+            unsafe {
+                // Safe because all the addresses are within the Memory that an Rc is kept for the
+                // duration to ensure the memory is valid while the kernel accesses it.
+                let iovecs = mem_offsets
+                    .iter()
+                    .map(|mem_off| {
+                        let vs = registered_io
+                            .io_pair
+                            .mem
+                            .get_slice(mem_off.offset, mem_off.len as u64)
+                            .unwrap();
+                        IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
+                    })
+                    .collect::<Vec<_>>(); // TODO - remove this allocation.
+                self.ctx
+                    .add_readv(
+                        &iovecs,
+                        registered_io.io_pair.fd.as_raw_fd(),
+                        offset,
+                        self.next_op_token,
+                    )
+                    .map_err(Error::SubmittingOp)?;
+            }
+            let next_op_token = WakerToken(self.next_op_token);
+            // TODO, must save an Rc to mem in the ops.
+            self.pending_ops
+                .insert(next_op_token.clone(), registered_io.io_pair.clone());
+            self.next_op_token += 1;
+            Ok(next_op_token)
+        } else {
+            Err(Error::InvalidPair)
+        }
     }
 
     // Remove the waker for the given token if it hasn't fired yet.
     fn cancel_waker(&mut self, token: &WakerToken) -> Result<()> {
-        if let Some((file, events, _waker)) = self.pending_ops.remove(token) {
-            // TODO - handle canceling other ops
-            self.ctx
-                .remove_poll_fd(file.as_raw_fd(), &events, token.0)
-                .map_err(Error::RemovingWaker)?
+        if let Some(_) = self.pending_ops.remove(token) {
+            // TODO - handle canceling ops in the uring
+            // For now the op will complete but the response will be dropped.
         }
+        let _ = self.waiting_ops.remove(token);
+        let _ = self.completed_ops.remove(token);
         Ok(())
     }
 
@@ -251,19 +273,25 @@ impl RingWakerState {
         let events = self.ctx.wait().map_err(Error::URingEnter)?;
         for (raw_token, result) in events {
             let token = WakerToken(raw_token);
-            if let Some((_file, _event, waker)) = self.pending_ops.remove(&token) {
-                // Store the result so it can be retrieved after the future is woken.
+            // if the op is still in pending_ops then it hasn't been cancelled and someone is
+            // interested in the result, so save it. Otherwise, drop it.
+            if let Some(_) = self.pending_ops.remove(&token) {
+                if let Some(waker) = self.waiting_ops.remove(&token) {
+                    waker.wake_by_ref();
+                }
                 self.completed_ops.insert(token, result);
-                waker.wake_by_ref();
             }
         }
         Ok(())
     }
 
-    fn get_result(&mut self, token: &WakerToken) -> Option<std::io::Result<u32>> {
+    fn get_result(&mut self, token: &WakerToken, waker: Waker) -> Option<io::Result<u32>> {
         if let Some(result) = self.completed_ops.remove(token) {
             Some(result)
         } else {
+            if self.pending_ops.contains_key(token) {
+                self.waiting_ops.insert(token.clone(), waker);
+            }
             None
         }
     }
@@ -355,5 +383,53 @@ unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
         Err(Error::DuplicatingFd(sys_util::Error::last()))
     } else {
         Ok(ret)
+    }
+}
+
+pub struct MemVec {
+    pub offset: u64,
+    pub len: usize,
+}
+
+enum IoOperation<'a> {
+    ReadVectored {
+        file_offset: u64,
+        iovecs: &'a [MemVec],
+    },
+}
+
+impl<'a> IoOperation<'a> {
+    fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation> {
+        let waker_token = match self {
+            IoOperation::ReadVectored {
+                file_offset,
+                iovecs,
+            } => crate::uring_executor::submit_readv(tag, file_offset, iovecs).unwrap(),
+        };
+        Ok(PendingOperation { waker_token })
+    }
+}
+
+struct PendingOperation {
+    waker_token: WakerToken,
+}
+
+impl Future for PendingOperation {
+    type Output = Result<u32>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        if let Some(result) =
+            crate::uring_executor::get_result(&self.waker_token, cx.waker().clone())
+        {
+            Poll::Ready(result.map_err(Error::Io))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for PendingOperation {
+    fn drop(&mut self) {
+        let _ = crate::uring_executor::cancel_waker(&self.waker_token);
     }
 }

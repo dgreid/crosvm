@@ -67,19 +67,11 @@ impl PendingWaker {
     }
 
     fn do_cancel(token: &WakerToken) -> Result<()> {
-        if use_uring() {
-            uring_executor::cancel_waker(token).map_err(Error::URingExecutor)
-        } else {
-            fd_executor::cancel_waker(token).map_err(Error::FdExecutor)
-        }
+        fd_executor::cancel_waker(token).map_err(Error::FdExecutor)
     }
 
     fn get_result(token: &WakerToken) -> Option<std::io::Result<u32>> {
-        if use_uring() {
-            uring_executor::get_result(token)
-        } else {
-            fd_executor::get_result(token)
-        }
+        fd_executor::get_result(token)
     }
 }
 
@@ -147,15 +139,9 @@ pub(crate) fn run_executor<T: FutureList>(future_list: T) -> Result<T::Output> {
 /// opened on top of it causing the next poll to access the new target file.
 /// Returns a `PendingWaker` that can be used to cancel the waker before it completes.
 pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<PendingWaker> {
-    if use_uring() {
-        uring_executor::add_read_waker(fd, waker)
-            .map(PendingWaker::new)
-            .map_err(Error::URingExecutor)
-    } else {
-        fd_executor::add_read_waker(fd, waker)
-            .map(PendingWaker::new)
-            .map_err(Error::FdExecutor)
-    }
+    fd_executor::add_read_waker(fd, waker)
+        .map(PendingWaker::new)
+        .map_err(Error::FdExecutor)
 }
 
 /// Tells the waking system to wake `waker` when `fd` becomes writable.
@@ -164,34 +150,20 @@ pub fn add_read_waker(fd: RawFd, waker: Waker) -> Result<PendingWaker> {
 /// opened on top of it causing the next poll to access the new target file.
 /// Returns a `PendingWaker` that can be used to cancel the waker before it completes.
 pub fn add_write_waker(fd: RawFd, waker: Waker) -> Result<PendingWaker> {
-    if use_uring() {
-        uring_executor::add_write_waker(fd, waker)
-            .map(PendingWaker::new)
-            .map_err(Error::URingExecutor)
-    } else {
-        fd_executor::add_write_waker(fd, waker)
-            .map(PendingWaker::new)
-            .map_err(Error::FdExecutor)
-    }
+    fd_executor::add_write_waker(fd, waker)
+        .map(PendingWaker::new)
+        .map_err(Error::FdExecutor)
 }
 
 /// Adds a new top level future to the Executor.
 /// These futures must return `()`, indicating they are intended to create side-effects only.
 pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
-    if use_uring() {
-        uring_executor::add_future(future).map_err(Error::URingExecutor)
-    } else {
-        fd_executor::add_future(future).map_err(Error::FdExecutor)
-    }
+    fd_executor::add_future(future).map_err(Error::FdExecutor)
 }
 
 // test function to check the number of pending futures
 pub fn pending_ops() -> usize {
-    if use_uring() {
-        uring_executor::pending_ops()
-    } else {
-        fd_executor::pending_ops()
-    }
+    fd_executor::pending_ops()
 }
 
 #[cfg(test)]
