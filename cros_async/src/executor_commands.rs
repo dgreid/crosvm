@@ -217,39 +217,30 @@ mod test {
     // fight over the configuration.
     #[test]
     fn test_it() {
-        loop {
-            async fn do_test() {
-                let (r, _w) = sys_util::pipe(true).unwrap();
-                let done = Box::pin(async { 5usize });
-                let pending = Box::pin(TestFut::new(r));
-                match futures::future::select(pending, done).await {
-                    Either::Right((5, pending)) => std::mem::drop(pending),
-                    _ => panic!("unexpected select result"),
-                }
-                // test that dropping the incomplete future removed the waker.
-                assert_eq!(0, pending_ops());
+        crate::executor_commands::TEST_DISABLE_URING.store(true, Ordering::Relaxed);
+        async fn do_test() {
+            let (r, _w) = sys_util::pipe(true).unwrap();
+            let done = Box::pin(async { 5usize });
+            let pending = Box::pin(TestFut::new(r));
+            match futures::future::select(pending, done).await {
+                Either::Right((5, pending)) => std::mem::drop(pending),
+                _ => panic!("unexpected select result"),
             }
-
-            let fut = do_test();
-
-            crate::run_one(Box::pin(fut)).unwrap();
-
-            // Example of starting the framework and running a future:
-            async fn my_async(x: Rc<RefCell<u64>>) {
-                x.replace(4);
-            }
-
-            let x = Rc::new(RefCell::new(0));
-            crate::run_one(Box::pin(my_async(x.clone()))).unwrap();
-            assert_eq!(*x.borrow(), 4);
-
-            // If we tested FD then we either already tested both, or uring isn't supported. Either way
-            // we've done all we can do.
-            if !use_uring() {
-                break;
-            }
-            // otherwise we tested uring,force fd and test again.
-            crate::executor_commands::TEST_DISABLE_URING.store(true, Ordering::Relaxed);
+            // test that dropping the incomplete future removed the waker.
+            assert_eq!(0, pending_ops());
         }
+
+        let fut = do_test();
+
+        crate::run_one(Box::pin(fut)).unwrap();
+
+        // Example of starting the framework and running a future:
+        async fn my_async(x: Rc<RefCell<u64>>) {
+            x.replace(4);
+        }
+
+        let x = Rc::new(RefCell::new(0));
+        crate::run_one(Box::pin(my_async(x.clone()))).unwrap();
+        assert_eq!(*x.borrow(), 4);
     }
 }

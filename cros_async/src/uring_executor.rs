@@ -386,6 +386,7 @@ unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
     }
 }
 
+#[derive(Debug)]
 pub struct MemVec {
     pub offset: u64,
     pub len: usize,
@@ -417,7 +418,7 @@ struct PendingOperation {
 impl Future for PendingOperation {
     type Output = Result<u32>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         if let Some(result) =
             crate::uring_executor::get_result(&self.waker_token, cx.waker().clone())
         {

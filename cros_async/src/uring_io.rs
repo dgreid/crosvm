@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 use std::future::Future;
+use std::marker::Unpin;
+use std::ops::DerefMut;
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -67,17 +69,107 @@ fn poll_future<T>(cx: &mut Context<'_>, fut: impl Future<Output = T>) -> Poll<T>
     fut.poll(cx)
 }
 
+pub trait AsyncVolatileReadExt: AsyncVolatileRead {
+    /// Returns a future that will return the number of bytes read when complete or an error.
+    fn read_to_vectored<'a>(
+        &'a mut self,
+        offset: u64,
+        addrs: &'a [MemVec],
+    ) -> ReadVectored<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadVectored::new(self, offset, addrs)
+    }
+}
+impl<R: AsyncVolatileRead + ?Sized> AsyncVolatileReadExt for R {}
+
+/// Future for the `read_to_vectored` method.
+#[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct ReadVectored<'a, R: ?Sized> {
+    reader: &'a mut R,
+    offset: u64,
+    addrs: &'a [MemVec],
+}
+
+impl<R: ?Sized + Unpin> Unpin for ReadVectored<'_, R> {}
+
+impl<'a, R: AsyncVolatileRead + ?Sized + Unpin> ReadVectored<'a, R> {
+    pub(super) fn new(reader: &'a mut R, offset: u64, addrs: &'a [MemVec]) -> Self {
+        ReadVectored {
+            reader,
+            offset,
+            addrs,
+        }
+    }
+}
+
+impl<R: AsyncVolatileRead + ?Sized + Unpin> Future for ReadVectored<'_, R> {
+    type Output = Result<u32>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        Pin::new(&mut this.reader).poll_vec_read(cx, this.offset, this.addrs)
+    }
+}
+
+macro_rules! deref_async_volatile_read {
+    () => {
+        fn poll_vec_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context,
+            file_offset: u64,
+            iovecs: &[MemVec],
+        ) -> Poll<Result<u32>> {
+            Pin::new(&mut **self).poll_vec_read(cx, file_offset, iovecs)
+        }
+    };
+}
+
+impl<T: ?Sized + AsyncVolatileRead + Unpin> AsyncVolatileRead for Box<T> {
+    deref_async_volatile_read!();
+}
+
+impl<T: ?Sized + AsyncVolatileRead + Unpin> AsyncVolatileRead for &mut T {
+    deref_async_volatile_read!();
+}
+
+impl<P> AsyncVolatileRead for Pin<P>
+where
+    P: DerefMut + Unpin,
+    P::Target: AsyncVolatileRead,
+{
+    fn poll_vec_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+        file_offset: u64,
+        iovecs: &[MemVec],
+    ) -> Poll<Result<u32>> {
+        self.get_mut()
+            .as_mut()
+            .poll_vec_read(cx, file_offset, iovecs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    async fn zero_buf(buf: Rc<Box<dyn VolatileMemory>>, addrs: &[MemVec]) -> u32 {
+    use super::*;
+    use std::fs::File;
+
+    async fn zero_buf(buf: Rc<dyn VolatileMemory>, addrs: &[MemVec]) -> u32 {
         let f = File::open("/dev/zero").unwrap();
-        let async_reader = AsyncIo::new(f, buf.clone());
+        let mut async_reader = AsyncIo::new(f, buf.clone()).unwrap();
         async_reader.read_to_vectored(0, addrs).await.unwrap()
     }
 
     #[test]
     fn read_zeros() {
-        let buf: Box<[u8]> = Rc::new(Box::new([55u8; 8192]));
+        use data_model::GetVolatileRef;
+        use sys_util::{GuestAddress, GuestMemory};
+        let b = [55u8; 8192];
+        let buf = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
+        buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
         let mut async_fut = zero_buf(
             buf.clone(),
             &[MemVec {
@@ -86,8 +178,9 @@ mod tests {
             }],
         );
         pin_mut!(async_fut);
-        assert_eq!(4096, run_one(async_fut));
-        assert!(buf[1024..(1024 + 4096)].iter().all(|v| v == 0));
-        assert_eq(0, buf[1024]);
+        assert_eq!(4096, crate::run_one(async_fut).unwrap());
+        for i in 1024..(1024 + 4096) {
+            assert_eq!(0u8, buf.get_ref(i).unwrap().load());
+        }
     }
 }
