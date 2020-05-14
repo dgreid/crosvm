@@ -466,14 +466,14 @@ impl<'a> IoOperation<'a> {
         };
         Ok(PendingOperation {
             waker_token: Some(waker_token),
-            _addrs: addrs,
+            _addrs: Some(addrs),
         })
     }
 }
 
 pub struct PendingOperation<'a> {
     waker_token: Option<WakerToken>,
-    _addrs: Vec<IoSlice<'a>>, //to keep the array of addrs alive while the op is processing.
+    _addrs: Option<Vec<IoSlice<'a>>>, //to keep the array of addrs alive while the op is processing.
 }
 
 impl<'a> Future for PendingOperation<'a> {

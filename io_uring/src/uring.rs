@@ -267,6 +267,7 @@ impl URingContext {
     /// transaction is complete and that completion has been returned from the `wait` function.  In
     /// addition there must not be any mutable references to the data pointed to by `iovecs` until
     /// the operation completes.  Ensure that the fd remains open until the op completes as well.
+    /// The iovecs reference must be kept alive until the op returns.
     pub unsafe fn add_writev(
         &mut self,
         iovecs: &[IoSlice],
@@ -284,10 +285,7 @@ impl URingContext {
             sqe.user_data = user_data;
             sqe.flags = 0;
             sqe.fd = fd;
-        })?;
-        // Must submit writev inline to ensure that the reference to iovecs is valid when submit is
-        // called.
-        self.submit()
+        })
     }
 
     /// Asynchronously reads from `fd` to the addresses given in `iovecs`.
@@ -297,6 +295,7 @@ impl URingContext {
     /// transaction is complete and that completion has been returned from the `wait` function.  In
     /// addition there must not be any references to the data pointed to by `iovecs` until the
     /// operation completes.  Ensure that the fd remains open until the op completes as well.
+    /// The iovecs reference must be kept alive until the op returns.
     pub unsafe fn add_readv(
         &mut self,
         iovecs: &[IoSlice],
@@ -314,10 +313,7 @@ impl URingContext {
             sqe.user_data = user_data;
             sqe.flags = 0;
             sqe.fd = fd;
-        })?;
-        // Must submit readv inline to ensure that the reference to iovecs is valid when submit is
-        // called.
-        self.submit()
+        })
     }
 
     /// Syncs all completed operations, the ordering with in-flight async ops is not
