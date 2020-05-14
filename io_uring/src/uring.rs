@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::IoSlice;
@@ -275,17 +276,21 @@ impl URingContext {
         offset: u64,
         user_data: UserData,
     ) -> Result<()> {
+        // OK to transmute these as IoSlice is guaranteed to be compatible with iovecs on unix.
+        let addrs = std::mem::transmute::<&[IoSlice], &[libc::iovec]>(iovecs).to_vec();
         self.prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_WRITEV as u8;
-            sqe.addr = iovecs.as_ptr() as *const _ as *const libc::c_void as u64;
-            sqe.len = iovecs.len() as u32;
+            sqe.addr = addrs.as_ptr() as *const _ as *const libc::c_void as u64;
+            sqe.len = addrs.len() as u32;
             sqe.__bindgen_anon_1.off = offset;
             sqe.__bindgen_anon_3.__bindgen_anon_1.buf_index = 0;
             sqe.ioprio = 0;
             sqe.user_data = user_data;
             sqe.flags = 0;
             sqe.fd = fd;
-        })
+        })?;
+        self.complete_ring.add_op_data(user_data, addrs);
+        Ok(())
     }
 
     /// Asynchronously reads from `fd` to the addresses given in `iovecs`.
@@ -303,17 +308,21 @@ impl URingContext {
         offset: u64,
         user_data: UserData,
     ) -> Result<()> {
+        // OK to transmute these as IoSlice is guaranteed to be compatible with iovecs on unix.
+        let addrs = std::mem::transmute::<&[IoSlice], &[libc::iovec]>(iovecs).to_vec();
         self.prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_READV as u8;
-            sqe.addr = iovecs.as_ptr() as *const _ as *const libc::c_void as u64;
-            sqe.len = iovecs.len() as u32;
+            sqe.addr = addrs.as_ptr() as *const _ as *const libc::c_void as u64;
+            sqe.len = addrs.len() as u32;
             sqe.__bindgen_anon_1.off = offset;
             sqe.__bindgen_anon_3.__bindgen_anon_1.buf_index = 0;
             sqe.ioprio = 0;
             sqe.user_data = user_data;
             sqe.flags = 0;
             sqe.fd = fd;
-        })
+        })?;
+        self.complete_ring.add_op_data(user_data, addrs);
+        Ok(())
     }
 
     /// Syncs all completed operations, the ordering with in-flight async ops is not
@@ -526,6 +535,9 @@ struct CompleteQueueState {
     ring_mask: u32,
     cqes_offset: u32,
     completed: usize,
+    //For ops that pass in arrays of iovecs, they need to be valid for the duration of the
+    //operation because the kernel might read them at any time.
+    pending_op_addrs: BTreeMap<UserData, Vec<libc::iovec>>,
 }
 
 impl CompleteQueueState {
@@ -543,7 +555,12 @@ impl CompleteQueueState {
             ring_mask,
             cqes_offset: params.cq_off.cqes,
             completed: 0,
+            pending_op_addrs: BTreeMap::new(),
         }
+    }
+
+    fn add_op_data(&mut self, user_data: UserData, addrs: Vec<libc::iovec>) {
+        self.pending_op_addrs.insert(user_data, addrs);
     }
 
     fn get_cqe(&self, head: u32) -> &io_uring_cqe {
@@ -583,6 +600,9 @@ impl Iterator for CompleteQueueState {
         let cqe = self.get_cqe(head);
         let user_data = cqe.user_data;
         let res = cqe.res;
+
+        // free the addrs saved for this op.
+        let _ = self.pending_op_addrs.remove(&user_data);
 
         // Store the new head and ensure the reads above complete before the kernel sees the
         // update to head, `set_head` uses `Release` ordering
