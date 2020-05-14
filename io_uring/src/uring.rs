@@ -285,7 +285,7 @@ impl URingContext {
             sqe.flags = 0;
             sqe.fd = fd;
         })?;
-        // Must submit readv inline to ensure that the reference to iovecs is valid when submit is
+        // Must submit writev inline to ensure that the reference to iovecs is valid when submit is
         // called.
         self.submit()
     }
