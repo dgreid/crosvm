@@ -243,23 +243,21 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(registered_io) = self.registered_io.get(io_tag) {
             unsafe {
-                let iovecs = addrs
-                    .iter()
-                    .map(|mem_off| {
-                        let vs = registered_io
-                            .io_pair
-                            .mem
-                            .get_slice(mem_off.offset, mem_off.len as u64)
-                            .unwrap();
-                        IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                    })
-                    .collect::<Vec<_>>(); // TODO - remove this allocation.
-
+                let iovecs = addrs.iter().map(|mem_off| {
+                    let vs = registered_io
+                        .io_pair
+                        .mem
+                        .get_slice(mem_off.offset, mem_off.len as u64)
+                        .unwrap();
+                    // Safe because 'vs' is valid in the backing memory and that will be kept
+                    // alive longer than this iterator.
+                    IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
+                });
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
                     .add_writev(
-                        &iovecs,
+                        iovecs,
                         registered_io.io_pair.fd.as_raw_fd(),
                         offset,
                         self.next_op_token,
@@ -284,23 +282,21 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(registered_io) = self.registered_io.get(io_tag) {
             unsafe {
-                let iovecs = addrs
-                    .iter()
-                    .map(|mem_off| {
-                        let vs = registered_io
-                            .io_pair
-                            .mem
-                            .get_slice(mem_off.offset, mem_off.len as u64)
-                            .unwrap();
-                        IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                    })
-                    .collect::<Vec<_>>(); // TODO - remove this allocation.
-
+                let iovecs = addrs.iter().map(|mem_off| {
+                    let vs = registered_io
+                        .io_pair
+                        .mem
+                        .get_slice(mem_off.offset, mem_off.len as u64)
+                        .unwrap();
+                    // Safe because 'vs' is valid in the backing memory and that will be kept
+                    // alive longer than this iterator.
+                    IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
+                });
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
                     .add_readv(
-                        &iovecs,
+                        iovecs,
                         registered_io.io_pair.fd.as_raw_fd(),
                         offset,
                         self.next_op_token,

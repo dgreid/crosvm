@@ -269,15 +269,20 @@ impl URingContext {
     /// addition there must not be any mutable references to the data pointed to by `iovecs` until
     /// the operation completes.  Ensure that the fd remains open until the op completes as well.
     /// The iovecs reference must be kept alive until the op returns.
-    pub unsafe fn add_writev(
+    pub unsafe fn add_writev<'a, I>(
         &mut self,
-        iovecs: &[IoSlice],
+        iovecs: I,
         fd: RawFd,
         offset: u64,
         user_data: UserData,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        I: Iterator<Item = IoSlice<'a>>,
+    {
         // OK to transmute these as IoSlice is guaranteed to be compatible with iovecs on unix.
-        let addrs = std::mem::transmute::<&[IoSlice], &[libc::iovec]>(iovecs).to_vec();
+        let addrs = iovecs
+            .map(|slice| std::mem::transmute::<IoSlice, libc::iovec>(slice))
+            .collect::<Vec<_>>();
         self.prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_WRITEV as u8;
             sqe.addr = addrs.as_ptr() as *const _ as *const libc::c_void as u64;
@@ -301,15 +306,20 @@ impl URingContext {
     /// addition there must not be any references to the data pointed to by `iovecs` until the
     /// operation completes.  Ensure that the fd remains open until the op completes as well.
     /// The iovecs reference must be kept alive until the op returns.
-    pub unsafe fn add_readv(
+    pub unsafe fn add_readv<'a, I>(
         &mut self,
-        iovecs: &[IoSlice],
+        iovecs: I,
         fd: RawFd,
         offset: u64,
         user_data: UserData,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        I: Iterator<Item = IoSlice<'a>>,
+    {
         // OK to transmute these as IoSlice is guaranteed to be compatible with iovecs on unix.
-        let addrs = std::mem::transmute::<&[IoSlice], &[libc::iovec]>(iovecs).to_vec();
+        let addrs = iovecs
+            .map(|slice| std::mem::transmute::<IoSlice, libc::iovec>(slice))
+            .collect::<Vec<_>>();
         self.prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_READV as u8;
             sqe.addr = addrs.as_ptr() as *const _ as *const libc::c_void as u64;
