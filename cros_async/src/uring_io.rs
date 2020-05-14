@@ -31,7 +31,7 @@ impl<T: AsRawFd> AsyncIo<T> {
     /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
     /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
     /// created with.
-    pub async fn read_to_vectored(&mut self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
+    pub async fn read_to_vectored(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         self.registered_io.do_readv(file_offset, iovecs).await
     }
 }
@@ -45,7 +45,7 @@ mod tests {
 
     async fn zero_buf(buf: Rc<dyn VolatileMemory>, addrs: &[MemVec]) -> u32 {
         let f = File::open("/dev/zero").unwrap();
-        let mut async_reader = AsyncIo::new(f, buf.clone()).unwrap();
+        let async_reader = AsyncIo::new(f, buf.clone()).unwrap();
         async_reader.read_to_vectored(0, addrs).await.unwrap()
     }
 
@@ -67,6 +67,48 @@ mod tests {
         assert_eq!(4096, crate::run_one(async_fut).unwrap());
         for i in 1024..(1024 + 4096) {
             assert_eq!(0u8, buf.get_ref(i).unwrap().load());
+        }
+
+        // Fill two subregions with a joined future.
+        buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
+        async fn zero2<'a>(
+            buf: Rc<dyn VolatileMemory>,
+            addrs1: &'a [MemVec],
+            addrs2: &'a [MemVec],
+        ) -> (u32, u32) {
+            let f = File::open("/dev/zero").unwrap();
+            let async_reader = AsyncIo::new(f, buf.clone()).unwrap();
+            let res = futures::future::join(
+                async_reader.read_to_vectored(0, addrs1),
+                async_reader.read_to_vectored(0, addrs2),
+            )
+            .await;
+            (res.0.unwrap(), res.1.unwrap())
+        }
+        let async_fut2 = zero2(
+            buf.clone(),
+            &[MemVec {
+                offset: 0,
+                len: 1024,
+            }],
+            &[MemVec {
+                offset: 4096,
+                len: 1024,
+            }],
+        );
+        pin_mut!(async_fut2);
+        assert_eq!((1024, 1024), crate::run_one(async_fut2).unwrap());
+        for i in 0..1024 {
+            assert_eq!(0u8, buf.get_ref(i).unwrap().load());
+        }
+        for i in 1024..4096 {
+            assert_eq!(0x55u8, buf.get_ref(i).unwrap().load());
+        }
+        for i in 4096..(4096 + 1024) {
+            assert_eq!(0u8, buf.get_ref(i).unwrap().load());
+        }
+        for i in (4096 + 1024)..8192 {
+            assert_eq!(0x55u8, buf.get_ref(i).unwrap().load());
         }
     }
 }
