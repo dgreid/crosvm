@@ -56,7 +56,7 @@ mod tests {
         use sys_util::{GuestAddress, GuestMemory};
 
         // Read one subsection from /dev/zero to the buffer.
-        async fn write_out(addrs: &[MemVec]) {
+        async fn write_out() {
             // Write from source to target. 'target' is used as the backing file because GuestMemory
             // implements 'AsRawFd'.
             let source = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
@@ -64,7 +64,16 @@ mod tests {
             source.get_slice(0, 8192).unwrap().write_bytes(0x55);
             target.get_slice(0, 8192).unwrap().write_bytes(0);
             let async_writer = AsyncIo::new(target, source.clone()).unwrap();
-            async_writer.write_from_vectored(0, addrs).await.unwrap();
+            async_writer
+                .write_from_vectored(
+                    0,
+                    &[MemVec {
+                        offset: 0,
+                        len: 4096,
+                    }],
+                )
+                .await
+                .unwrap();
 
             let (target, _) = async_writer.into_parts();
             for i in 0..4096 {
@@ -72,11 +81,7 @@ mod tests {
             }
         }
 
-        let memvecs = vec![MemVec {
-            offset: 1024,
-            len: 4096,
-        }];
-        let async_fut = write_out(&memvecs);
+        let async_fut = write_out();
         pin_mut!(async_fut);
         crate::run_one(async_fut).unwrap();
     }

@@ -95,7 +95,11 @@ fn cancel_waker(token: &WakerToken) -> Result<()> {
     })
 }
 
-fn submit_readv(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Result<WakerToken> {
+fn submit_readv(
+    tag: &RegisteredIoToken,
+    offset: u64,
+    iovecs: &Vec<IoSlice<'_>>,
+) -> Result<WakerToken> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
@@ -106,11 +110,15 @@ fn submit_readv(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Resu
     })
 }
 
-fn submit_writev(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Result<WakerToken> {
+fn submit_writev(
+    tag: &RegisteredIoToken,
+    offset: u64,
+    addrs: &Vec<IoSlice<'_>>,
+) -> Result<WakerToken> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
-            state.submit_writev(tag, offset, iovecs)
+            state.submit_writev(tag, offset, addrs)
         } else {
             Err(Error::InvalidContext)
         }
@@ -155,10 +163,24 @@ pub struct RegisteredIo {
     tag: RegisteredIoToken,
 }
 impl RegisteredIo {
+    fn get_vecs<'a>(&'a self, addrs: &'_ [MemVec]) -> Vec<IoSlice<'a>> {
+        addrs
+            .iter()
+            .map(|mem_off| {
+                let vs = self
+                    .io_pair
+                    .mem
+                    .get_slice(mem_off.offset, mem_off.len as u64)
+                    .unwrap();
+                unsafe { IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize)) }
+            })
+            .collect::<Vec<_>>() // TODO - remove this allocation.
+    }
+
     pub async fn do_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         let op = IoOperation::ReadVectored {
             file_offset,
-            iovecs,
+            addrs: self.get_vecs(iovecs),
         };
         op.submit(&self.tag)?.await
     }
@@ -166,7 +188,7 @@ impl RegisteredIo {
     pub async fn do_writev(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         let op = IoOperation::WriteVectored {
             file_offset,
-            iovecs,
+            addrs: self.get_vecs(iovecs),
         };
         op.submit(&self.tag)?.await
     }
@@ -239,27 +261,15 @@ impl RingWakerState {
         &mut self,
         io_tag: &RegisteredIoToken,
         offset: u64,
-        mem_offsets: &[MemVec],
+        addrs: &Vec<IoSlice<'_>>,
     ) -> Result<WakerToken> {
         if let Some(registered_io) = self.registered_io.get(io_tag) {
             unsafe {
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
-                let iovecs = mem_offsets
-                    .iter()
-                    .map(|mem_off| {
-                        let vs = registered_io
-                            .io_pair
-                            .mem
-                            .get_slice(mem_off.offset, mem_off.len as u64)
-                            .unwrap();
-                        IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                    })
-                    .collect::<Vec<_>>(); // TODO - remove this allocation.
-                    ****TODO does this vec need to live longer? try returning it...
                 self.ctx
                     .add_writev(
-                        &iovecs,
+                        &addrs,
                         registered_io.io_pair.fd.as_raw_fd(),
                         offset,
                         self.next_op_token,
@@ -280,26 +290,15 @@ impl RingWakerState {
         &mut self,
         io_tag: &RegisteredIoToken,
         offset: u64,
-        mem_offsets: &[MemVec],
+        addrs: &Vec<IoSlice<'_>>,
     ) -> Result<WakerToken> {
         if let Some(registered_io) = self.registered_io.get(io_tag) {
             unsafe {
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
-                let iovecs = mem_offsets
-                    .iter()
-                    .map(|mem_off| {
-                        let vs = registered_io
-                            .io_pair
-                            .mem
-                            .get_slice(mem_off.offset, mem_off.len as u64)
-                            .unwrap();
-                        IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                    })
-                    .collect::<Vec<_>>(); // TODO - remove this allocation.
                 self.ctx
                     .add_readv(
-                        &iovecs,
+                        &addrs,
                         registered_io.io_pair.fd.as_raw_fd(),
                         offset,
                         self.next_op_token,
@@ -445,36 +444,36 @@ pub struct MemVec {
 enum IoOperation<'a> {
     ReadVectored {
         file_offset: u64,
-        iovecs: &'a [MemVec],
+        addrs: Vec<IoSlice<'a>>,
     },
     WriteVectored {
         file_offset: u64,
-        iovecs: &'a [MemVec],
+        addrs: Vec<IoSlice<'a>>,
     },
 }
 
 impl<'a> IoOperation<'a> {
-    fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation> {
+    fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation<'a>> {
         let (waker_token, addrs) = match self {
-            IoOperation::ReadVectored {
-                file_offset,
-                iovecs,
-            } => crate::uring_executor::submit_readv(tag, file_offset, iovecs).unwrap(),
-            IoOperation::WriteVectored {
-                file_offset,
-                iovecs,
-            } => crate::uring_executor::submit_writev(tag, file_offset, iovecs).unwrap(),
+            IoOperation::ReadVectored { file_offset, addrs } => (
+                crate::uring_executor::submit_readv(tag, file_offset, &addrs).unwrap(),
+                addrs,
+            ),
+            IoOperation::WriteVectored { file_offset, addrs } => (
+                crate::uring_executor::submit_writev(tag, file_offset, &addrs).unwrap(),
+                addrs,
+            ),
         };
         Ok(PendingOperation {
             waker_token: Some(waker_token),
-            addrs
+            _addrs: addrs,
         })
     }
 }
 
 pub struct PendingOperation<'a> {
     waker_token: Option<WakerToken>,
-    iovecs: Vec<IoSlice<'a>>
+    _addrs: Vec<IoSlice<'a>>, //to keep the array of addrs alive while the op is processing.
 }
 
 impl<'a> Future for PendingOperation<'a> {
@@ -492,7 +491,7 @@ impl<'a> Future for PendingOperation<'a> {
     }
 }
 
-impl Drop for PendingOperation {
+impl<'a> Drop for PendingOperation<'a> {
     fn drop(&mut self) {
         if let Some(waker_token) = self.waker_token.take() {
             let _ = cancel_waker(&waker_token);
