@@ -106,6 +106,17 @@ fn submit_readv(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Resu
     })
 }
 
+fn submit_writev(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Result<WakerToken> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(state) = state.as_mut() {
+            state.submit_writev(tag, offset, iovecs)
+        } else {
+            Err(Error::InvalidContext)
+        }
+    })
+}
+
 fn get_result(token: &WakerToken, waker: Waker) -> Option<std::io::Result<u32>> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -146,6 +157,14 @@ pub struct RegisteredIo {
 impl RegisteredIo {
     pub async fn do_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         let op = IoOperation::ReadVectored {
+            file_offset,
+            iovecs,
+        };
+        op.submit(&self.tag)?.await
+    }
+
+    pub async fn do_writev(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
+        let op = IoOperation::WriteVectored {
             file_offset,
             iovecs,
         };
@@ -214,6 +233,47 @@ impl RingWakerState {
         // RegisteredIo is refcounted. There isn't any need to pull pending ops out, let them
         // complete. deregister is not a common path.
         let _ = self.registered_io.remove(tag);
+    }
+
+    fn submit_writev(
+        &mut self,
+        io_tag: &RegisteredIoToken,
+        offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<WakerToken> {
+        if let Some(registered_io) = self.registered_io.get(io_tag) {
+            unsafe {
+                // Safe because all the addresses are within the Memory that an Rc is kept for the
+                // duration to ensure the memory is valid while the kernel accesses it.
+                let iovecs = mem_offsets
+                    .iter()
+                    .map(|mem_off| {
+                        let vs = registered_io
+                            .io_pair
+                            .mem
+                            .get_slice(mem_off.offset, mem_off.len as u64)
+                            .unwrap();
+                        IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
+                    })
+                    .collect::<Vec<_>>(); // TODO - remove this allocation.
+                    ****TODO does this vec need to live longer? try returning it...
+                self.ctx
+                    .add_writev(
+                        &iovecs,
+                        registered_io.io_pair.fd.as_raw_fd(),
+                        offset,
+                        self.next_op_token,
+                    )
+                    .map_err(Error::SubmittingOp)?;
+            }
+            let next_op_token = WakerToken(self.next_op_token);
+            self.pending_ops
+                .insert(next_op_token.clone(), registered_io.io_pair.clone());
+            self.next_op_token += 1;
+            Ok(next_op_token)
+        } else {
+            Err(Error::InvalidPair)
+        }
     }
 
     fn submit_readv(
@@ -387,27 +447,37 @@ enum IoOperation<'a> {
         file_offset: u64,
         iovecs: &'a [MemVec],
     },
+    WriteVectored {
+        file_offset: u64,
+        iovecs: &'a [MemVec],
+    },
 }
 
 impl<'a> IoOperation<'a> {
     fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation> {
-        let waker_token = match self {
+        let (waker_token, addrs) = match self {
             IoOperation::ReadVectored {
                 file_offset,
                 iovecs,
             } => crate::uring_executor::submit_readv(tag, file_offset, iovecs).unwrap(),
+            IoOperation::WriteVectored {
+                file_offset,
+                iovecs,
+            } => crate::uring_executor::submit_writev(tag, file_offset, iovecs).unwrap(),
         };
         Ok(PendingOperation {
             waker_token: Some(waker_token),
+            addrs
         })
     }
 }
 
-pub struct PendingOperation {
+pub struct PendingOperation<'a> {
     waker_token: Option<WakerToken>,
+    iovecs: Vec<IoSlice<'a>>
 }
 
-impl Future for PendingOperation {
+impl<'a> Future for PendingOperation<'a> {
     type Output = Result<u32>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {

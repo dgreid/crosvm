@@ -34,6 +34,13 @@ impl<T: AsRawFd> AsyncIo<T> {
     pub async fn read_to_vectored(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         self.registered_io.do_readv(file_offset, iovecs).await
     }
+
+    /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
+    /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
+    /// created with.
+    pub async fn write_from_vectored(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
+        self.registered_io.do_writev(file_offset, iovecs).await
+    }
 }
 
 #[cfg(test)]
@@ -43,10 +50,35 @@ mod tests {
 
     use futures::pin_mut;
 
-    async fn zero_buf(buf: Rc<dyn VolatileMemory>, addrs: &[MemVec]) -> u32 {
-        let f = File::open("/dev/zero").unwrap();
-        let async_reader = AsyncIo::new(f, buf.clone()).unwrap();
-        async_reader.read_to_vectored(0, addrs).await.unwrap()
+    #[test]
+    fn writev() {
+        use data_model::GetVolatileRef;
+        use sys_util::{GuestAddress, GuestMemory};
+
+        // Read one subsection from /dev/zero to the buffer.
+        async fn write_out(addrs: &[MemVec]) {
+            // Write from source to target. 'target' is used as the backing file because GuestMemory
+            // implements 'AsRawFd'.
+            let source = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
+            let target = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
+            source.get_slice(0, 8192).unwrap().write_bytes(0x55);
+            target.get_slice(0, 8192).unwrap().write_bytes(0);
+            let async_writer = AsyncIo::new(target, source.clone()).unwrap();
+            async_writer.write_from_vectored(0, addrs).await.unwrap();
+
+            let (target, _) = async_writer.into_parts();
+            for i in 0..4096 {
+                assert_eq!(0x55u8, target.get_ref(i).unwrap().load());
+            }
+        }
+
+        let memvecs = vec![MemVec {
+            offset: 1024,
+            len: 4096,
+        }];
+        let async_fut = write_out(&memvecs);
+        pin_mut!(async_fut);
+        crate::run_one(async_fut).unwrap();
     }
 
     #[test]
@@ -55,7 +87,15 @@ mod tests {
         use sys_util::{GuestAddress, GuestMemory};
 
         let buf = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
+
+        // Read one subsection from /dev/zero to the buffer.
         buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
+        async fn zero_buf(buf: Rc<dyn VolatileMemory>, addrs: &[MemVec]) -> u32 {
+            let f = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
+            let async_reader = AsyncIo::new(f, buf.clone()).unwrap();
+            async_reader.read_to_vectored(0, addrs).await.unwrap()
+        }
+
         let async_fut = zero_buf(
             buf.clone(),
             &[MemVec {
