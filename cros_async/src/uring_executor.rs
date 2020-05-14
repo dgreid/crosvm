@@ -456,11 +456,11 @@ impl<'a> IoOperation<'a> {
     fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation<'a>> {
         let (waker_token, addrs) = match self {
             IoOperation::ReadVectored { file_offset, addrs } => (
-                crate::uring_executor::submit_readv(tag, file_offset, &addrs).unwrap(),
+                crate::uring_executor::submit_readv(tag, file_offset, &addrs)?,
                 addrs,
             ),
             IoOperation::WriteVectored { file_offset, addrs } => (
-                crate::uring_executor::submit_writev(tag, file_offset, &addrs).unwrap(),
+                crate::uring_executor::submit_writev(tag, file_offset, &addrs)?,
                 addrs,
             ),
         };
