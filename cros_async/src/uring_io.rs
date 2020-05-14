@@ -2,15 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::future::Future;
-use std::marker::Unpin;
-use std::ops::DerefMut;
 use std::os::unix::io::AsRawFd;
-use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll};
-
-use futures::pin_mut;
 
 use data_model::VolatileMemory;
 
@@ -34,121 +27,12 @@ impl<T: AsRawFd> AsyncIo<T> {
     pub fn into_parts(self) -> (T, Rc<dyn VolatileMemory>) {
         (self.io, self.mem)
     }
-}
 
-pub trait AsyncVolatileRead {
     /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
-    /// Pass Rc<M> so that the lifetime of the memory can be ensured to live longer than the
-    /// asynchronous op. A ref is taken by the executor and not released until the op is completed,
-    /// uring ops aren't cancelled synchronously, requiring the ref to be held beyond the scope of
-    /// the returned future.
-    /// Note that the `iovec`s are be relative to the start of the memory region the implementer of
-    /// the trait is working with.
-    fn poll_vec_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        file_offset: u64,
-        iovecs: &[MemVec],
-    ) -> Poll<Result<u32>>;
-}
-
-impl<T: AsRawFd> AsyncVolatileRead for AsyncIo<T> {
-    fn poll_vec_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        file_offset: u64,
-        iovecs: &[MemVec],
-    ) -> Poll<Result<u32>> {
-        poll_future(cx, self.registered_io.do_readv(file_offset, iovecs))
-    }
-}
-
-/// Pins a future and then polls it.
-fn poll_future<T>(cx: &mut Context<'_>, fut: impl Future<Output = T>) -> Poll<T> {
-    pin_mut!(fut);
-    fut.poll(cx)
-}
-
-pub trait AsyncVolatileReadExt: AsyncVolatileRead {
-    /// Returns a future that will return the number of bytes read when complete or an error.
-    fn read_to_vectored<'a>(
-        &'a mut self,
-        offset: u64,
-        addrs: &'a [MemVec],
-    ) -> ReadVectored<'a, Self>
-    where
-        Self: Unpin,
-    {
-        ReadVectored::new(self, offset, addrs)
-    }
-}
-impl<R: AsyncVolatileRead + ?Sized> AsyncVolatileReadExt for R {}
-
-/// Future for the `read_to_vectored` method.
-#[derive(Debug)]
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct ReadVectored<'a, R: ?Sized> {
-    reader: &'a mut R,
-    offset: u64,
-    addrs: &'a [MemVec],
-}
-
-impl<R: ?Sized + Unpin> Unpin for ReadVectored<'_, R> {}
-
-impl<'a, R: AsyncVolatileRead + ?Sized + Unpin> ReadVectored<'a, R> {
-    pub(super) fn new(reader: &'a mut R, offset: u64, addrs: &'a [MemVec]) -> Self {
-        ReadVectored {
-            reader,
-            offset,
-            addrs,
-        }
-    }
-}
-
-impl<R: AsyncVolatileRead + ?Sized + Unpin> Future for ReadVectored<'_, R> {
-    type Output = Result<u32>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-        Pin::new(&mut this.reader).poll_vec_read(cx, this.offset, this.addrs)
-    }
-}
-
-macro_rules! deref_async_volatile_read {
-    () => {
-        fn poll_vec_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context,
-            file_offset: u64,
-            iovecs: &[MemVec],
-        ) -> Poll<Result<u32>> {
-            Pin::new(&mut **self).poll_vec_read(cx, file_offset, iovecs)
-        }
-    };
-}
-
-impl<T: ?Sized + AsyncVolatileRead + Unpin> AsyncVolatileRead for Box<T> {
-    deref_async_volatile_read!();
-}
-
-impl<T: ?Sized + AsyncVolatileRead + Unpin> AsyncVolatileRead for &mut T {
-    deref_async_volatile_read!();
-}
-
-impl<P> AsyncVolatileRead for Pin<P>
-where
-    P: DerefMut + Unpin,
-    P::Target: AsyncVolatileRead,
-{
-    fn poll_vec_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        file_offset: u64,
-        iovecs: &[MemVec],
-    ) -> Poll<Result<u32>> {
-        self.get_mut()
-            .as_mut()
-            .poll_vec_read(cx, file_offset, iovecs)
+    /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
+    /// created with.
+    async fn read_to_vectored(&mut self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
+        self.registered_io.do_readv(file_offset, iovecs).await
     }
 }
 
@@ -156,6 +40,8 @@ where
 mod tests {
     use super::*;
     use std::fs::File;
+
+    use futures::pin_mut;
 
     async fn zero_buf(buf: Rc<dyn VolatileMemory>, addrs: &[MemVec]) -> u32 {
         let f = File::open("/dev/zero").unwrap();
@@ -167,10 +53,10 @@ mod tests {
     fn read_zeros() {
         use data_model::GetVolatileRef;
         use sys_util::{GuestAddress, GuestMemory};
-        let b = [55u8; 8192];
+
         let buf = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
         buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
-        let mut async_fut = zero_buf(
+        let async_fut = zero_buf(
             buf.clone(),
             &[MemVec {
                 offset: 1024,

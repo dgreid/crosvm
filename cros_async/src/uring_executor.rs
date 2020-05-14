@@ -250,7 +250,6 @@ impl RingWakerState {
                     .map_err(Error::SubmittingOp)?;
             }
             let next_op_token = WakerToken(self.next_op_token);
-            // TODO, must save an Rc to mem in the ops.
             self.pending_ops
                 .insert(next_op_token.clone(), registered_io.io_pair.clone());
             self.next_op_token += 1;
@@ -413,7 +412,7 @@ impl<'a> IoOperation<'a> {
     }
 }
 
-struct PendingOperation {
+pub struct PendingOperation {
     waker_token: WakerToken,
 }
 
@@ -428,11 +427,5 @@ impl Future for PendingOperation {
         } else {
             Poll::Pending
         }
-    }
-}
-
-impl Drop for PendingOperation {
-    fn drop(&mut self) {
-        let _ = crate::uring_executor::cancel_waker(&self.waker_token);
     }
 }
