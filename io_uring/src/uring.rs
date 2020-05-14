@@ -957,7 +957,7 @@ mod tests {
         let f = File::open(Path::new("/dev/zero")).unwrap();
         let mut uring = URingContext::new(16).unwrap();
         uring
-            .add_poll_fd(f.as_raw_fd(), WatchingEvents::empty().set_read(), 454)
+            .add_poll_fd(f.as_raw_fd(), &WatchingEvents::empty().set_read(), 454)
             .unwrap();
         let (user_data, res) = uring.wait().unwrap().next().unwrap();
         assert_eq!(user_data, 454 as UserData);
