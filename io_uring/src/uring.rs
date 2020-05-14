@@ -284,7 +284,10 @@ impl URingContext {
             sqe.user_data = user_data;
             sqe.flags = 0;
             sqe.fd = fd;
-        })
+        })?;
+        // Must submit readv inline to ensure that the reference to iovecs is valid when submit is
+        // called.
+        self.submit()
     }
 
     /// Asynchronously reads from `fd` to the addresses given in `iovecs`.
@@ -311,7 +314,10 @@ impl URingContext {
             sqe.user_data = user_data;
             sqe.flags = 0;
             sqe.fd = fd;
-        })
+        })?;
+        // Must submit readv inline to ensure that the reference to iovecs is valid when submit is
+        // called.
+        self.submit()
     }
 
     /// Syncs all completed operations, the ordering with in-flight async ops is not
