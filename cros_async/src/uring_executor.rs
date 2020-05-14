@@ -134,11 +134,14 @@ pub(crate) fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()
 /// Register a file and memory pair for buffered asynchronous operation.
 pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc<RegisteredIo>> {
     STATE.with(|state| {
+        if state.borrow().is_none() {
+            state.replace(Some(RingWakerState::new()?));
+        }
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
             state.register_io(fd, mem)
         } else {
-            Err(Error::InvalidContext)
+            unreachable!("Can't get here");
         }
     })
 }
@@ -337,10 +340,9 @@ impl<T: FutureList> URingExecutor<T> {
     /// Create a new executor.
     pub fn new(futures: T) -> Result<URingExecutor<T>> {
         STATE.with(|state| {
-            if state.borrow().is_some() {
-                return Err(Error::AttemptedDuplicateExecutor);
+            if state.borrow().is_none() {
+                state.replace(Some(RingWakerState::new()?));
             }
-            state.replace(Some(RingWakerState::new()?));
             Ok(())
         })?;
         Ok(URingExecutor { futures })
