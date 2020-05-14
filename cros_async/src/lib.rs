@@ -65,6 +65,7 @@ mod waker;
 pub use executor::Executor;
 pub use executor_commands::*;
 pub use select::SelectResult;
+pub use uring_io::*;
 
 use executor::RunOne;
 

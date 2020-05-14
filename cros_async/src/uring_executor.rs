@@ -117,20 +117,6 @@ fn get_result(token: &WakerToken, waker: Waker) -> Option<std::io::Result<u32>> 
     })
 }
 
-/// Adds a new top level future to the Executor.
-/// These futures must return `()`, indicating they are intended to create side-effects only.
-pub(crate) fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()> {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.new_futures.push_back(ExecutableFuture::new(future));
-            Ok(())
-        } else {
-            Err(Error::InvalidContext)
-        }
-    })
-}
-
 /// Register a file and memory pair for buffered asynchronous operation.
 pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc<RegisteredIo>> {
     STATE.with(|state| {
@@ -164,6 +150,17 @@ impl RegisteredIo {
             iovecs,
         };
         op.submit(&self.tag)?.await
+    }
+}
+
+impl Drop for RegisteredIo {
+    fn drop(&mut self) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if let Some(state) = state.as_mut() {
+                let _ = state.deregister_io(&self.tag);
+            }
+        })
     }
 }
 
@@ -368,14 +365,6 @@ impl<T: FutureList> Drop for URingExecutor<T> {
     }
 }
 
-// test function to get the number of pending wakers.
-pub(crate) fn pending_ops() -> usize {
-    STATE.with(|state| {
-        let state = state.borrow_mut();
-        state.as_ref().unwrap().pending_ops.len()
-    })
-}
-
 // Used to dup the FDs passed to the executor so there is a guarantee they aren't closed while
 // waiting in TLS to be added to the main polling context.
 unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
@@ -408,24 +397,35 @@ impl<'a> IoOperation<'a> {
                 iovecs,
             } => crate::uring_executor::submit_readv(tag, file_offset, iovecs).unwrap(),
         };
-        Ok(PendingOperation { waker_token })
+        Ok(PendingOperation {
+            waker_token: Some(waker_token),
+        })
     }
 }
 
 pub struct PendingOperation {
-    waker_token: WakerToken,
+    waker_token: Option<WakerToken>,
 }
 
 impl Future for PendingOperation {
     type Output = Result<u32>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        if let Some(result) =
-            crate::uring_executor::get_result(&self.waker_token, cx.waker().clone())
-        {
-            Poll::Ready(result.map_err(Error::Io))
-        } else {
-            Poll::Pending
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        if let Some(waker_token) = &self.waker_token {
+            if let Some(result) = crate::uring_executor::get_result(waker_token, cx.waker().clone())
+            {
+                self.waker_token = None;
+                return Poll::Ready(result.map_err(Error::Io));
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for PendingOperation {
+    fn drop(&mut self) {
+        if let Some(waker_token) = self.waker_token.take() {
+            let _ = cancel_waker(&waker_token);
         }
     }
 }

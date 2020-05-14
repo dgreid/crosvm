@@ -9,7 +9,7 @@ use data_model::VolatileMemory;
 
 use crate::uring_executor::{self, MemVec, RegisteredIo, Result};
 
-struct AsyncIo<T: AsRawFd> {
+pub struct AsyncIo<T: AsRawFd> {
     registered_io: Rc<RegisteredIo>,
     io: T,
     mem: Rc<dyn VolatileMemory>,
@@ -31,7 +31,7 @@ impl<T: AsRawFd> AsyncIo<T> {
     /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
     /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
     /// created with.
-    async fn read_to_vectored(&mut self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
+    pub async fn read_to_vectored(&mut self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         self.registered_io.do_readv(file_offset, iovecs).await
     }
 }
