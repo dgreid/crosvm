@@ -85,29 +85,6 @@ pub(crate) fn supported() -> bool {
 // Tracks active wakers and the futures they are associated with.
 thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
 
-/// Cancels the waker that returned the given token if the waker hasn't yet fired.
-fn cancel_waker(token: &WakerToken) -> Result<()> {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.cancel_waker(token)
-        } else {
-            Err(Error::InvalidContext)
-        }
-    })
-}
-
-fn get_result(token: &WakerToken, waker: Waker) -> Option<std::io::Result<u32>> {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.get_result(token, waker)
-        } else {
-            None
-        }
-    })
-}
-
 /// Register a file and memory pair for buffered asynchronous operation.
 pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc<RegisteredIo>> {
     STATE.with(|state| {
@@ -336,6 +313,17 @@ impl RingWakerState {
             None
         }
     }
+
+    fn with<R, F: FnMut(&mut RingWakerState) -> R>(mut f: F) -> Result<R> {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if let Some(state) = state.as_mut() {
+                Ok(f(state))
+            } else {
+                Err(Error::InvalidContext)
+            }
+        })
+    }
 }
 
 /// Runs futures to completion on a single thread. Futures are allowed to block on file descriptors
@@ -470,7 +458,8 @@ impl Future for PendingOperation {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         if let Some(waker_token) = &self.waker_token {
-            if let Some(result) = crate::uring_executor::get_result(waker_token, cx.waker().clone())
+            if let Some(result) =
+                RingWakerState::with(|state| state.get_result(waker_token, cx.waker().clone()))?
             {
                 self.waker_token = None;
                 return Poll::Ready(result.map_err(Error::Io));
@@ -483,7 +472,7 @@ impl Future for PendingOperation {
 impl Drop for PendingOperation {
     fn drop(&mut self) {
         if let Some(waker_token) = self.waker_token.take() {
-            let _ = cancel_waker(&waker_token);
+            let _ = RingWakerState::with(|state| state.cancel_waker(&waker_token));
         }
     }
 }
