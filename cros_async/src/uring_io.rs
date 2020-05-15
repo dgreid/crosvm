@@ -2,12 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::future::Future;
+use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
 use data_model::VolatileMemory;
 
-use crate::uring_executor::{self, MemVec, RegisteredIo, Result};
+use crate::uring_executor::{self, MemVec, PendingOperation, RegisteredIo, Result};
 
 pub struct AsyncIo<T: AsRawFd> {
     registered_io: Rc<RegisteredIo>,
@@ -31,15 +35,158 @@ impl<T: AsRawFd> AsyncIo<T> {
     /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
     /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
     /// created with.
-    pub async fn read_to_vectored(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
-        self.registered_io.do_readv(file_offset, iovecs).await
-    }
-
-    /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
-    /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
-    /// created with.
     pub async fn write_from_vectored(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         self.registered_io.do_writev(file_offset, iovecs).await
+    }
+}
+
+impl<T: AsRawFd> CompleteIo for AsyncIo<T> {
+    type CompleteToken = PendingOperation;
+
+    fn read_vec(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<Self::CompleteToken> {
+        self.registered_io.start_readv(file_offset, mem_offsets)
+    }
+
+    fn poll_complete(
+        self: Pin<&Self>,
+        cx: &mut Context,
+        token: &mut Self::CompleteToken,
+    ) -> Poll<Result<u32>> {
+        self.registered_io.poll_complete(cx, token)
+    }
+}
+
+pub trait CompleteIo {
+    type CompleteToken;
+
+    fn read_vec(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<Self::CompleteToken>;
+
+    fn poll_complete(
+        self: Pin<&Self>,
+        cx: &mut Context,
+        token: &mut Self::CompleteToken,
+    ) -> Poll<Result<u32>>;
+}
+
+macro_rules! deref_complete_io {
+    () => {
+        type CompleteToken = T::CompleteToken;
+
+        fn read_vec(
+            self: Pin<&Self>,
+            file_offset: u64,
+            mem_offsets: &[MemVec],
+        ) -> Result<Self::CompleteToken> {
+            Pin::new(&**self).read_vec(file_offset, mem_offsets)
+        }
+
+        fn poll_complete(
+            self: Pin<&Self>,
+            cx: &mut Context,
+            token: &mut Self::CompleteToken,
+        ) -> Poll<Result<u32>> {
+            Pin::new(&**self).poll_complete(cx, token)
+        }
+    };
+}
+
+impl<T: ?Sized + CompleteIo + Unpin> CompleteIo for Box<T> {
+    deref_complete_io!();
+}
+
+impl<T: ?Sized + CompleteIo + Unpin> CompleteIo for &T {
+    deref_complete_io!();
+}
+
+impl<T: ?Sized + CompleteIo + Unpin> CompleteIo for &mut T {
+    deref_complete_io!();
+}
+
+impl<P> CompleteIo for Pin<P>
+where
+    P: Deref + Unpin,
+    P::Target: CompleteIo,
+{
+    type CompleteToken = <<P as std::ops::Deref>::Target as CompleteIo>::CompleteToken;
+
+    fn read_vec(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<Self::CompleteToken> {
+        self.get_ref().as_ref().read_vec(file_offset, mem_offsets)
+    }
+
+    fn poll_complete(
+        self: Pin<&Self>,
+        cx: &mut Context,
+        token: &mut Self::CompleteToken,
+    ) -> Poll<Result<u32>> {
+        self.get_ref().as_ref().poll_complete(cx, token)
+    }
+}
+
+pub trait CompleteIoExt: CompleteIo {
+    fn read_to_vectored<'a>(
+        &'a self,
+        file_offset: u64,
+        mem_offsets: &'a [MemVec],
+    ) -> ReadComplete<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadComplete::new(self, file_offset, mem_offsets)
+    }
+}
+
+impl<T: CompleteIo + ?Sized> CompleteIoExt for T {}
+
+/// Future for the `read_to_vectored` function.
+#[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct ReadComplete<'a, R: CompleteIo + ?Sized> {
+    reader: &'a R,
+    file_offset: u64,
+    mem_offsets: &'a [MemVec],
+    token: Option<R::CompleteToken>,
+}
+
+impl<R: CompleteIo + ?Sized + Unpin> Unpin for ReadComplete<'_, R> {}
+
+impl<'a, R: CompleteIo + ?Sized + Unpin> ReadComplete<'a, R> {
+    pub(super) fn new(reader: &'a R, file_offset: u64, mem_offsets: &'a [MemVec]) -> Self {
+        ReadComplete {
+            reader,
+            file_offset,
+            mem_offsets,
+            token: None,
+        }
+    }
+}
+
+impl<R: CompleteIo + ?Sized + Unpin> Future for ReadComplete<'_, R> {
+    type Output = Result<u32>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut token = match std::mem::replace(&mut self.token, None) {
+            None => match Pin::new(&self.reader).read_vec(self.file_offset, self.mem_offsets) {
+                Ok(t) => Some(t),
+                Err(e) => return Poll::Ready(Err(e)),
+            },
+            Some(t) => Some(t),
+        };
+
+        let ret = Pin::new(&self.reader).poll_complete(cx, token.as_mut().unwrap());
+        self.token = token;
+        ret
     }
 }
 

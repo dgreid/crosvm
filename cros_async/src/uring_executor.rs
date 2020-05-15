@@ -21,6 +21,8 @@ use std::rc::Rc;
 use std::task::Waker;
 use std::task::{Context, Poll};
 
+use futures::pin_mut;
+
 use data_model::VolatileMemory;
 use io_uring::URingContext;
 
@@ -155,6 +157,19 @@ pub struct RegisteredIo {
     tag: RegisteredIoToken,
 }
 impl RegisteredIo {
+    pub fn start_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<PendingOperation> {
+        let op = IoOperation::ReadVectored {
+            file_offset,
+            addrs: iovecs,
+        };
+        op.submit(&self.tag)
+    }
+
+    pub fn poll_complete(&self, cx: &mut Context, op: &mut PendingOperation) -> Poll<Result<u32>> {
+        pin_mut!(op);
+        op.poll(cx)
+    }
+
     pub async fn do_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
         let op = IoOperation::ReadVectored {
             file_offset,
