@@ -82,23 +82,13 @@ pub(crate) fn supported() -> bool {
     URingContext::new(8).is_ok()
 }
 
-// Tracks active wakers and the futures they are associated with.
-thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
-
 /// Register a file and memory pair for buffered asynchronous operation.
 pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc<RegisteredIo>> {
-    STATE.with(|state| {
-        if state.borrow().is_none() {
-            state.replace(Some(RingWakerState::new()?));
-        }
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.register_io(fd, mem)
-        } else {
-            unreachable!("Can't get here");
-        }
-    })
+    RingWakerState::with(move |state| state.register_io(fd, mem))?
 }
+
+// Tracks active wakers and the futures they are associated with.
+thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
 
 struct IoPair {
     mem: Rc<dyn VolatileMemory>,
@@ -136,12 +126,7 @@ impl RegisteredIo {
 
 impl Drop for RegisteredIo {
     fn drop(&mut self) {
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            if let Some(state) = state.as_mut() {
-                let _ = state.deregister_io(&self.tag);
-            }
-        })
+        let _ = RingWakerState::with(|state| state.deregister_io(&self.tag));
     }
 }
 
@@ -314,8 +299,11 @@ impl RingWakerState {
         }
     }
 
-    fn with<R, F: FnMut(&mut RingWakerState) -> R>(mut f: F) -> Result<R> {
+    fn with<R, F: FnOnce(&mut RingWakerState) -> R>(f: F) -> Result<R> {
         STATE.with(|state| {
+            if state.borrow().is_none() {
+                state.replace(Some(RingWakerState::new()?));
+            }
             let mut state = state.borrow_mut();
             if let Some(state) = state.as_mut() {
                 Ok(f(state))
@@ -348,15 +336,7 @@ impl<T: FutureList> Executor for URingExecutor<T> {
 
             // If no futures are ready, sleep until a waker is signaled.
             if !self.futures.any_ready() {
-                STATE.with(|state| {
-                    let mut state = state.borrow_mut();
-                    if let Some(state) = state.as_mut() {
-                        state.wait_wake_event()?;
-                    } else {
-                        unreachable!("Can't get here without a context being created");
-                    }
-                    Ok(())
-                })?;
+                RingWakerState::with(|state| state.wait_wake_event())??;
             }
         }
     }
@@ -365,25 +345,14 @@ impl<T: FutureList> Executor for URingExecutor<T> {
 impl<T: FutureList> URingExecutor<T> {
     /// Create a new executor.
     pub fn new(futures: T) -> Result<URingExecutor<T>> {
-        STATE.with(|state| {
-            if state.borrow().is_none() {
-                state.replace(Some(RingWakerState::new()?));
-            }
-            Ok(())
-        })?;
+        RingWakerState::with(|_| ())?;
         Ok(URingExecutor { futures })
     }
 
     // Add any new futures and wakers to the lists.
     fn append_futures(&mut self) {
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            if let Some(state) = state.as_mut() {
-                self.futures.futures_mut().append(&mut state.new_futures);
-            } else {
-                unreachable!("Can't get here without a context being created");
-            }
-        });
+        let _ =
+            RingWakerState::with(|state| self.futures.futures_mut().append(&mut state.new_futures));
     }
 }
 
