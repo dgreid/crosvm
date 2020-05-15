@@ -97,28 +97,6 @@ fn cancel_waker(token: &WakerToken) -> Result<()> {
     })
 }
 
-fn submit_readv(tag: &RegisteredIoToken, offset: u64, iovecs: &[MemVec]) -> Result<WakerToken> {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.submit_readv(tag, offset, iovecs)
-        } else {
-            Err(Error::InvalidContext)
-        }
-    })
-}
-
-fn submit_writev(tag: &RegisteredIoToken, offset: u64, addrs: &[MemVec]) -> Result<WakerToken> {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(state) = state.as_mut() {
-            state.submit_writev(tag, offset, addrs)
-        } else {
-            Err(Error::InvalidContext)
-        }
-    })
-}
-
 fn get_result(token: &WakerToken, waker: Waker) -> Option<std::io::Result<u32>> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -177,22 +155,6 @@ impl RegisteredIo {
         pin_mut!(op);
         op.poll(cx)
     }
-
-    pub async fn do_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
-        let op = IoOperation::ReadVectored {
-            file_offset,
-            addrs: iovecs,
-        };
-        op.submit(&self.tag)?.await
-    }
-
-    pub async fn do_writev(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
-        let op = IoOperation::WriteVectored {
-            file_offset,
-            addrs: iovecs,
-        };
-        op.submit(&self.tag)?.await
-    }
 }
 
 impl Drop for RegisteredIo {
@@ -215,7 +177,7 @@ struct RingWakerState {
     completed_ops: BTreeMap<WakerToken, std::io::Result<u32>>,
     new_futures: VecDeque<ExecutableFuture<()>>,
     registered_io: BTreeMap<RegisteredIoToken, Rc<RegisteredIo>>,
-    next_io_token: u64,
+    next_io_token: u64, // Next token for registering IO pairs.
 }
 
 impl RingWakerState {
@@ -476,12 +438,22 @@ enum IoOperation<'a> {
 impl<'a> IoOperation<'a> {
     fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation> {
         let waker_token = match self {
-            IoOperation::ReadVectored { file_offset, addrs } => {
-                crate::uring_executor::submit_readv(tag, file_offset, addrs)?
-            }
-            IoOperation::WriteVectored { file_offset, addrs } => {
-                crate::uring_executor::submit_writev(tag, file_offset, addrs)?
-            }
+            IoOperation::ReadVectored { file_offset, addrs } => STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if let Some(state) = state.as_mut() {
+                    state.submit_readv(tag, file_offset, addrs)
+                } else {
+                    Err(Error::InvalidContext)
+                }
+            })?,
+            IoOperation::WriteVectored { file_offset, addrs } => STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if let Some(state) = state.as_mut() {
+                    state.submit_writev(tag, file_offset, addrs)
+                } else {
+                    Err(Error::InvalidContext)
+                }
+            })?,
         };
         Ok(PendingOperation {
             waker_token: Some(waker_token),
