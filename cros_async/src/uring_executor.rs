@@ -165,6 +165,14 @@ impl RegisteredIo {
         op.submit(&self.tag)
     }
 
+    pub fn start_writev(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<PendingOperation> {
+        let op = IoOperation::WriteVectored {
+            file_offset,
+            addrs: iovecs,
+        };
+        op.submit(&self.tag)
+    }
+
     pub fn poll_complete(&self, cx: &mut Context, op: &mut PendingOperation) -> Poll<Result<u32>> {
         pin_mut!(op);
         op.poll(cx)

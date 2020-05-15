@@ -31,13 +31,6 @@ impl<T: AsRawFd> AsyncIo<T> {
     pub fn into_parts(self) -> (T, Rc<dyn VolatileMemory>) {
         (self.io, self.mem)
     }
-
-    /// `file_offset` is the offset in the reading source `self`, most commonly a backing file.
-    /// Note that the `iovec`s are relative to the start of the memory region the AsyncIO was
-    /// created with.
-    pub async fn write_from_vectored(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<u32> {
-        self.registered_io.do_writev(file_offset, iovecs).await
-    }
 }
 
 impl<T: AsRawFd> CompleteIo for AsyncIo<T> {
@@ -49,6 +42,14 @@ impl<T: AsRawFd> CompleteIo for AsyncIo<T> {
         mem_offsets: &[MemVec],
     ) -> Result<Self::CompleteToken> {
         self.registered_io.start_readv(file_offset, mem_offsets)
+    }
+
+    fn write_vec(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<Self::CompleteToken> {
+        self.registered_io.start_writev(file_offset, mem_offsets)
     }
 
     fn poll_complete(
@@ -64,6 +65,12 @@ pub trait CompleteIo {
     type CompleteToken;
 
     fn read_vec(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<Self::CompleteToken>;
+
+    fn write_vec(
         self: Pin<&Self>,
         file_offset: u64,
         mem_offsets: &[MemVec],
@@ -86,6 +93,14 @@ macro_rules! deref_complete_io {
             mem_offsets: &[MemVec],
         ) -> Result<Self::CompleteToken> {
             Pin::new(&**self).read_vec(file_offset, mem_offsets)
+        }
+
+        fn write_vec(
+            self: Pin<&Self>,
+            file_offset: u64,
+            mem_offsets: &[MemVec],
+        ) -> Result<Self::CompleteToken> {
+            Pin::new(&**self).write_vec(file_offset, mem_offsets)
         }
 
         fn poll_complete(
@@ -125,6 +140,14 @@ where
         self.get_ref().as_ref().read_vec(file_offset, mem_offsets)
     }
 
+    fn write_vec(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem_offsets: &[MemVec],
+    ) -> Result<Self::CompleteToken> {
+        self.get_ref().as_ref().write_vec(file_offset, mem_offsets)
+    }
+
     fn poll_complete(
         self: Pin<&Self>,
         cx: &mut Context,
@@ -144,6 +167,17 @@ pub trait CompleteIoExt: CompleteIo {
         Self: Unpin,
     {
         ReadComplete::new(self, file_offset, mem_offsets)
+    }
+
+    fn write_from_vectored<'a>(
+        &'a self,
+        file_offset: u64,
+        mem_offsets: &'a [MemVec],
+    ) -> WriteComplete<'a, Self>
+    where
+        Self: Unpin,
+    {
+        WriteComplete::new(self, file_offset, mem_offsets)
     }
 }
 
@@ -178,6 +212,47 @@ impl<R: CompleteIo + ?Sized + Unpin> Future for ReadComplete<'_, R> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut token = match std::mem::replace(&mut self.token, None) {
             None => match Pin::new(&self.reader).read_vec(self.file_offset, self.mem_offsets) {
+                Ok(t) => Some(t),
+                Err(e) => return Poll::Ready(Err(e)),
+            },
+            Some(t) => Some(t),
+        };
+
+        let ret = Pin::new(&self.reader).poll_complete(cx, token.as_mut().unwrap());
+        self.token = token;
+        ret
+    }
+}
+
+/// Future for the `read_to_vectored` function.
+#[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct WriteComplete<'a, R: CompleteIo + ?Sized> {
+    reader: &'a R,
+    file_offset: u64,
+    mem_offsets: &'a [MemVec],
+    token: Option<R::CompleteToken>,
+}
+
+impl<R: CompleteIo + ?Sized + Unpin> Unpin for WriteComplete<'_, R> {}
+
+impl<'a, R: CompleteIo + ?Sized + Unpin> WriteComplete<'a, R> {
+    pub(super) fn new(reader: &'a R, file_offset: u64, mem_offsets: &'a [MemVec]) -> Self {
+        WriteComplete {
+            reader,
+            file_offset,
+            mem_offsets,
+            token: None,
+        }
+    }
+}
+
+impl<R: CompleteIo + ?Sized + Unpin> Future for WriteComplete<'_, R> {
+    type Output = Result<u32>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut token = match std::mem::replace(&mut self.token, None) {
+            None => match Pin::new(&self.reader).write_vec(self.file_offset, self.mem_offsets) {
                 Ok(t) => Some(t),
                 Err(e) => return Poll::Ready(Err(e)),
             },
