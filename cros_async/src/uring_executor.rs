@@ -87,8 +87,11 @@ pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc
     RingWakerState::with(move |state| state.register_io(fd, mem))?
 }
 
-// Tracks active wakers and the futures they are associated with.
+// Tracks active wakers and manages waking pending operations after completion.
 thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
+// Tracks new futures that have been added while running the executor.
+thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture<()>>>
+              = RefCell::new(VecDeque::new()));
 
 struct IoPair {
     mem: Rc<dyn VolatileMemory>,
@@ -137,7 +140,6 @@ struct RingWakerState {
     waiting_ops: BTreeMap<WakerToken, Waker>,
     next_op_token: u64, // Next token for adding to the context.
     completed_ops: BTreeMap<WakerToken, std::io::Result<u32>>,
-    new_futures: VecDeque<ExecutableFuture<()>>,
     registered_io: BTreeMap<RegisteredIoToken, Rc<RegisteredIo>>,
     next_io_token: u64, // Next token for registering IO pairs.
 }
@@ -150,7 +152,6 @@ impl RingWakerState {
             waiting_ops: BTreeMap::new(),
             next_op_token: 0,
             completed_ops: BTreeMap::new(),
-            new_futures: VecDeque::new(),
             registered_io: BTreeMap::new(),
             next_io_token: 0,
         })
@@ -351,8 +352,18 @@ impl<T: FutureList> URingExecutor<T> {
 
     // Add any new futures and wakers to the lists.
     fn append_futures(&mut self) {
-        let _ =
-            RingWakerState::with(|state| self.futures.futures_mut().append(&mut state.new_futures));
+        let _ = NEW_FUTURES.with(|new_futures| {
+            let mut new_futures = new_futures.borrow_mut();
+            self.futures.futures_mut().append(&mut new_futures);
+        });
+    }
+
+    /// Adds top level futures to execute to this executor.
+    pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) {
+        NEW_FUTURES.with(|new_futures| {
+            let mut new_futures = new_futures.borrow_mut();
+            new_futures.push_back(ExecutableFuture::new(future));
+        });
     }
 }
 
