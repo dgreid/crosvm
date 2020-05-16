@@ -372,6 +372,11 @@ impl<T: FutureList> Drop for URingExecutor<T> {
         STATE.with(|state| {
             state.replace(None);
         });
+        // Drop any pending futures that were added.
+        NEW_FUTURES.with(|new_futures| {
+            let mut new_futures = new_futures.borrow_mut();
+            new_futures.clear();
+        });
     }
 }
 
