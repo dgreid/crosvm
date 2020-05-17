@@ -24,6 +24,9 @@ pub trait Executor {
     /// Run the executor, this will return once the exit criteria is met. The exit criteria is
     /// specified when the executor is created, for example running until all futures are complete.
     fn run(&mut self) -> Self::Output;
+
+    /// Adds top level futures to execute to this executor.
+    fn add_future(&self, future: Pin<Box<dyn Future<Output = ()>>>);
 }
 
 // Tracks if a future needs to be polled and the waker to use.

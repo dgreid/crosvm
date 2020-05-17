@@ -341,6 +341,13 @@ impl<T: FutureList> Executor for URingExecutor<T> {
             }
         }
     }
+
+    fn add_future(&self, future: Pin<Box<dyn Future<Output = ()>>>) {
+        NEW_FUTURES.with(|new_futures| {
+            let mut new_futures = new_futures.borrow_mut();
+            new_futures.push_back(ExecutableFuture::new(future));
+        });
+    }
 }
 
 impl<T: FutureList> URingExecutor<T> {
@@ -355,14 +362,6 @@ impl<T: FutureList> URingExecutor<T> {
         let _ = NEW_FUTURES.with(|new_futures| {
             let mut new_futures = new_futures.borrow_mut();
             self.futures.futures_mut().append(&mut new_futures);
-        });
-    }
-
-    /// Adds top level futures to execute to this executor.
-    pub fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) {
-        NEW_FUTURES.with(|new_futures| {
-            let mut new_futures = new_futures.borrow_mut();
-            new_futures.push_back(ExecutableFuture::new(future));
         });
     }
 }
@@ -459,5 +458,71 @@ impl Drop for PendingOperation {
         if let Some(waker_token) = self.waker_token.take() {
             let _ = RingWakerState::with(|state| state.cancel_waker(&waker_token));
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::fs::File;
+    use std::future::Future;
+    use std::rc::Rc;
+    use std::task::{Context, Poll};
+
+    use futures::future::Either;
+
+    use super::*;
+
+    struct TestFut {
+        registered_io: Rc<RegisteredIo>,
+        pending_operation: Option<PendingOperation>,
+    }
+
+    impl TestFut {
+        fn new(io_source: File, mem: Rc<dyn VolatileMemory>) -> TestFut {
+            TestFut {
+                registered_io: crate::uring_executor::register_io(&io_source, mem.clone()).unwrap(),
+                pending_operation: None,
+            }
+        }
+    }
+
+    impl Future for TestFut {
+        type Output = Result<u32>;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let mut token = match std::mem::replace(&mut self.pending_operation, None) {
+                None => Some(
+                    self.registered_io
+                        .start_readv(0, &[MemVec { offset: 0, len: 1 }])
+                        .unwrap(),
+                ),
+                Some(t) => Some(t),
+            };
+
+            let ret = self
+                .registered_io
+                .poll_complete(cx, token.as_mut().unwrap());
+            self.pending_operation = token;
+            ret
+        }
+    }
+
+    #[test]
+    fn pend_on_pipe() {
+        use sys_util::{GuestAddress, GuestMemory};
+
+        async fn do_test() {
+            let read_target = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
+            let (read_source, _w) = sys_util::pipe(true).unwrap();
+            let done = Box::pin(async { 5usize });
+            let pending = Box::pin(TestFut::new(read_source, read_target.clone()));
+            match futures::future::select(pending, done).await {
+                Either::Right((5, pending)) => std::mem::drop(pending),
+                _ => panic!("unexpected select result"),
+            }
+        }
+
+        let fut = do_test();
+
+        crate::run_one(Box::pin(fut)).unwrap();
     }
 }

@@ -229,6 +229,10 @@ impl<T: FutureList> Executor for FdExecutor<T> {
             }
         }
     }
+
+    fn add_future(&self, future: Pin<Box<dyn Future<Output = ()>>>) {
+        add_future(future).unwrap();
+    }
 }
 
 impl<T: FutureList> FdExecutor<T> {
