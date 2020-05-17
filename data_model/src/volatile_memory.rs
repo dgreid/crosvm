@@ -113,6 +113,18 @@ impl<'a> VolatileMemory for &'a mut [u8] {
     }
 }
 
+impl<'a, T: DataInit> VolatileMemory for &'a mut T {
+    fn get_slice(&self, offset: u64, count: u64) -> Result<VolatileSlice> {
+        let bytes = self.as_slice();
+        let mem_end = calc_offset(offset, count)?;
+        if mem_end > bytes.len() as u64 {
+            return Err(Error::OutOfBounds { addr: mem_end });
+        }
+        // Safe because of the above bounds check verifying that offset and count are within self.
+        Ok(unsafe { VolatileSlice::new((bytes.as_ptr() as u64 + offset) as *mut _, count) })
+    }
+}
+
 /// A slice of raw memory that supports volatile access.
 #[derive(Copy, Clone, Debug)]
 pub struct VolatileSlice<'a> {
@@ -560,5 +572,16 @@ mod tests {
         let a = VecMem::new(3);
         let res = a.get_ref::<u32>(0).unwrap_err();
         assert_eq!(res, Error::OutOfBounds { addr: 4 });
+    }
+
+    #[test]
+    fn data_init_mod() {
+        let mut a = 0x55aa55aau32;
+        let b = &mut a;
+        let vs = b.get_slice(0, 4).unwrap();
+        assert_eq!(0x55aa55aa, vs.get_ref::<u32>(0).unwrap().load());
+        vs.write_bytes(0);
+        assert_eq!(0, vs.get_ref::<u32>(0).unwrap().load());
+        assert_eq!(0, a);
     }
 }
