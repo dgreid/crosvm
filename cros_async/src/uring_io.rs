@@ -162,22 +162,22 @@ pub trait CompleteIoExt: CompleteIo {
         &'a self,
         file_offset: u64,
         mem_offsets: &'a [MemVec],
-    ) -> ReadComplete<'a, Self>
+    ) -> ReadRanges<'a, Self>
     where
         Self: Unpin,
     {
-        ReadComplete::new(self, file_offset, mem_offsets)
+        ReadRanges::new(self, file_offset, mem_offsets)
     }
 
     fn write_from_vectored<'a>(
         &'a self,
         file_offset: u64,
         mem_offsets: &'a [MemVec],
-    ) -> WriteComplete<'a, Self>
+    ) -> WriteRanges<'a, Self>
     where
         Self: Unpin,
     {
-        WriteComplete::new(self, file_offset, mem_offsets)
+        WriteRanges::new(self, file_offset, mem_offsets)
     }
 }
 
@@ -186,18 +186,18 @@ impl<T: CompleteIo + ?Sized> CompleteIoExt for T {}
 /// Future for the `read_to_vectored` function.
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct ReadComplete<'a, R: CompleteIo + ?Sized> {
+pub struct ReadRanges<'a, R: CompleteIo + ?Sized> {
     reader: &'a R,
     file_offset: u64,
     mem_offsets: &'a [MemVec],
     token: Option<R::CompleteToken>,
 }
 
-impl<R: CompleteIo + ?Sized + Unpin> Unpin for ReadComplete<'_, R> {}
+impl<R: CompleteIo + ?Sized + Unpin> Unpin for ReadRanges<'_, R> {}
 
-impl<'a, R: CompleteIo + ?Sized + Unpin> ReadComplete<'a, R> {
+impl<'a, R: CompleteIo + ?Sized + Unpin> ReadRanges<'a, R> {
     pub(super) fn new(reader: &'a R, file_offset: u64, mem_offsets: &'a [MemVec]) -> Self {
-        ReadComplete {
+        ReadRanges {
             reader,
             file_offset,
             mem_offsets,
@@ -206,7 +206,7 @@ impl<'a, R: CompleteIo + ?Sized + Unpin> ReadComplete<'a, R> {
     }
 }
 
-impl<R: CompleteIo + ?Sized + Unpin> Future for ReadComplete<'_, R> {
+impl<R: CompleteIo + ?Sized + Unpin> Future for ReadRanges<'_, R> {
     type Output = Result<u32>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -227,18 +227,18 @@ impl<R: CompleteIo + ?Sized + Unpin> Future for ReadComplete<'_, R> {
 /// Future for the `read_to_vectored` function.
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct WriteComplete<'a, R: CompleteIo + ?Sized> {
+pub struct WriteRanges<'a, R: CompleteIo + ?Sized> {
     reader: &'a R,
     file_offset: u64,
     mem_offsets: &'a [MemVec],
     token: Option<R::CompleteToken>,
 }
 
-impl<R: CompleteIo + ?Sized + Unpin> Unpin for WriteComplete<'_, R> {}
+impl<R: CompleteIo + ?Sized + Unpin> Unpin for WriteRanges<'_, R> {}
 
-impl<'a, R: CompleteIo + ?Sized + Unpin> WriteComplete<'a, R> {
+impl<'a, R: CompleteIo + ?Sized + Unpin> WriteRanges<'a, R> {
     pub(super) fn new(reader: &'a R, file_offset: u64, mem_offsets: &'a [MemVec]) -> Self {
-        WriteComplete {
+        WriteRanges {
             reader,
             file_offset,
             mem_offsets,
@@ -247,7 +247,7 @@ impl<'a, R: CompleteIo + ?Sized + Unpin> WriteComplete<'a, R> {
     }
 }
 
-impl<R: CompleteIo + ?Sized + Unpin> Future for WriteComplete<'_, R> {
+impl<R: CompleteIo + ?Sized + Unpin> Future for WriteRanges<'_, R> {
     type Output = Result<u32>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
