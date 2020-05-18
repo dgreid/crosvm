@@ -293,7 +293,7 @@ impl RingWakerState {
         if let Some(result) = self.completed_ops.remove(token) {
             Some(result)
         } else {
-            if self.pending_ops.contains_key(token) {
+            if self.pending_ops.contains_key(token) && !self.waiting_ops.contains_key(token) {
                 self.waiting_ops.insert(token.clone(), waker);
             }
             None
