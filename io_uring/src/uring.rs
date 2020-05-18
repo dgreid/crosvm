@@ -709,10 +709,12 @@ mod tests {
         offset: u64,
         user_data: UserData,
     ) {
-        let iovecs = [IoSlice::new(buf)];
+        let iovecs = vec![IoSlice::new(buf)];
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
-            uring.add_readv(&iovecs, fd, offset, user_data).unwrap();
+            uring
+                .add_readv(iovecs.into_iter(), fd, offset, user_data)
+                .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
         assert_eq!(user_data_ret, user_data);
@@ -811,7 +813,9 @@ mod tests {
         let f = create_test_file(&temp_dir, total_len as u64 * 2);
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
-            uring.add_readv(&io_slices, f.as_raw_fd(), 0, 55).unwrap();
+            uring
+                .add_readv(io_slices.into_iter(), f.as_raw_fd(), 0, 55)
+                .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
         assert_eq!(user_data_ret, 55);
@@ -903,7 +907,7 @@ mod tests {
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
             uring
-                .add_writev(&io_slices, f.as_raw_fd(), OFFSET, 55)
+                .add_writev(io_slices.into_iter(), f.as_raw_fd(), OFFSET, 55)
                 .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
