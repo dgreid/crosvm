@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::borrow::Borrow;
 use std::future::Future;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
@@ -28,8 +29,18 @@ impl<T: AsRawFd> AsyncIo<T> {
         })
     }
 
-    pub fn into_parts(self) -> (T, Rc<dyn VolatileMemory>) {
-        (self.io, self.mem)
+    pub fn source(&self) -> &T {
+        &self.io
+    }
+
+    pub fn mem(&self) -> &dyn VolatileMemory {
+        self.mem.borrow()
+    }
+}
+
+impl<T: AsRawFd> Drop for AsyncIo<T> {
+    fn drop(&mut self) {
+        let _ = self.registered_io.deregister();
     }
 }
 
@@ -270,11 +281,11 @@ mod tests {
     use super::*;
     use std::fs::File;
 
+    use data_model::GetVolatileRef;
     use futures::pin_mut;
 
     #[test]
     fn writev() {
-        use data_model::GetVolatileRef;
         use sys_util::{GuestAddress, GuestMemory};
 
         // Read one subsection from /dev/zero to the buffer.
@@ -297,7 +308,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (target, _) = async_writer.into_parts();
+            let target = async_writer.source();
             for i in 0..4096 {
                 assert_eq!(0x55u8, target.get_ref(i).unwrap().load());
             }
@@ -377,5 +388,88 @@ mod tests {
         for i in (4096 + 1024)..8192 {
             assert_eq!(0x55u8, buf.get_ref(i).unwrap().load());
         }
+    }
+
+    use data_model::{DataInit, VolatileSlice};
+    struct VolatileDataInit<T: DataInit + Clone> {
+        data: T,
+    }
+
+    impl<T: DataInit + Clone> VolatileDataInit<T> {
+        fn new(init_val: T) -> Self {
+            VolatileDataInit { data: init_val }
+        }
+
+        fn get(&mut self) -> T {
+            self.data.clone()
+        }
+    }
+
+    impl<T: DataInit> VolatileMemory for VolatileDataInit<T> {
+        fn get_slice(
+            &self,
+            offset: u64,
+            count: u64,
+        ) -> data_model::VolatileMemoryResult<VolatileSlice> {
+            let mem_end = match offset.checked_add(count) {
+                None => {
+                    return Err(data_model::VolatileMemoryError::Overflow {
+                        base: offset,
+                        offset: count,
+                    })
+                }
+                Some(m) => m,
+            };
+            if mem_end > std::mem::size_of::<T>() as u64 {
+                return Err(data_model::VolatileMemoryError::OutOfBounds { addr: mem_end });
+            }
+            let slice = self.data.as_slice();
+            Ok(unsafe { VolatileSlice::new((slice.as_ptr() as u64 + offset) as *mut _, count) })
+        }
+    }
+
+    async fn read_u64<T: AsRawFd + Unpin>(e: T) -> u64 {
+        let mut data = Rc::new(VolatileDataInit::new(0u64));
+        {
+            let a = AsyncIo::new(e, data.clone()).unwrap();
+            a.read_to_vectored(
+                0,
+                &[MemVec {
+                    offset: 0,
+                    len: std::mem::size_of::<u64>(),
+                }],
+            )
+            .await
+            .unwrap();
+        }
+        Rc::get_mut(&mut data).unwrap().get()
+    }
+
+    #[test]
+    fn eventfd() {
+        use sys_util::EventFd;
+
+        async fn write_event(ev: EventFd) {
+            ev.write(55).unwrap();
+        }
+        let eventfd = EventFd::new().unwrap();
+        let write_task = write_event(eventfd.try_clone().unwrap());
+        let read_task = read_u64(eventfd);
+        let joined = futures::future::join(read_task, write_task);
+        pin_mut!(joined);
+        let (read_res, _) = crate::run_one(joined).unwrap();
+        assert_eq!(read_res, 55u64);
+    }
+
+    #[test]
+    fn read_t() {
+        use sys_util::{GuestAddress, GuestMemory};
+
+        let source = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
+        source.get_slice(0, 8192).unwrap().write_bytes(0x55);
+        let fut = read_u64(source);
+        pin_mut!(fut);
+        let res = crate::run_one(fut).unwrap();
+        assert_eq!(res, 0x5555555555555555);
     }
 }

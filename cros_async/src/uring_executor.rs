@@ -125,11 +125,15 @@ impl RegisteredIo {
         pin_mut!(op);
         op.poll(cx)
     }
+
+    pub fn deregister(&self) {
+        let _ = RingWakerState::with(|state| state.deregister_io(&self.tag));
+    }
 }
 
 impl Drop for RegisteredIo {
     fn drop(&mut self) {
-        let _ = RingWakerState::with(|state| state.deregister_io(&self.tag));
+        println!("drop reg io");
     }
 }
 
@@ -463,7 +467,6 @@ impl Drop for PendingOperation {
 
 #[cfg(test)]
 mod test {
-    use std::fs::File;
     use std::future::Future;
     use std::rc::Rc;
     use std::task::{Context, Poll};
@@ -478,7 +481,7 @@ mod test {
     }
 
     impl TestFut {
-        fn new(io_source: File, mem: Rc<dyn VolatileMemory>) -> TestFut {
+        fn new<T: AsRawFd>(io_source: T, mem: Rc<dyn VolatileMemory>) -> TestFut {
             TestFut {
                 registered_io: crate::uring_executor::register_io(&io_source, mem.clone()).unwrap(),
                 pending_operation: None,
@@ -492,7 +495,7 @@ mod test {
             let mut token = match std::mem::replace(&mut self.pending_operation, None) {
                 None => Some(
                     self.registered_io
-                        .start_readv(0, &[MemVec { offset: 0, len: 1 }])
+                        .start_readv(0, &[MemVec { offset: 0, len: 8 }])
                         .unwrap(),
                 ),
                 Some(t) => Some(t),
@@ -513,6 +516,26 @@ mod test {
         async fn do_test() {
             let read_target = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
             let (read_source, _w) = sys_util::pipe(true).unwrap();
+            let done = Box::pin(async { 5usize });
+            let pending = Box::pin(TestFut::new(read_source, read_target.clone()));
+            match futures::future::select(pending, done).await {
+                Either::Right((5, pending)) => std::mem::drop(pending),
+                _ => panic!("unexpected select result"),
+            }
+        }
+
+        let fut = do_test();
+
+        crate::run_one(Box::pin(fut)).unwrap();
+    }
+
+    #[test]
+    fn pend_on_enventfd() {
+        use sys_util::{EventFd, GuestAddress, GuestMemory};
+
+        async fn do_test() {
+            let read_target = Rc::new(GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap());
+            let read_source = EventFd::new().unwrap();
             let done = Box::pin(async { 5usize });
             let pending = Box::pin(TestFut::new(read_source, read_target.clone()));
             match futures::future::select(pending, done).await {
