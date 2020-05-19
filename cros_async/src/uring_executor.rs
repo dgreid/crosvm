@@ -161,9 +161,9 @@ impl RingWakerState {
         })
     }
 
-    fn register_io<F: AsRawFd>(
+    fn register_io(
         &mut self,
-        fd: &F,
+        fd: &dyn AsRawFd,
         mem: Rc<dyn VolatileMemory>,
     ) -> Result<Rc<RegisteredIo>> {
         let duped_fd = unsafe {
