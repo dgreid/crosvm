@@ -83,7 +83,7 @@ pub(crate) fn supported() -> bool {
 }
 
 /// Register a file and memory pair for buffered asynchronous operation.
-pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<RegisteredIo> {
+pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<RegisteredIoMem> {
     RingWakerState::with(move |state| state.register_io(fd, mem))?
 }
 
@@ -99,8 +99,8 @@ struct IoPair {
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
-pub struct RegisteredIo(u64);
-impl RegisteredIo {
+pub struct RegisteredIoMem(u64);
+impl RegisteredIoMem {
     pub fn start_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<PendingOperation> {
         let op = IoOperation::ReadVectored {
             file_offset,
@@ -134,7 +134,7 @@ struct RingWakerState {
     waiting_ops: BTreeMap<WakerToken, Waker>,
     next_op_token: u64, // Next token for adding to the context.
     completed_ops: BTreeMap<WakerToken, std::io::Result<u32>>,
-    registered_io_pairs: BTreeMap<RegisteredIo, Rc<IoPair>>,
+    registered_io_pairs: BTreeMap<RegisteredIoMem, Rc<IoPair>>,
     next_io_token: u64, // Next token for registering IO pairs.
 }
 
@@ -155,29 +155,29 @@ impl RingWakerState {
         &mut self,
         fd: &dyn AsRawFd,
         mem: Rc<dyn VolatileMemory>,
-    ) -> Result<RegisteredIo> {
+    ) -> Result<RegisteredIoMem> {
         let duped_fd = unsafe {
             // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
             // will only be added to the poll loop.
             File::from_raw_fd(dup_fd(fd.as_raw_fd())?)
         };
         let io_pair = Rc::new(IoPair { mem, fd: duped_fd });
-        let tag = RegisteredIo(self.next_io_token);
+        let tag = RegisteredIoMem(self.next_io_token);
         self.registered_io_pairs
             .insert(tag.clone(), io_pair.clone());
         self.next_io_token += 1;
         Ok(tag)
     }
 
-    fn deregister_io(&mut self, tag: &RegisteredIo) {
-        // RegisteredIo is refcounted. There isn't any need to pull pending ops out, let them
+    fn deregister_io(&mut self, tag: &RegisteredIoMem) {
+        // RegisteredIoMem is refcounted. There isn't any need to pull pending ops out, let them
         // complete. deregister is not a common path.
         let _ = self.registered_io_pairs.remove(tag);
     }
 
     fn submit_writev(
         &mut self,
-        io_tag: &RegisteredIo,
+        io_tag: &RegisteredIoMem,
         offset: u64,
         addrs: &[MemVec],
     ) -> Result<WakerToken> {
@@ -210,7 +210,7 @@ impl RingWakerState {
 
     fn submit_readv(
         &mut self,
-        io_tag: &RegisteredIo,
+        io_tag: &RegisteredIoMem,
         offset: u64,
         addrs: &[MemVec],
     ) -> Result<WakerToken> {
@@ -388,7 +388,7 @@ enum IoOperation<'a> {
 }
 
 impl<'a> IoOperation<'a> {
-    fn submit(self, tag: &RegisteredIo) -> Result<PendingOperation> {
+    fn submit(self, tag: &RegisteredIoMem) -> Result<PendingOperation> {
         let waker_token = match self {
             IoOperation::ReadVectored { file_offset, addrs } => STATE.with(|state| {
                 let mut state = state.borrow_mut();
@@ -452,7 +452,7 @@ mod test {
     use super::*;
 
     struct TestFut {
-        registered_io: RegisteredIo,
+        registered_io: RegisteredIoMem,
         pending_operation: Option<PendingOperation>,
     }
 

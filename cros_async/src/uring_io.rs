@@ -12,10 +12,10 @@ use std::task::{Context, Poll};
 
 use data_model::VolatileMemory;
 
-use crate::uring_executor::{self, MemVec, PendingOperation, RegisteredIo, Result};
+use crate::uring_executor::{self, MemVec, PendingOperation, RegisteredIoMem, Result};
 
 pub struct AsyncIo<T: AsRawFd> {
-    registered_io: RegisteredIo,
+    registered_io: RegisteredIoMem,
     io: T,
     mem: Rc<dyn VolatileMemory>,
 }
