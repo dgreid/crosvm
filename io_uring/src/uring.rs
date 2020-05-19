@@ -79,11 +79,11 @@ pub struct URingStats {
 /// let f = File::open(Path::new("/dev/zero")).unwrap();
 /// let mut uring = URingContext::new(16).unwrap();
 /// uring
-///   .add_poll_fd(f.as_raw_fd(), WatchingEvents::empty().set_read(), 454)
+///   .add_poll_fd(f.as_raw_fd(), &WatchingEvents::empty().set_read(), 454)
 /// .unwrap();
 /// let (user_data, res) = uring.wait().unwrap().next().unwrap();
-/// assert_eq!(user_data, 454 as UserData);
-/// assert_eq!(res.unwrap(), 1 as i32);
+/// assert_eq!(user_data, 454 as io_uring::UserData);
+/// assert_eq!(res.unwrap(), 1 as u32);
 ///
 /// ```
 pub struct URingContext {
