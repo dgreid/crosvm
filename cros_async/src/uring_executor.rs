@@ -83,7 +83,7 @@ pub(crate) fn supported() -> bool {
 }
 
 /// Register a file and memory pair for buffered asynchronous operation.
-pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<Rc<RegisteredIo>> {
+pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<RegisteredIo> {
     RingWakerState::with(move |state| state.register_io(fd, mem))?
 }
 
@@ -99,18 +99,14 @@ struct IoPair {
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
-struct RegisteredIoToken(u64);
-pub struct RegisteredIo {
-    io_pair: Rc<IoPair>, // Ref counted so each op can ensure memory and fd live.
-    tag: RegisteredIoToken,
-}
+pub struct RegisteredIo(u64);
 impl RegisteredIo {
     pub fn start_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<PendingOperation> {
         let op = IoOperation::ReadVectored {
             file_offset,
             addrs: iovecs,
         };
-        op.submit(&self.tag)
+        op.submit(&self)
     }
 
     pub fn start_writev(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<PendingOperation> {
@@ -118,7 +114,7 @@ impl RegisteredIo {
             file_offset,
             addrs: iovecs,
         };
-        op.submit(&self.tag)
+        op.submit(&self)
     }
 
     pub fn poll_complete(&self, cx: &mut Context, op: &mut PendingOperation) -> Poll<Result<u32>> {
@@ -127,13 +123,7 @@ impl RegisteredIo {
     }
 
     pub fn deregister(&self) {
-        let _ = RingWakerState::with(|state| state.deregister_io(&self.tag));
-    }
-}
-
-impl Drop for RegisteredIo {
-    fn drop(&mut self) {
-        println!("drop reg io");
+        let _ = RingWakerState::with(|state| state.deregister_io(&self));
     }
 }
 
@@ -144,7 +134,7 @@ struct RingWakerState {
     waiting_ops: BTreeMap<WakerToken, Waker>,
     next_op_token: u64, // Next token for adding to the context.
     completed_ops: BTreeMap<WakerToken, std::io::Result<u32>>,
-    registered_io: BTreeMap<RegisteredIoToken, Rc<RegisteredIo>>,
+    registered_io_pairs: BTreeMap<RegisteredIo, Rc<IoPair>>,
     next_io_token: u64, // Next token for registering IO pairs.
 }
 
@@ -156,7 +146,7 @@ impl RingWakerState {
             waiting_ops: BTreeMap::new(),
             next_op_token: 0,
             completed_ops: BTreeMap::new(),
-            registered_io: BTreeMap::new(),
+            registered_io_pairs: BTreeMap::new(),
             next_io_token: 0,
         })
     }
@@ -165,39 +155,36 @@ impl RingWakerState {
         &mut self,
         fd: &dyn AsRawFd,
         mem: Rc<dyn VolatileMemory>,
-    ) -> Result<Rc<RegisteredIo>> {
+    ) -> Result<RegisteredIo> {
         let duped_fd = unsafe {
             // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
             // will only be added to the poll loop.
             File::from_raw_fd(dup_fd(fd.as_raw_fd())?)
         };
-        let tag = RegisteredIoToken(self.next_io_token);
-        let registered_io = Rc::new(RegisteredIo {
-            io_pair: Rc::new(IoPair { mem, fd: duped_fd }),
-            tag: tag.clone(),
-        });
-        self.registered_io.insert(tag, registered_io.clone());
+        let io_pair = Rc::new(IoPair { mem, fd: duped_fd });
+        let tag = RegisteredIo(self.next_io_token);
+        self.registered_io_pairs
+            .insert(tag.clone(), io_pair.clone());
         self.next_io_token += 1;
-        Ok(registered_io)
+        Ok(tag)
     }
 
-    fn deregister_io(&mut self, tag: &RegisteredIoToken) {
+    fn deregister_io(&mut self, tag: &RegisteredIo) {
         // RegisteredIo is refcounted. There isn't any need to pull pending ops out, let them
         // complete. deregister is not a common path.
-        let _ = self.registered_io.remove(tag);
+        let _ = self.registered_io_pairs.remove(tag);
     }
 
     fn submit_writev(
         &mut self,
-        io_tag: &RegisteredIoToken,
+        io_tag: &RegisteredIo,
         offset: u64,
         addrs: &[MemVec],
     ) -> Result<WakerToken> {
-        if let Some(registered_io) = self.registered_io.get(io_tag) {
+        if let Some(io_pair) = self.registered_io_pairs.get(io_tag) {
             unsafe {
                 let iovecs = addrs.iter().map(|mem_off| {
-                    let vs = registered_io
-                        .io_pair
+                    let vs = io_pair
                         .mem
                         .get_slice(mem_off.offset, mem_off.len as u64)
                         .unwrap();
@@ -208,17 +195,12 @@ impl RingWakerState {
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
-                    .add_writev(
-                        iovecs,
-                        registered_io.io_pair.fd.as_raw_fd(),
-                        offset,
-                        self.next_op_token,
-                    )
+                    .add_writev(iovecs, io_pair.fd.as_raw_fd(), offset, self.next_op_token)
                     .map_err(Error::SubmittingOp)?;
             }
             let next_op_token = WakerToken(self.next_op_token);
             self.pending_ops
-                .insert(next_op_token.clone(), registered_io.io_pair.clone());
+                .insert(next_op_token.clone(), io_pair.clone());
             self.next_op_token += 1;
             Ok(next_op_token)
         } else {
@@ -228,15 +210,14 @@ impl RingWakerState {
 
     fn submit_readv(
         &mut self,
-        io_tag: &RegisteredIoToken,
+        io_tag: &RegisteredIo,
         offset: u64,
         addrs: &[MemVec],
     ) -> Result<WakerToken> {
-        if let Some(registered_io) = self.registered_io.get(io_tag) {
+        if let Some(io_pair) = self.registered_io_pairs.get(io_tag) {
             unsafe {
                 let iovecs = addrs.iter().map(|mem_off| {
-                    let vs = registered_io
-                        .io_pair
+                    let vs = io_pair
                         .mem
                         .get_slice(mem_off.offset, mem_off.len as u64)
                         .unwrap();
@@ -247,17 +228,12 @@ impl RingWakerState {
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
-                    .add_readv(
-                        iovecs,
-                        registered_io.io_pair.fd.as_raw_fd(),
-                        offset,
-                        self.next_op_token,
-                    )
+                    .add_readv(iovecs, io_pair.fd.as_raw_fd(), offset, self.next_op_token)
                     .map_err(Error::SubmittingOp)?;
             }
             let next_op_token = WakerToken(self.next_op_token);
             self.pending_ops
-                .insert(next_op_token.clone(), registered_io.io_pair.clone());
+                .insert(next_op_token.clone(), io_pair.clone());
             self.next_op_token += 1;
             Ok(next_op_token)
         } else {
@@ -412,7 +388,7 @@ enum IoOperation<'a> {
 }
 
 impl<'a> IoOperation<'a> {
-    fn submit(self, tag: &RegisteredIoToken) -> Result<PendingOperation> {
+    fn submit(self, tag: &RegisteredIo) -> Result<PendingOperation> {
         let waker_token = match self {
             IoOperation::ReadVectored { file_offset, addrs } => STATE.with(|state| {
                 let mut state = state.borrow_mut();
@@ -476,7 +452,7 @@ mod test {
     use super::*;
 
     struct TestFut {
-        registered_io: Rc<RegisteredIo>,
+        registered_io: RegisteredIo,
         pending_operation: Option<PendingOperation>,
     }
 

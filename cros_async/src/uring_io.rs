@@ -15,7 +15,7 @@ use data_model::VolatileMemory;
 use crate::uring_executor::{self, MemVec, PendingOperation, RegisteredIo, Result};
 
 pub struct AsyncIo<T: AsRawFd> {
-    registered_io: Rc<RegisteredIo>,
+    registered_io: RegisteredIo,
     io: T,
     mem: Rc<dyn VolatileMemory>,
 }
