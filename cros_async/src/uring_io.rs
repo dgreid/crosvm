@@ -38,12 +38,6 @@ impl<T: AsRawFd> AsyncIo<T> {
     }
 }
 
-impl<T: AsRawFd> Drop for AsyncIo<T> {
-    fn drop(&mut self) {
-        let _ = self.registered_io.deregister();
-    }
-}
-
 impl<T: AsRawFd> CompleteIo for AsyncIo<T> {
     type CompleteToken = PendingOperation;
 
