@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display};
 use std::fs::File;
 use std::future::Future;
-use std::io::{self, IoSlice};
+use std::io::{self, IoSlice, IoSliceMut};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -97,21 +97,38 @@ thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture<()>>>
               = RefCell::new(VecDeque::new()));
 
 pub trait BackingMemory {
-    /// only safe if something guarantees that returning a mutable slice from &self is ok.
-    unsafe fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
+    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>>;
+
+    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
 }
 
 impl<T: VolatileMemory> BackingMemory for T {
-    // Safe because 'vs' is valid in the backing memory and that will be kept
-    // alive longer than this iterator.
-    unsafe fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
+    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
         let vs = self
             .get_slice(mem_off.offset, mem_off.len as u64)
             .map_err(Error::InvalidRange)?;
-        Ok(IoSlice::new(std::slice::from_raw_parts(
-            vs.as_ptr(),
-            vs.size() as usize,
-        )))
+        unsafe {
+            // Safe because 'vs' is valid in the backing memory and that will be kept
+            // alive longer than this iterator.
+            Ok(IoSliceMut::new(std::slice::from_raw_parts_mut(
+                vs.as_ptr(),
+                vs.size() as usize,
+            )))
+        }
+    }
+
+    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
+        let vs = self
+            .get_slice(mem_off.offset, mem_off.len as u64)
+            .map_err(Error::InvalidRange)?;
+        unsafe {
+            // Safe because 'vs' is valid in the backing memory and that will be kept
+            // alive longer than this iterator.
+            Ok(IoSlice::new(std::slice::from_raw_parts_mut(
+                vs.as_ptr(),
+                vs.size() as usize,
+            )))
+        }
     }
 }
 
@@ -234,7 +251,7 @@ impl RingWakerState {
             unsafe {
                 let iovecs = addrs
                     .iter()
-                    .map(|mem_off| io_pair.mem.io_slice(mem_off).unwrap());
+                    .map(|mem_off| io_pair.mem.io_slice_mut(mem_off).unwrap());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx

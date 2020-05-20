@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
-use std::io::IoSlice;
+use std::io::{IoSlice, IoSliceMut};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -314,11 +314,11 @@ impl URingContext {
         user_data: UserData,
     ) -> Result<()>
     where
-        I: Iterator<Item = IoSlice<'a>>,
+        I: Iterator<Item = IoSliceMut<'a>>,
     {
-        // OK to transmute these as IoSlice is guaranteed to be compatible with iovecs on unix.
+        // OK to transmute these as IoSliceMut is guaranteed to be compatible with iovecs on unix.
         let addrs = iovecs
-            .map(|slice| std::mem::transmute::<IoSlice, libc::iovec>(slice))
+            .map(|slice| std::mem::transmute::<IoSliceMut, libc::iovec>(slice))
             .collect::<Vec<_>>();
         self.prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_READV as u8;
