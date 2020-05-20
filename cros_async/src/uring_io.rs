@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::borrow::Borrow;
+use std::convert::AsRef;
 use std::future::Future;
 use std::io::{IoSlice, IoSliceMut};
 use std::marker::PhantomData;
@@ -21,18 +21,33 @@ pub struct VecCompleteIo {
     inner: Vec<u8>,
 }
 
+impl Clone for VecCompleteIo {
+    fn clone(&self) -> VecCompleteIo {
+        VecCompleteIo {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl From<Vec<u8>> for VecCompleteIo {
     fn from(vec: Vec<u8>) -> Self {
         VecCompleteIo { inner: vec }
     }
 }
 
-impl VecCompleteIo {
-    /// returns the inner vec if all operations are complete, otherwise self is given back.
-    pub fn to_inner(self) -> Vec<u8> {
+impl Into<Vec<u8>> for VecCompleteIo {
+    fn into(self) -> Vec<u8> {
         self.inner
     }
+}
 
+impl AsRef<Vec<u8>> for VecCompleteIo {
+    fn as_ref(&self) -> &Vec<u8> {
+        &self.inner
+    }
+}
+
+impl VecCompleteIo {
     fn check_addrs(&self, mem_off: &MemVec) -> Result<()> {
         let end = mem_off
             .offset
@@ -42,6 +57,16 @@ impl VecCompleteIo {
             return Err(Error::InvalidOffset);
         }
         Ok(())
+    }
+}
+
+pub trait MemLen {
+    fn get_len(&self) -> usize;
+}
+
+impl MemLen for VecCompleteIo {
+    fn get_len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -57,8 +82,8 @@ unsafe impl BackingMemory for VecCompleteIo {
         unsafe {
             self.check_addrs(mem_off)?;
             Ok(IoSliceMut::new(std::slice::from_raw_parts_mut(
-                self.inner.as_ptr() as *mut _,
-                self.inner.len() * std::mem::size_of::<u8>(),
+                self.inner.as_ptr().add(mem_off.offset as usize) as *mut _,
+                mem_off.len,
             )))
         }
     }
@@ -66,13 +91,10 @@ unsafe impl BackingMemory for VecCompleteIo {
     fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
         // Safe because the vector is valid and will be kept alive longer than this IoSlice.
         // The mem_off ranges are checked.
-        unsafe {
-            self.check_addrs(mem_off)?;
-            Ok(IoSlice::new(std::slice::from_raw_parts(
-                self.inner.as_ptr(),
-                self.inner.len() * std::mem::size_of::<u8>(),
-            )))
-        }
+        self.check_addrs(mem_off)?;
+        Ok(IoSlice::new(
+            &self.inner[mem_off.offset as usize..mem_off.offset as usize + mem_off.len],
+        ))
     }
 }
 
@@ -81,53 +103,94 @@ where
     F: AsRawFd,
     M: BackingMemory,
     M: From<T>,
+    M: Into<T>,
+    M: AsRef<T>,
 {
-    async_io: AsyncIo<F>,
+    async_io: AsyncIo<F, M>,
+    mem: Rc<M>,
     _t: PhantomData<T>,
-    _m: PhantomData<M>,
 }
 
 impl<F, M, T> AsyncData<F, M, T>
 where
-    F: AsRawFd,
-    M: BackingMemory + 'static,
+    F: AsRawFd + Unpin,
+    M: BackingMemory + 'static + MemLen + Clone,
     M: From<T>,
+    M: Into<T>,
+    M: AsRef<T>,
 {
     pub fn new(source: F, data: T) -> Result<AsyncData<F, M, T>> {
         let mem = Rc::new(M::from(data));
         Ok(AsyncData {
-            async_io: AsyncIo::new(source, mem)?,
+            async_io: AsyncIo::new(source, mem.clone())?,
+            mem,
             _t: PhantomData,
-            _m: PhantomData,
         })
+    }
+
+    // Consumes self and returns the original T used to create the struct.
+    // Use this to avoid making a copy of T.
+    async fn read_once(self, file_offset: u64) -> Result<T> {
+        self.async_io
+            .read_to_vectored(
+                file_offset,
+                &[MemVec {
+                    offset: 0,
+                    len: self.mem.get_len(),
+                }],
+            )
+            .await?;
+        drop(self.async_io);
+        Ok(Rc::try_unwrap(self.mem)
+            .map_err(|_| Error::InvalidOffset)?
+            .into()) // TODO unwrap - should handle a hangling reference somehow...
+    }
+
+    // Read a T from the file asynchronously. A reference to T will be created and returned.
+    // Useful for small T's where the cost of clone is small compared to the setup time for the IO.
+    // This way many T values can be read with one registered FD. This saves on internal dup calls.
+    async fn read_from(&self, file_offset: u64) -> Result<&T> {
+        self.async_io
+            .read_to_vectored(
+                file_offset,
+                &[MemVec {
+                    offset: 0,
+                    len: self.mem.get_len(),
+                }],
+            )
+            .await?;
+
+        Ok((*self.mem).as_ref())
     }
 }
 
-pub struct AsyncIo<T: AsRawFd> {
+pub struct AsyncIo<F: AsRawFd, M: BackingMemory> {
     registered_io: RegisteredIoMem,
-    io: T,
-    mem: Rc<dyn BackingMemory>,
+    io: F,
+    mem: Rc<M>,
 }
 
-impl<T: AsRawFd> AsyncIo<T> {
-    pub fn new(io_source: T, mem: Rc<dyn BackingMemory>) -> Result<AsyncIo<T>> {
+impl<F: AsRawFd, M: BackingMemory + 'static> AsyncIo<F, M> {
+    pub fn new(io_source: F, mem: Rc<M>) -> Result<AsyncIo<F, M>> {
+        let r = uring_executor::register_io(&io_source, mem.clone())?;
         Ok(AsyncIo {
-            registered_io: uring_executor::register_io(&io_source, mem.clone())?,
+            registered_io: r,
             io: io_source,
             mem,
         })
     }
 
-    pub fn source(&self) -> &T {
+    pub fn source(&self) -> &F {
         &self.io
     }
 
-    pub fn mem(&self) -> &dyn BackingMemory {
-        self.mem.borrow()
+    pub fn mem(self) -> std::result::Result<M, Rc<M>> {
+        drop(self.registered_io);
+        Rc::try_unwrap(self.mem)
     }
 }
 
-impl<T: AsRawFd> CompleteIo for AsyncIo<T> {
+impl<F: AsRawFd, M: BackingMemory> CompleteIo for AsyncIo<F, M> {
     type CompleteToken = PendingOperation;
 
     fn read_vec(
@@ -411,7 +474,7 @@ mod tests {
 
         // Read one subsection from /dev/zero to the buffer.
         buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
-        async fn zero_buf(buf: Rc<dyn BackingMemory>, addrs: &[MemVec]) -> u32 {
+        async fn zero_buf(buf: Rc<GuestMemory>, addrs: &[MemVec]) -> u32 {
             let f = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
             let async_reader = AsyncIo::new(f, buf.clone()).unwrap();
             async_reader.read_to_vectored(0, addrs).await.unwrap()
@@ -433,7 +496,7 @@ mod tests {
         // Fill two subregions with a joined future.
         buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
         async fn zero2<'a>(
-            buf: Rc<dyn BackingMemory>,
+            buf: Rc<GuestMemory>,
             addrs1: &'a [MemVec],
             addrs2: &'a [MemVec],
         ) -> (u32, u32) {
@@ -554,5 +617,50 @@ mod tests {
         pin_mut!(fut);
         let res = crate::run_one(fut).unwrap();
         assert_eq!(res, 0x5555555555555555);
+    }
+
+    #[test]
+    fn vec_read() {
+        use sys_util::{GuestAddress, GuestMemory};
+
+        async fn fill(vec: Vec<u8>, source: GuestMemory) -> Vec<u8> {
+            let async_data: AsyncData<_, VecCompleteIo, _> = AsyncData::new(source, vec).unwrap();
+            async_data.read_once(0).await.unwrap()
+        }
+
+        let v = vec![0u8; 128];
+        let source = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
+        source.get_slice(0, 8192).unwrap().write_bytes(0x55);
+        let fut = fill(v, source);
+        pin_mut!(fut);
+        let v = crate::run_one(fut).unwrap();
+        assert!(v.iter().all(|&v| v == 0x55));
+
+        let source = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
+        source.get_slice(0, 8192).unwrap().write_bytes(0x44);
+        let fut = fill(v, source);
+        pin_mut!(fut);
+        let v = crate::run_one(fut).unwrap();
+        assert!(v.iter().all(|&v| v == 0x44));
+    }
+
+    #[test]
+    fn vec_clone_read() {
+        async fn fill_clone() {
+            use sys_util::{GuestAddress, GuestMemory};
+            let v = vec![0u8; 128];
+            let source = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
+            source.get_slice(0, 4096).unwrap().write_bytes(0x55);
+            source.get_slice(4096, 4096).unwrap().write_bytes(0x44);
+            let async_data: AsyncData<_, VecCompleteIo, _> = AsyncData::new(source, v).unwrap();
+            let v1 = async_data.read_from(0).await.unwrap();
+            assert!(v1.iter().all(|&v| v == 0x55));
+            let v2 = async_data.read_from(4096).await.unwrap();
+            assert!(v2.iter().all(|&v| v == 0x44));
+        }
+
+        let fut = fill_clone();
+        pin_mut!(fut);
+        crate::run_one(fut).unwrap();
     }
 }

@@ -211,8 +211,7 @@ impl RingWakerState {
         };
         let io_pair = Rc::new(IoPair { mem, fd: duped_fd });
         let tag = RegisteredIoMemTag(self.next_io_token);
-        self.registered_io_pairs
-            .insert(tag.clone(), io_pair.clone());
+        self.registered_io_pairs.insert(tag.clone(), io_pair);
         self.next_io_token += 1;
         Ok(RegisteredIoMem(tag))
     }
