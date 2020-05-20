@@ -4,6 +4,8 @@
 
 use std::borrow::Borrow;
 use std::future::Future;
+use std::io::{IoSlice, IoSliceMut};
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
@@ -11,8 +13,95 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::uring_executor::{
-    self, BackingMemory, MemVec, PendingOperation, RegisteredIoMem, Result,
+    self, BackingMemory, Error, MemVec, PendingOperation, RegisteredIoMem, Result,
 };
+
+/// Wrapper to be used for passing a Vec in as backing memory for asynchronous operations.
+pub struct VecCompleteIo {
+    inner: Vec<u8>,
+}
+
+impl From<Vec<u8>> for VecCompleteIo {
+    fn from(vec: Vec<u8>) -> Self {
+        VecCompleteIo { inner: vec }
+    }
+}
+
+impl VecCompleteIo {
+    /// returns the inner vec if all operations are complete, otherwise self is given back.
+    pub fn to_inner(self) -> Vec<u8> {
+        self.inner
+    }
+
+    fn check_addrs(&self, mem_off: &MemVec) -> Result<()> {
+        let end = mem_off
+            .offset
+            .checked_add(mem_off.len as u64)
+            .ok_or(Error::InvalidOffset)?;
+        if end > self.inner.len() as u64 {
+            return Err(Error::InvalidOffset);
+        }
+        Ok(())
+    }
+}
+
+// Safe to implement BackingMemory as the vec is owned and ref counted.
+// Nothing else can get a reference to the vec until all slice are dropped because they borrow Self.
+// Nothing can borrow the owned inner vec until self is consumed by `to_inner`, which can't happen
+// if there are outstanding mut borrows.
+unsafe impl BackingMemory for VecCompleteIo {
+    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
+        // Safe because the vector is valid and will be kept alive longer than this IoSliceMut and
+        // this memory is fully owned so it can be modified for the lifetime of this IoSlice safely.
+        // The mem_off ranges are checked.
+        unsafe {
+            self.check_addrs(mem_off)?;
+            Ok(IoSliceMut::new(std::slice::from_raw_parts_mut(
+                self.inner.as_ptr() as *mut _,
+                self.inner.len() * std::mem::size_of::<u8>(),
+            )))
+        }
+    }
+
+    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
+        // Safe because the vector is valid and will be kept alive longer than this IoSlice.
+        // The mem_off ranges are checked.
+        unsafe {
+            self.check_addrs(mem_off)?;
+            Ok(IoSlice::new(std::slice::from_raw_parts(
+                self.inner.as_ptr(),
+                self.inner.len() * std::mem::size_of::<u8>(),
+            )))
+        }
+    }
+}
+
+pub struct AsyncData<F, M, T>
+where
+    F: AsRawFd,
+    M: BackingMemory,
+    M: From<T>,
+{
+    async_io: AsyncIo<F>,
+    _t: PhantomData<T>,
+    _m: PhantomData<M>,
+}
+
+impl<F, M, T> AsyncData<F, M, T>
+where
+    F: AsRawFd,
+    M: BackingMemory + 'static,
+    M: From<T>,
+{
+    pub fn new(source: F, data: T) -> Result<AsyncData<F, M, T>> {
+        let mem = Rc::new(M::from(data));
+        Ok(AsyncData {
+            async_io: AsyncIo::new(source, mem)?,
+            _t: PhantomData,
+            _m: PhantomData,
+        })
+    }
+}
 
 pub struct AsyncIo<T: AsRawFd> {
     registered_io: RegisteredIoMem,

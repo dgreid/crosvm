@@ -37,6 +37,8 @@ pub enum Error {
     DuplicatingFd(sys_util::Error),
     /// Failed accessing the thread local storage for wakers.
     InvalidContext,
+    /// InvalidOffset
+    InvalidOffset,
     /// Invalid IoPair.
     InvalidPair,
     /// Invalid memory range in backing memory.
@@ -67,6 +69,7 @@ impl Display for Error {
                 f,
                 "Invalid context, was the Fd executor created successfully?"
             ),
+            InvalidOffset => write!(f, "Invalid offset/len for getting a slice."),
             InvalidPair => write!(f, "Invalid or unregistered the memory/FD pair."),
             InvalidRange(e) => write!(f, "Invalid or unregistered the memory range: {}.", e),
             Io(e) => write!(f, "Error during IO: {}", e),
@@ -104,7 +107,7 @@ pub unsafe trait BackingMemory {
     fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
 }
 
-// Safe to implement BAckingMemory as VolatileMemory can be mutated any time.
+// Safe to implement BackingMemory as VolatileMemory can be mutated any time.
 unsafe impl<T: VolatileMemory> BackingMemory for T {
     fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
         let vs = self
