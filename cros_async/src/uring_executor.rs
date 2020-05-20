@@ -39,6 +39,8 @@ pub enum Error {
     InvalidContext,
     /// Invalid IoPair.
     InvalidPair,
+    /// Invalid memory range in backing memory.
+    InvalidRange(data_model::VolatileMemoryError),
     /// Error doing the IO.
     Io(io::Error),
     /// Creating a context to wait on FDs failed.
@@ -66,6 +68,7 @@ impl Display for Error {
                 "Invalid context, was the Fd executor created successfully?"
             ),
             InvalidPair => write!(f, "Invalid or unregistered the memory/FD pair."),
+            InvalidRange(e) => write!(f, "Invalid or unregistered the memory range: {}.", e),
             Io(e) => write!(f, "Error during IO: {}", e),
             CreatingContext(e) => write!(f, "Error creating the fd waiting context: {}.", e),
             RemovingWaker(e) => write!(f, "Error removing from the URing context: {}.", e),
@@ -83,7 +86,7 @@ pub(crate) fn supported() -> bool {
 }
 
 /// Register a file and memory pair for buffered asynchronous operation.
-pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn VolatileMemory>) -> Result<RegisteredIoMem> {
+pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn BackingMemory>) -> Result<RegisteredIoMem> {
     RingWakerState::with(move |state| state.register_io(fd, mem))?
 }
 
@@ -93,8 +96,27 @@ thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None)
 thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture<()>>>
               = RefCell::new(VecDeque::new()));
 
+pub trait BackingMemory {
+    /// only safe if something guarantees that returning a mutable slice from &self is ok.
+    unsafe fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
+}
+
+impl<T: VolatileMemory> BackingMemory for T {
+    // Safe because 'vs' is valid in the backing memory and that will be kept
+    // alive longer than this iterator.
+    unsafe fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
+        let vs = self
+            .get_slice(mem_off.offset, mem_off.len as u64)
+            .map_err(Error::InvalidRange)?;
+        Ok(IoSlice::new(std::slice::from_raw_parts(
+            vs.as_ptr(),
+            vs.size() as usize,
+        )))
+    }
+}
+
 struct IoPair {
-    mem: Rc<dyn VolatileMemory>,
+    mem: Rc<dyn BackingMemory>,
     fd: File,
 }
 
@@ -154,7 +176,7 @@ impl RingWakerState {
     fn register_io(
         &mut self,
         fd: &dyn AsRawFd,
-        mem: Rc<dyn VolatileMemory>,
+        mem: Rc<dyn BackingMemory>,
     ) -> Result<RegisteredIoMem> {
         let duped_fd = unsafe {
             // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
@@ -183,15 +205,9 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(io_pair) = self.registered_io_pairs.get(io_tag) {
             unsafe {
-                let iovecs = addrs.iter().map(|mem_off| {
-                    let vs = io_pair
-                        .mem
-                        .get_slice(mem_off.offset, mem_off.len as u64)
-                        .unwrap();
-                    // Safe because 'vs' is valid in the backing memory and that will be kept
-                    // alive longer than this iterator.
-                    IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                });
+                let iovecs = addrs
+                    .iter()
+                    .map(|mem_off| io_pair.mem.io_slice(mem_off).unwrap());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
@@ -216,15 +232,9 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(io_pair) = self.registered_io_pairs.get(io_tag) {
             unsafe {
-                let iovecs = addrs.iter().map(|mem_off| {
-                    let vs = io_pair
-                        .mem
-                        .get_slice(mem_off.offset, mem_off.len as u64)
-                        .unwrap();
-                    // Safe because 'vs' is valid in the backing memory and that will be kept
-                    // alive longer than this iterator.
-                    IoSlice::new(std::slice::from_raw_parts(vs.as_ptr(), vs.size() as usize))
-                });
+                let iovecs = addrs
+                    .iter()
+                    .map(|mem_off| io_pair.mem.io_slice(mem_off).unwrap());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
@@ -457,7 +467,7 @@ mod test {
     }
 
     impl TestFut {
-        fn new<T: AsRawFd>(io_source: T, mem: Rc<dyn VolatileMemory>) -> TestFut {
+        fn new<T: AsRawFd>(io_source: T, mem: Rc<dyn BackingMemory>) -> TestFut {
             TestFut {
                 registered_io: crate::uring_executor::register_io(&io_source, mem.clone()).unwrap(),
                 pending_operation: None,

@@ -10,18 +10,18 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use data_model::VolatileMemory;
-
-use crate::uring_executor::{self, MemVec, PendingOperation, RegisteredIoMem, Result};
+use crate::uring_executor::{
+    self, BackingMemory, MemVec, PendingOperation, RegisteredIoMem, Result,
+};
 
 pub struct AsyncIo<T: AsRawFd> {
     registered_io: RegisteredIoMem,
     io: T,
-    mem: Rc<dyn VolatileMemory>,
+    mem: Rc<dyn BackingMemory>,
 }
 
 impl<T: AsRawFd> AsyncIo<T> {
-    pub fn new(io_source: T, mem: Rc<dyn VolatileMemory>) -> Result<AsyncIo<T>> {
+    pub fn new(io_source: T, mem: Rc<dyn BackingMemory>) -> Result<AsyncIo<T>> {
         Ok(AsyncIo {
             registered_io: uring_executor::register_io(&io_source, mem.clone())?,
             io: io_source,
@@ -33,7 +33,7 @@ impl<T: AsRawFd> AsyncIo<T> {
         &self.io
     }
 
-    pub fn mem(&self) -> &dyn VolatileMemory {
+    pub fn mem(&self) -> &dyn BackingMemory {
         self.mem.borrow()
     }
 }
@@ -281,7 +281,7 @@ mod tests {
     use super::*;
     use std::fs::File;
 
-    use data_model::GetVolatileRef;
+    use data_model::{GetVolatileRef, VolatileMemory};
     use futures::pin_mut;
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
 
         // Read one subsection from /dev/zero to the buffer.
         buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
-        async fn zero_buf(buf: Rc<dyn VolatileMemory>, addrs: &[MemVec]) -> u32 {
+        async fn zero_buf(buf: Rc<dyn BackingMemory>, addrs: &[MemVec]) -> u32 {
             let f = GuestMemory::new(&[(GuestAddress(0), 8192)]).unwrap();
             let async_reader = AsyncIo::new(f, buf.clone()).unwrap();
             async_reader.read_to_vectored(0, addrs).await.unwrap()
@@ -350,7 +350,7 @@ mod tests {
         // Fill two subregions with a joined future.
         buf.get_slice(0, 8192).unwrap().write_bytes(0x55);
         async fn zero2<'a>(
-            buf: Rc<dyn VolatileMemory>,
+            buf: Rc<dyn BackingMemory>,
             addrs1: &'a [MemVec],
             addrs2: &'a [MemVec],
         ) -> (u32, u32) {
