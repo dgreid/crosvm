@@ -96,20 +96,23 @@ thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None)
 thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture<()>>>
               = RefCell::new(VecDeque::new()));
 
-pub trait BackingMemory {
+/// Must be OK to modify the backing memory without owning a mut able reference. For example,
+/// this is safe for GuestMemory and VolatileSlices.
+pub unsafe trait BackingMemory {
     fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>>;
 
     fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
 }
 
-impl<T: VolatileMemory> BackingMemory for T {
+// Safe to implement BAckingMemory as VolatileMemory can be mutated any time.
+unsafe impl<T: VolatileMemory> BackingMemory for T {
     fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
         let vs = self
             .get_slice(mem_off.offset, mem_off.len as u64)
             .map_err(Error::InvalidRange)?;
+        // Safe because 'vs' is valid in the backing memory and that will be kept
+        // alive longer than this iterator. And volatile memory can be modified at any time.
         unsafe {
-            // Safe because 'vs' is valid in the backing memory and that will be kept
-            // alive longer than this iterator.
             Ok(IoSliceMut::new(std::slice::from_raw_parts_mut(
                 vs.as_ptr(),
                 vs.size() as usize,
