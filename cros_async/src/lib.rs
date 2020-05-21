@@ -57,10 +57,12 @@ mod complete;
 mod executor;
 mod executor_commands;
 mod fd_executor;
+mod io_ext;
 mod io_source;
 mod select;
 mod uring_executor;
 mod uring_io;
+mod uring_mem;
 mod waker;
 
 pub use executor::Executor;

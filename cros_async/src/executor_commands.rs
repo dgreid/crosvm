@@ -38,7 +38,7 @@ impl Display for Error {
 }
 
 /// Inner wrapper around a u64 used a token to uniquely identify a pending waker.
-#[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub(crate) struct WakerToken(pub(crate) u64);
 
 /// A token returned from `add_waker` that can be used to cancel the waker before it completes.

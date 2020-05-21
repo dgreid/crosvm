@@ -555,6 +555,7 @@ impl<'a> IoOperation<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct PendingOperation {
     waker_token: Option<WakerToken>,
 }

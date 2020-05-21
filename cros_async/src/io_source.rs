@@ -117,8 +117,6 @@ impl<F: AsRawFd> IoSource for AsyncSource<F> {
             .start_read_to_mem(file_offset, mem, mem_offsets)
     }
 
-    // read_to<T> where T:BackingMemory
-
     fn poll_complete(
         self: Pin<&Self>,
         cx: &mut Context,
