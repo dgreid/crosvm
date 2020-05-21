@@ -57,6 +57,7 @@ mod complete;
 mod executor;
 mod executor_commands;
 mod fd_executor;
+mod io_source;
 mod select;
 mod uring_executor;
 mod uring_io;

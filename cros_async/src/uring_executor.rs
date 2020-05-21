@@ -93,6 +93,11 @@ pub fn register_io<F: AsRawFd>(fd: &F, mem: Rc<dyn BackingMemory>) -> Result<Reg
     RingWakerState::with(move |state| state.register_io(fd, mem))?
 }
 
+/// Register a file and memory pair for buffered asynchronous operation.
+pub fn register_source<F: AsRawFd>(fd: &F) -> Result<RegisteredSource> {
+    RingWakerState::with(move |state| state.register_source(fd))?
+}
+
 // Tracks active wakers and manages waking pending operations after completion.
 thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None));
 // Tracks new futures that have been added while running the executor.
@@ -144,8 +149,7 @@ struct IoPair {
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
-struct RegisteredIoMemTag(u64);
-pub struct RegisteredIoMem(RegisteredIoMemTag);
+pub struct RegisteredIoMem(RegisteredSourceTag);
 impl RegisteredIoMem {
     pub fn start_readv(&self, file_offset: u64, iovecs: &[MemVec]) -> Result<PendingOperation> {
         let op = IoOperation::ReadVectored {
@@ -175,15 +179,52 @@ impl Drop for RegisteredIoMem {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
+struct RegisteredSourceTag(u64);
+pub struct RegisteredSource(RegisteredSourceTag);
+impl RegisteredSource {
+    pub fn start_read_to_mem(
+        &self,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        iovecs: &[MemVec],
+    ) -> Result<PendingOperation> {
+        let op = IoOperation::ReadToVectored {
+            mem,
+            file_offset,
+            addrs: iovecs,
+        };
+        op.submit(&self.0)
+    }
+
+    pub fn poll_complete(&self, cx: &mut Context, op: &mut PendingOperation) -> Poll<Result<u32>> {
+        pin_mut!(op);
+        op.poll(cx)
+    }
+}
+
+impl Drop for RegisteredSource {
+    fn drop(&mut self) {
+        let _ = RingWakerState::with(|state| state.deregister_source(&self.0));
+    }
+}
+
+// Temp: remove when just sources not pairs.
+enum SavedData {
+    Pair(Rc<IoPair>),
+    Source(Rc<File>),
+}
+
 // Tracks active wakers and associates wakers with the futures that registered them.
 struct RingWakerState {
     ctx: URingContext,
-    pending_ops: BTreeMap<WakerToken, Rc<IoPair>>,
+    pending_ops: BTreeMap<WakerToken, SavedData>,
     waiting_ops: BTreeMap<WakerToken, Waker>,
     next_op_token: u64, // Next token for adding to the context.
     completed_ops: BTreeMap<WakerToken, std::io::Result<u32>>,
-    registered_io_pairs: BTreeMap<RegisteredIoMemTag, Rc<IoPair>>,
-    next_io_token: u64, // Next token for registering IO pairs.
+    registered_io_pairs: BTreeMap<RegisteredSourceTag, Rc<IoPair>>,
+    registered_sources: BTreeMap<RegisteredSourceTag, Rc<File>>,
+    next_source_token: u64, // Next token for registering sources.
 }
 
 impl RingWakerState {
@@ -194,8 +235,9 @@ impl RingWakerState {
             waiting_ops: BTreeMap::new(),
             next_op_token: 0,
             completed_ops: BTreeMap::new(),
-            registered_io_pairs: BTreeMap::new(),
-            next_io_token: 0,
+            registered_io_pairs: BTreeMap::new(), // TODO remove
+            registered_sources: BTreeMap::new(),
+            next_source_token: 0,
         })
     }
 
@@ -210,13 +252,13 @@ impl RingWakerState {
             File::from_raw_fd(dup_fd(fd.as_raw_fd())?)
         };
         let io_pair = Rc::new(IoPair { mem, fd: duped_fd });
-        let tag = RegisteredIoMemTag(self.next_io_token);
+        let tag = RegisteredSourceTag(self.next_source_token);
         self.registered_io_pairs.insert(tag.clone(), io_pair);
-        self.next_io_token += 1;
+        self.next_source_token += 1;
         Ok(RegisteredIoMem(tag))
     }
 
-    fn deregister_io(&mut self, tag: &RegisteredIoMemTag) {
+    fn deregister_io(&mut self, tag: &RegisteredSourceTag) {
         // There isn't any need to pull pending ops out, the all have Rc's to the mem they need.let
         // them complete. deregister with pending ops is not a common path.
         let _ = self.registered_io_pairs.remove(tag);
@@ -224,7 +266,7 @@ impl RingWakerState {
 
     fn submit_writev(
         &mut self,
-        io_tag: &RegisteredIoMemTag,
+        io_tag: &RegisteredSourceTag,
         offset: u64,
         addrs: &[MemVec],
     ) -> Result<WakerToken> {
@@ -241,7 +283,7 @@ impl RingWakerState {
             }
             let next_op_token = WakerToken(self.next_op_token);
             self.pending_ops
-                .insert(next_op_token.clone(), io_pair.clone());
+                .insert(next_op_token.clone(), SavedData::Pair(io_pair.clone()));
             self.next_op_token += 1;
             Ok(next_op_token)
         } else {
@@ -251,7 +293,7 @@ impl RingWakerState {
 
     fn submit_readv(
         &mut self,
-        io_tag: &RegisteredIoMemTag,
+        io_tag: &RegisteredSourceTag,
         offset: u64,
         addrs: &[MemVec],
     ) -> Result<WakerToken> {
@@ -268,7 +310,55 @@ impl RingWakerState {
             }
             let next_op_token = WakerToken(self.next_op_token);
             self.pending_ops
-                .insert(next_op_token.clone(), io_pair.clone());
+                .insert(next_op_token.clone(), SavedData::Pair(io_pair.clone()));
+            self.next_op_token += 1;
+            Ok(next_op_token)
+        } else {
+            Err(Error::InvalidPair)
+        }
+    }
+
+    fn register_source(&mut self, fd: &dyn AsRawFd) -> Result<RegisteredSource> {
+        let duped_fd = unsafe {
+            // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
+            // will only be added to the poll loop.
+            File::from_raw_fd(dup_fd(fd.as_raw_fd())?)
+        };
+        let tag = RegisteredSourceTag(self.next_source_token);
+        self.registered_sources
+            .insert(tag.clone(), Rc::new(duped_fd));
+        self.next_source_token += 1;
+        Ok(RegisteredSource(tag))
+    }
+
+    fn deregister_source(&mut self, tag: &RegisteredSourceTag) {
+        // There isn't any need to pull pending ops out, the all have Rc's to the file and mem they
+        // need.let them complete. deregister with pending ops is not a common path no need to
+        // optimize that case yet.
+        let _ = self.registered_sources.remove(tag);
+    }
+
+    fn submit_read_to_vectored(
+        &mut self,
+        source_tag: &RegisteredSourceTag,
+        mem: Rc<dyn BackingMemory>,
+        offset: u64,
+        addrs: &[MemVec],
+    ) -> Result<WakerToken> {
+        if let Some(source) = self.registered_sources.get(source_tag) {
+            unsafe {
+                let iovecs = addrs
+                    .iter()
+                    .map(|mem_off| mem.io_slice_mut(mem_off).unwrap());
+                // Safe because all the addresses are within the Memory that an Rc is kept for the
+                // duration to ensure the memory is valid while the kernel accesses it.
+                self.ctx
+                    .add_readv(iovecs, source.as_raw_fd(), offset, self.next_op_token)
+                    .map_err(Error::SubmittingOp)?;
+            }
+            let next_op_token = WakerToken(self.next_op_token);
+            self.pending_ops
+                .insert(next_op_token.clone(), SavedData::Source(source.clone()));
             self.next_op_token += 1;
             Ok(next_op_token)
         } else {
@@ -412,6 +502,11 @@ pub struct MemVec {
 }
 
 enum IoOperation<'a> {
+    ReadToVectored {
+        mem: Rc<dyn BackingMemory>,
+        file_offset: u64,
+        addrs: &'a [MemVec],
+    },
     ReadVectored {
         file_offset: u64,
         addrs: &'a [MemVec],
@@ -423,8 +518,20 @@ enum IoOperation<'a> {
 }
 
 impl<'a> IoOperation<'a> {
-    fn submit(self, tag: &RegisteredIoMemTag) -> Result<PendingOperation> {
+    fn submit(self, tag: &RegisteredSourceTag) -> Result<PendingOperation> {
         let waker_token = match self {
+            IoOperation::ReadToVectored {
+                mem,
+                file_offset,
+                addrs,
+            } => STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if let Some(state) = state.as_mut() {
+                    state.submit_read_to_vectored(tag, mem, file_offset, addrs)
+                } else {
+                    Err(Error::InvalidContext)
+                }
+            })?,
             IoOperation::ReadVectored { file_offset, addrs } => STATE.with(|state| {
                 let mut state = state.borrow_mut();
                 if let Some(state) = state.as_mut() {
