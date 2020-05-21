@@ -8,6 +8,7 @@ use crate::io_source::IoSource;
 
 /// Extends IoSource with ergonomic methods to perform asynchronous IO.
 pub trait IoSourceExt: IoSource {
+    /// read from the iosource at `file_offset` and fill the given `vec`.
     fn read_to_vec<'a>(
         &'a self,
         file_offset: u64,
@@ -19,6 +20,7 @@ pub trait IoSourceExt: IoSource {
         crate::read_vec::ReadVec::new(self, file_offset, vec)
     }
 
+    /// write from the given `vec` to the file starting at `file_offset`.
     fn write_from_vec<'a>(
         &'a self,
         file_offset: u64,
