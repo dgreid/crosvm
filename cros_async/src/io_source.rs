@@ -20,6 +20,13 @@ pub trait IoSource {
         mem_offsets: &[MemVec],
     ) -> Result<PendingOperation>;
 
+    fn write_from_mem(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        mem_offsets: &[MemVec],
+    ) -> Result<PendingOperation>;
+
     // read_to<T> where T:BackingMemory
 
     fn poll_complete(
@@ -38,6 +45,15 @@ macro_rules! deref_io_source {
             mem_offsets: &[MemVec],
         ) -> Result<PendingOperation> {
             Pin::new(&**self).read_to_mem(file_offset, mem, mem_offsets)
+        }
+
+        fn write_from_mem(
+            self: Pin<&Self>,
+            file_offset: u64,
+            mem: Rc<dyn BackingMemory>,
+            mem_offsets: &[MemVec],
+        ) -> Result<PendingOperation> {
+            Pin::new(&**self).write_from_mem(file_offset, mem, mem_offsets)
         }
 
         fn poll_complete(
@@ -78,6 +94,17 @@ where
             .read_to_mem(file_offset, mem, mem_offsets)
     }
 
+    fn write_from_mem(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        mem_offsets: &[MemVec],
+    ) -> Result<PendingOperation> {
+        self.get_ref()
+            .as_ref()
+            .write_from_mem(file_offset, mem, mem_offsets)
+    }
+
     fn poll_complete(
         self: Pin<&Self>,
         cx: &mut Context,
@@ -115,6 +142,16 @@ impl<F: AsRawFd> IoSource for AsyncSource<F> {
     ) -> Result<PendingOperation> {
         self.registered_source
             .start_read_to_mem(file_offset, mem, mem_offsets)
+    }
+
+    fn write_from_mem(
+        self: Pin<&Self>,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        mem_offsets: &[MemVec],
+    ) -> Result<PendingOperation> {
+        self.registered_source
+            .start_write_from_mem(file_offset, mem, mem_offsets)
     }
 
     fn poll_complete(

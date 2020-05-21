@@ -59,14 +59,19 @@ mod executor_commands;
 mod fd_executor;
 mod io_ext;
 mod io_source;
+mod read_vec;
 mod select;
 mod uring_executor;
+mod uring_fut;
 mod uring_io;
 mod uring_mem;
 mod waker;
+mod write_vec;
 
 pub use executor::Executor;
 pub use executor_commands::*;
+pub use io_ext::*;
+pub use io_source::AsyncSource;
 pub use select::SelectResult;
 pub use uring_io::*;
 

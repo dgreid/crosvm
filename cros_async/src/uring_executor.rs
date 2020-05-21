@@ -197,6 +197,20 @@ impl RegisteredSource {
         op.submit(&self.0)
     }
 
+    pub fn start_write_from_mem(
+        &self,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        iovecs: &[MemVec],
+    ) -> Result<PendingOperation> {
+        let op = IoOperation::WriteFromVectored {
+            mem,
+            file_offset,
+            addrs: iovecs,
+        };
+        op.submit(&self.0)
+    }
+
     pub fn poll_complete(&self, cx: &mut Context, op: &mut PendingOperation) -> Poll<Result<u32>> {
         pin_mut!(op);
         op.poll(cx)
@@ -366,6 +380,32 @@ impl RingWakerState {
         }
     }
 
+    fn submit_write_from_vectored(
+        &mut self,
+        source_tag: &RegisteredSourceTag,
+        mem: Rc<dyn BackingMemory>,
+        offset: u64,
+        addrs: &[MemVec],
+    ) -> Result<WakerToken> {
+        if let Some(source) = self.registered_sources.get(source_tag) {
+            unsafe {
+                let iovecs = addrs.iter().map(|mem_off| mem.io_slice(mem_off).unwrap());
+                // Safe because all the addresses are within the Memory that an Rc is kept for the
+                // duration to ensure the memory is valid while the kernel accesses it.
+                self.ctx
+                    .add_writev(iovecs, source.as_raw_fd(), offset, self.next_op_token)
+                    .map_err(Error::SubmittingOp)?;
+            }
+            let next_op_token = WakerToken(self.next_op_token);
+            self.pending_ops
+                .insert(next_op_token.clone(), SavedData::Source(source.clone()));
+            self.next_op_token += 1;
+            Ok(next_op_token)
+        } else {
+            Err(Error::InvalidPair)
+        }
+    }
+
     // Remove the waker for the given token if it hasn't fired yet.
     fn cancel_waker(&mut self, token: &WakerToken) -> Result<()> {
         if let Some(_) = self.pending_ops.remove(token) {
@@ -507,6 +547,11 @@ enum IoOperation<'a> {
         file_offset: u64,
         addrs: &'a [MemVec],
     },
+    WriteFromVectored {
+        mem: Rc<dyn BackingMemory>,
+        file_offset: u64,
+        addrs: &'a [MemVec],
+    },
     ReadVectored {
         file_offset: u64,
         addrs: &'a [MemVec],
@@ -528,6 +573,18 @@ impl<'a> IoOperation<'a> {
                 let mut state = state.borrow_mut();
                 if let Some(state) = state.as_mut() {
                     state.submit_read_to_vectored(tag, mem, file_offset, addrs)
+                } else {
+                    Err(Error::InvalidContext)
+                }
+            })?,
+            IoOperation::WriteFromVectored {
+                mem,
+                file_offset,
+                addrs,
+            } => STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if let Some(state) = state.as_mut() {
+                    state.submit_write_from_vectored(tag, mem, file_offset, addrs)
                 } else {
                     Err(Error::InvalidContext)
                 }
