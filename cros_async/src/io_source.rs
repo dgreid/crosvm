@@ -224,7 +224,7 @@ mod tests {
             }],
         );
         pin_mut!(fut);
-        crate::run_one(fut).unwrap();
+        assert_eq!(8192, crate::run_one(fut).unwrap().unwrap());
         for i in 0..8192 {
             assert_eq!(buf.get_ref::<u8>(i).unwrap().load(), 0x55);
         }
