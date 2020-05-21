@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::io::{IoSlice, IoSliceMut};
-use std::rc::Rc;
 
 use crate::uring_executor::{BackingMemory, Error, MemVec, Result};
 
@@ -13,25 +12,26 @@ use crate::uring_executor::{BackingMemory, Error, MemVec, Result};
 /// in the `Vec` while this struct is alive.
 /// To ensure that those operations can be done safely, no access is allowed to the `Vec`'s memory
 /// from the time that `VecIoWrapper` is constructed and the time it is turned back in to a `Vec`
-/// using `to_inner`.
+/// using `to_inner`. The returned `Vec` is guaranteed to be valid as any combination of bits in a
+/// `Vec` of `u8` is valid.
 #[derive(Debug)]
 pub(crate) struct VecIoWrapper {
-    inner: Rc<Vec<u8>>,
+    inner: Vec<u8>,
 }
 
 impl From<Vec<u8>> for VecIoWrapper {
     fn from(vec: Vec<u8>) -> Self {
-        VecIoWrapper {
-            inner: Rc::new(vec),
-        }
+        VecIoWrapper { inner: vec }
+    }
+}
+
+impl Into<Vec<u8>> for VecIoWrapper {
+    fn into(self) -> Vec<u8> {
+        self.inner
     }
 }
 
 impl VecIoWrapper {
-    pub fn to_inner(self) -> std::result::Result<Vec<u8>, Self> {
-        Rc::try_unwrap(self.inner).map_err(|rc| VecIoWrapper { inner: rc })
-    }
-
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -48,9 +48,10 @@ impl VecIoWrapper {
     }
 }
 
-// Safe to implement BackingMemory as the vec is owned and ref counted.
+// Safe to implement BackingMemory as the vec is only accessible inside the wrapper and these slices
+// are the only thing allowed to modify it.
 // Nothing else can get a reference to the vec until all slice are dropped because they borrow Self.
-// Nothing can borrow the owned inner vec until self is consumed by `to_inner`, which can't happen
+// Nothing can borrow the owned inner vec until self is consumed by `into`, which can't happen
 // if there are outstanding mut borrows.
 unsafe impl BackingMemory for VecIoWrapper {
     fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
