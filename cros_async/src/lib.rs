@@ -66,6 +66,7 @@ mod uring_fut;
 mod uring_io;
 mod uring_mem;
 mod waker;
+mod write_mem;
 mod write_vec;
 
 pub use executor::Executor;

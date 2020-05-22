@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display};
 use std::fs::File;
 use std::future::Future;
-use std::io::{self, IoSlice, IoSliceMut};
+use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -23,10 +23,10 @@ use std::task::{Context, Poll};
 
 use futures::pin_mut;
 
-use data_model::VolatileMemory;
 use io_uring::URingContext;
 
 use crate::executor::{ExecutableFuture, Executor, FutureList};
+use crate::uring_mem::BackingMemory;
 use crate::WakerToken;
 
 #[derive(Debug)]
@@ -103,45 +103,6 @@ thread_local!(static STATE: RefCell<Option<RingWakerState>> = RefCell::new(None)
 // Tracks new futures that have been added while running the executor.
 thread_local!(static NEW_FUTURES: RefCell<VecDeque<ExecutableFuture<()>>>
               = RefCell::new(VecDeque::new()));
-
-/// Must be OK to modify the backing memory without owning a mut able reference. For example,
-/// this is safe for GuestMemory and VolatileSlices.
-pub unsafe trait BackingMemory {
-    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>>;
-
-    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
-}
-
-// Safe to implement BackingMemory as VolatileMemory can be mutated any time.
-unsafe impl<T: VolatileMemory> BackingMemory for T {
-    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
-        let vs = self
-            .get_slice(mem_off.offset, mem_off.len as u64)
-            .map_err(Error::InvalidRange)?;
-        // Safe because 'vs' is valid in the backing memory and that will be kept
-        // alive longer than this iterator. And volatile memory can be modified at any time.
-        unsafe {
-            Ok(IoSliceMut::new(std::slice::from_raw_parts_mut(
-                vs.as_ptr(),
-                vs.size() as usize,
-            )))
-        }
-    }
-
-    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
-        let vs = self
-            .get_slice(mem_off.offset, mem_off.len as u64)
-            .map_err(Error::InvalidRange)?;
-        unsafe {
-            // Safe because 'vs' is valid in the backing memory and that will be kept
-            // alive longer than this iterator.
-            Ok(IoSlice::new(std::slice::from_raw_parts_mut(
-                vs.as_ptr(),
-                vs.size() as usize,
-            )))
-        }
-    }
-}
 
 struct IoPair {
     mem: Rc<dyn BackingMemory>,

@@ -4,8 +4,54 @@
 
 use std::io::{IoSlice, IoSliceMut};
 
-use crate::uring_executor::{BackingMemory, Error, MemVec, Result};
+use data_model::VolatileMemory;
 
+use crate::uring_executor::{Error, MemVec, Result};
+
+/// Trait for memory that can yeild both `IoSlice` and `IoSliceMut` from a & ref borrow(not a &mut).
+/// Must be OK to modify the backing memory without owning a mut able reference. For example,
+/// this is safe for GuestMemory and VolatileSlices in crosvm as those types guarantee they are
+/// dealt with as volatile.
+pub unsafe trait BackingMemory {
+    /// Returns a mutable slice to the backing memory. This is most commonly unsafe. To implement
+    /// this safely the implementor must guarantee that the backing memory can be modified out of
+    /// band without affecting safety guaratees.
+    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>>;
+
+    /// Returns a slice for reading the backing memory.
+    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>>;
+}
+
+// Safe to implement BackingMemory as VolatileMemory can be mutated any time.
+unsafe impl<T: VolatileMemory> BackingMemory for T {
+    fn io_slice_mut(&self, mem_off: &MemVec) -> Result<IoSliceMut<'_>> {
+        let vs = self
+            .get_slice(mem_off.offset, mem_off.len as u64)
+            .map_err(Error::InvalidRange)?;
+        // Safe because 'vs' is valid in the backing memory and that will be kept
+        // alive longer than this iterator. And volatile memory can be modified at any time.
+        unsafe {
+            Ok(IoSliceMut::new(std::slice::from_raw_parts_mut(
+                vs.as_ptr(),
+                vs.size() as usize,
+            )))
+        }
+    }
+
+    fn io_slice(&self, mem_off: &MemVec) -> Result<IoSlice<'_>> {
+        let vs = self
+            .get_slice(mem_off.offset, mem_off.len as u64)
+            .map_err(Error::InvalidRange)?;
+        unsafe {
+            // Safe because 'vs' is valid in the backing memory and that will be kept
+            // alive longer than this iterator.
+            Ok(IoSlice::new(std::slice::from_raw_parts_mut(
+                vs.as_ptr(),
+                vs.size() as usize,
+            )))
+        }
+    }
+}
 /// Wrapper to be used for passing a Vec in as backing memory for asynchronous operations.  The
 /// wrapper owns a Vec according to the borrow checker. It is loaning this vec out to the kernel(or
 /// other modifiers) through the `BackingMemory` trait. This allows multiple modifiers of the array

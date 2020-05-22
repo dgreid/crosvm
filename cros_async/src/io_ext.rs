@@ -4,7 +4,11 @@
 
 // Extension functions to asynchronously access files.
 
+use std::rc::Rc;
+
 use crate::io_source::IoSource;
+use crate::uring_executor::MemVec;
+use crate::uring_mem::BackingMemory;
 
 /// Extends IoSource with ergonomic methods to perform asynchronous IO.
 pub trait IoSourceExt: IoSource {
@@ -30,6 +34,19 @@ pub trait IoSourceExt: IoSource {
         Self: Unpin,
     {
         crate::write_vec::WriteVec::new(self, file_offset, vec)
+    }
+
+    /// write from the given `mem` from the given offsets to the file starting at `file_offset`.
+    fn write_from_mem<'a>(
+        &'a self,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        mem_offsets: &'a [MemVec],
+    ) -> crate::write_mem::WriteMem<'a, Self>
+    where
+        Self: Unpin,
+    {
+        crate::write_mem::WriteMem::new(self, file_offset, mem, mem_offsets)
     }
 }
 
