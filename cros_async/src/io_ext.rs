@@ -35,7 +35,20 @@ pub trait IoSourceExt: IoSource {
         crate::write_vec::WriteVec::new(self, file_offset, vec)
     }
 
-    /// write from the given `mem` from the given offsets to the file starting at `file_offset`.
+    /// Reads to the given `mem` at the given offsets from the file starting at `file_offset`.
+    fn read_to_mem<'a>(
+        &'a self,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        mem_offsets: &'a [MemVec],
+    ) -> crate::read_mem::ReadMem<'a, Self>
+    where
+        Self: Unpin,
+    {
+        crate::read_mem::ReadMem::new(self, file_offset, mem, mem_offsets)
+    }
+
+    /// Writes from the given `mem` from the given offsets to the file starting at `file_offset`.
     fn write_from_mem<'a>(
         &'a self,
         file_offset: u64,

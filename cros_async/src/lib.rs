@@ -59,6 +59,7 @@ mod executor_commands;
 mod fd_executor;
 mod io_ext;
 mod io_source;
+mod read_mem;
 mod read_vec;
 mod select;
 mod uring_executor;
