@@ -6,7 +6,15 @@ use std::io::{IoSlice, IoSliceMut};
 
 use data_model::VolatileMemory;
 
-use crate::uring_executor::{Error, MemVec, Result};
+use crate::uring_executor::{Error, Result};
+
+/// Used to index subslices of backing memory. Like an iovec, but relative to the start of the
+/// memory region instead of an absolute pointer.
+#[derive(Debug)]
+pub struct MemVec {
+    pub offset: u64,
+    pub len: usize,
+}
 
 /// Trait for memory that can yeild both `IoSlice` and `IoSliceMut` from a & ref borrow(not a &mut).
 /// Must be OK to modify the backing memory without owning a mut able reference. For example,

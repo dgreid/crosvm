@@ -9,9 +9,9 @@ use std::task::{Context, Poll};
 
 use crate::io_source::IoSource;
 //TODO - move memvec to uring_mem
-use crate::uring_executor::{MemVec, Result};
+use crate::uring_executor::Result;
 use crate::uring_fut::UringFutState;
-use crate::uring_mem::VecIoWrapper;
+use crate::uring_mem::{MemVec, VecIoWrapper};
 
 /// Future for the `read_to_vectored` function.
 #[derive(Debug)]

@@ -8,8 +8,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use crate::uring_executor::{self, MemVec, PendingOperation, RegisteredSource, Result};
-use crate::uring_mem::BackingMemory;
+use crate::uring_executor::{self, PendingOperation, RegisteredSource, Result};
+use crate::uring_mem::{BackingMemory, MemVec};
 
 pub trait IoSource {
     fn read_to_mem(

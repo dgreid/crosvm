@@ -8,47 +8,47 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::io_source::IoSource;
-//TODO - move memvec to uring_mem
 use crate::uring_executor::Result;
 use crate::uring_fut::UringFutState;
-use crate::uring_mem::{MemVec, VecIoWrapper};
+use crate::uring_mem::{BackingMemory, MemVec};
 
 /// Future for the `write_to_vectored` function.
-#[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct WriteVec<'a, W: IoSource + ?Sized> {
+pub struct WriteMem<'a, W: IoSource + ?Sized> {
     writer: &'a W,
-    state: UringFutState<(u64, Rc<VecIoWrapper>), Rc<VecIoWrapper>>,
+    state: UringFutState<(u64, Rc<dyn BackingMemory>, &'a [MemVec]), Rc<dyn BackingMemory>>,
 }
 
-impl<R: IoSource + ?Sized + Unpin> Unpin for WriteVec<'_, R> {}
+impl<R: IoSource + ?Sized + Unpin> Unpin for WriteMem<'_, R> {}
 
-impl<'a, R: IoSource + ?Sized + Unpin> WriteVec<'a, R> {
-    pub(crate) fn new(writer: &'a R, file_offset: u64, vec: Vec<u8>) -> Self {
-        WriteVec {
+impl<'a, R: IoSource + ?Sized + Unpin> WriteMem<'a, R> {
+    pub(crate) fn new(
+        writer: &'a R,
+        file_offset: u64,
+        mem: Rc<dyn BackingMemory>,
+        mem_offsets: &'a [MemVec],
+    ) -> Self {
+        WriteMem {
             writer,
-            state: UringFutState::new((file_offset, Rc::new(VecIoWrapper::from(vec)))),
+            state: UringFutState::new((file_offset, mem, mem_offsets)),
         }
     }
 }
 
-impl<R: IoSource + ?Sized + Unpin> Future for WriteVec<'_, R> {
-    type Output = Result<Vec<u8>>;
+impl<R: IoSource + ?Sized + Unpin> Future for WriteMem<'_, R> {
+    type Output = Result<u32>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let state = std::mem::replace(&mut self.state, UringFutState::Processing);
         let (new_state, ret) = match state.advance(
-            |(file_offset, wrapped_vec)| {
+            |(file_offset, mem, mem_offsets)| {
                 Ok((
                     Pin::new(&self.writer).write_from_mem(
                         file_offset,
-                        Rc::<VecIoWrapper>::clone(&wrapped_vec),
-                        &[MemVec {
-                            offset: 0,
-                            len: wrapped_vec.len(),
-                        }],
+                        Rc::clone(&mem),
+                        mem_offsets,
                     )?,
-                    wrapped_vec,
+                    mem,
                 ))
             },
             |op| Pin::new(&self.writer).poll_complete(cx, op),
@@ -61,25 +61,23 @@ impl<R: IoSource + ?Sized + Unpin> Future for WriteVec<'_, R> {
 
         match ret {
             Poll::Pending => Poll::Pending,
-            Poll::Ready((r, wrapped_vec)) => match r {
-                Ok(_) => Poll::Ready(Ok(Rc::try_unwrap(wrapped_vec)
-                    .expect("too many refs on vec")
-                    .into())),
-                Err(e) => Poll::Ready(Err(e)),
-            },
+            Poll::Ready((r, _)) => Poll::Ready(r),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use futures::pin_mut;
     use std::fs::OpenOptions;
+    use std::rc::Rc;
+
+    use futures::pin_mut;
 
     use crate::io_ext::IoSourceExt;
+    use crate::uring_mem::MemVec;
 
     #[test]
-    fn writevec() {
+    fn writemem() {
         async fn go() {
             let f = OpenOptions::new()
                 .create(true)
@@ -87,10 +85,13 @@ mod tests {
                 .open("/tmp/write_from_vec")
                 .unwrap();
             let source = crate::io_source::AsyncSource::new(f).unwrap();
-            let v = vec![0x55u8; 32];
-            let v_ptr = v.as_ptr();
-            let ret_v = source.write_from_vec(0, v).await.unwrap();
-            assert_eq!(v_ptr, ret_v.as_ptr());
+            let v = vec![0x55u8; 64];
+            let vw = Rc::new(crate::uring_mem::VecIoWrapper::from(v));
+            let ret = source
+                .write_from_mem(0, vw, &[MemVec { offset: 0, len: 32 }])
+                .await
+                .unwrap();
+            assert_eq!(32, ret);
         }
 
         let fut = go();

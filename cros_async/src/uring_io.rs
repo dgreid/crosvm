@@ -12,8 +12,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use crate::uring_executor::{self, Error, MemVec, PendingOperation, RegisteredIoMem, Result};
-use crate::uring_mem::BackingMemory;
+use crate::uring_executor::{self, Error, PendingOperation, RegisteredIoMem, Result};
+use crate::uring_mem::{BackingMemory, MemVec};
 
 /// Wrapper to be used for passing a Vec in as backing memory for asynchronous operations.
 pub struct VecCompleteIo {

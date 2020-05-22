@@ -7,8 +7,7 @@
 use std::rc::Rc;
 
 use crate::io_source::IoSource;
-use crate::uring_executor::MemVec;
-use crate::uring_mem::BackingMemory;
+use crate::uring_mem::{BackingMemory, MemVec};
 
 /// Extends IoSource with ergonomic methods to perform asynchronous IO.
 pub trait IoSourceExt: IoSource {

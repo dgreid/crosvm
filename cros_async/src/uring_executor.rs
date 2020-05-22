@@ -26,7 +26,7 @@ use futures::pin_mut;
 use io_uring::URingContext;
 
 use crate::executor::{ExecutableFuture, Executor, FutureList};
-use crate::uring_mem::BackingMemory;
+use crate::uring_mem::{BackingMemory, MemVec};
 use crate::WakerToken;
 
 #[derive(Debug)]
@@ -494,12 +494,6 @@ unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
     } else {
         Ok(ret)
     }
-}
-
-#[derive(Debug)]
-pub struct MemVec {
-    pub offset: u64,
-    pub len: usize,
 }
 
 enum IoOperation<'a> {
