@@ -249,7 +249,8 @@ impl RingWakerState {
             unsafe {
                 let iovecs = addrs
                     .iter()
-                    .map(|mem_off| io_pair.mem.io_slice(mem_off).unwrap());
+                    .map(|mem_off| io_pair.mem.io_slice(mem_off))
+                    .filter_map(|r| r.ok());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
@@ -274,9 +275,12 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(io_pair) = self.registered_io_pairs.get(io_tag) {
             unsafe {
+                // Drop invalid addresses, an error from here is difficult to process, users should
+                // validate their addresses before submitting.
                 let iovecs = addrs
                     .iter()
-                    .map(|mem_off| io_pair.mem.io_slice_mut(mem_off).unwrap());
+                    .map(|mem_off| io_pair.mem.io_slice_mut(mem_off))
+                    .filter_map(|r| r.ok());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
@@ -322,9 +326,12 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(source) = self.registered_sources.get(source_tag) {
             unsafe {
+                // Drop invalid addresses, an error from here is difficult to process, users should
+                // validate their addresses before submitting.
                 let iovecs = addrs
                     .iter()
-                    .map(|mem_off| mem.io_slice_mut(mem_off).unwrap());
+                    .map(|mem_off| mem.io_slice_mut(mem_off))
+                    .filter_map(|r| r.ok());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx
@@ -350,7 +357,12 @@ impl RingWakerState {
     ) -> Result<WakerToken> {
         if let Some(source) = self.registered_sources.get(source_tag) {
             unsafe {
-                let iovecs = addrs.iter().map(|mem_off| mem.io_slice(mem_off).unwrap());
+                // Drop invalid addresses, an error from here is difficult to process, users should
+                // validate their addresses before submitting.
+                let iovecs = addrs
+                    .iter()
+                    .map(|mem_off| mem.io_slice(mem_off))
+                    .filter_map(|r| r.ok());
                 // Safe because all the addresses are within the Memory that an Rc is kept for the
                 // duration to ensure the memory is valid while the kernel accesses it.
                 self.ctx

@@ -94,6 +94,51 @@ mod tests {
             assert_eq!(32, ret);
             let v: Vec<u8> = Rc::try_unwrap(vw).unwrap().into();
             assert!(v.iter().take(32).all(|&b| b == 0));
+            assert!(v.iter().skip(32).all(|&b| b == 0x55));
+
+            // test second half of memory too.
+            let v = vec![0x55u8; 64];
+            let vw = Rc::new(VecIoWrapper::from(v));
+            let ret = source
+                .read_to_mem(
+                    0,
+                    Rc::<VecIoWrapper>::clone(&vw),
+                    &[MemVec {
+                        offset: 32,
+                        len: 32,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(32, ret);
+            let v: Vec<u8> = Rc::try_unwrap(vw).unwrap().into();
+            assert!(v.iter().take(32).all(|&b| b == 0x55));
+            assert!(v.iter().skip(32).all(|&b| b == 0));
+        }
+
+        let fut = go();
+        pin_mut!(fut);
+        crate::run_one(fut).unwrap();
+    }
+
+    #[test]
+    fn range_error() {
+        async fn go() {
+            let f = File::open("/dev/zero").unwrap();
+            let source = crate::io_source::AsyncSource::new(f).unwrap();
+            let v = vec![0x55u8; 64];
+            let vw = Rc::new(VecIoWrapper::from(v));
+            let ret = source
+                .read_to_mem(
+                    0,
+                    Rc::<VecIoWrapper>::clone(&vw),
+                    &[MemVec {
+                        offset: 32,
+                        len: 33,
+                    }],
+                )
+                .await;
+            assert_eq!(0, ret.unwrap());
         }
 
         let fut = go();
