@@ -87,6 +87,26 @@ pub unsafe trait BackingMemory {
     fn get_iovec(&self, mem_range: MemRegion) -> Result<BorrowedIoVec>;
 }
 
+// Safe to implement BackingMemory as GuestMemory can be mutated any time.
+// TODO, this should be in the guest_memory file.
+unsafe impl BackingMemory for sys_util::GuestMemory {
+    fn get_iovec<'s>(&'s self, mem_range: MemRegion) -> Result<BorrowedIoVec<'s>> {
+        let vs = self
+            .get_slice_at_addr(
+                sys_util::GuestAddress(mem_range.offset as u64),
+                mem_range.len,
+            )
+            .map_err(|_| Error::InvalidOffset(mem_range.offset, mem_range.len))?;
+        // Safe because 'vs' is valid in the backing memory as checked above.
+        unsafe {
+            Ok(BorrowedIoVec::from_raw_parts(
+                vs.as_mut_ptr(),
+                vs.size() as usize,
+            ))
+        }
+    }
+}
+
 /// Wrapper to be used for passing a Vec in as backing memory for asynchronous operations.  The
 /// wrapper owns a Vec according to the borrow checker. It is loaning this vec out to the kernel(or
 /// other modifiers) through the `BackingMemory` trait. This allows multiple modifiers of the array
