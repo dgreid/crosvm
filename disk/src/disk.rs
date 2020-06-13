@@ -14,6 +14,8 @@ use sys_util::{
     WriteZeroesAt,
 };
 
+mod ops;
+pub use ops::*;
 mod qcow;
 pub use qcow::{QcowFile, QCOW_MAGIC};
 
