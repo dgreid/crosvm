@@ -327,9 +327,8 @@ impl Queue {
         }
     }
 
-    /// Get the first available descriptor chain without removing it from the queue.
-    /// Call `pop_peeked` to remove the returned descriptor chain from the queue.
-    pub fn peek<'a>(&mut self, mem: &'a GuestMemory) -> Option<DescriptorChain<'a>> {
+    /// return the next descriptor index if there is a descriptor ready.
+    pub fn peek_index(&mut self, mem: &GuestMemory) -> Option<u16> {
         if !self.is_valid(mem) {
             return None;
         }
@@ -348,10 +347,38 @@ impl Queue {
         let desc_idx_addr_offset = 4 + (u64::from(self.next_avail.0 % queue_size) * 2);
         let desc_idx_addr = mem.checked_offset(self.avail_ring, desc_idx_addr_offset)?;
 
-        // This index is checked below in checked_new.
+        // This index will be checked in checked_new if converted to a descriptor.
         let descriptor_index: u16 = mem.read_obj_from_addr(desc_idx_addr).unwrap();
 
+        Some(descriptor_index)
+    }
+
+    /// return the next descriptor index if there is a descriptor ready.
+    pub fn pop_index(&mut self, mem: &GuestMemory) -> Option<u16> {
+        let descriptor_index = self.peek_index(mem)?;
+
+        self.pop_peeked(mem);
+
+        Some(descriptor_index)
+    }
+
+    /// Get the first descriptor chain specified by descriptor_index.
+    /// This doesn't adjust the read point of the queue. Use with values obtained from `pop_index`.
+    pub fn nth<'mem>(
+        &self,
+        descriptor_index: u16,
+        mem: &'mem GuestMemory,
+    ) -> Option<DescriptorChain<'mem>> {
+        let queue_size = self.actual_size();
+
         DescriptorChain::checked_new(mem, self.desc_table, queue_size, descriptor_index, 0)
+    }
+
+    /// Get the first available descriptor chain without removing it from the queue.
+    /// Call `pop_peeked` to remove the returned descriptor chain from the queue.
+    pub fn peek<'a>(&mut self, mem: &'a GuestMemory) -> Option<DescriptorChain<'a>> {
+        let descriptor_index = self.peek_index(mem)?;
+        self.nth(descriptor_index, mem)
     }
 
     /// Remove the first available descriptor chain from the queue.
