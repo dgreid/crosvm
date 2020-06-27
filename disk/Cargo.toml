@@ -11,9 +11,15 @@ path = "src/disk.rs"
 composite-disk = ["protos", "protobuf"]
 
 [dependencies]
+async-trait = "*"
 libc = "*"
 protobuf = { version = "2.3", optional = true }
 remain = "*"
+cros_async = { path = "../cros_async" }
 data_model = { path = "../data_model" }
 protos = { path = "../protos", optional = true }
 sys_util = { path = "../sys_util" }
+
+[dependencies.futures]
+version = "*"
+default-features = false
