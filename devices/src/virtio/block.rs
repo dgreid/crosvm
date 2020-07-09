@@ -1,7 +1,6 @@
 // Copyright 2017 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
 use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fmt::{self, Display};
@@ -10,21 +9,22 @@ use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::rc::Rc;
 use std::result;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::Duration;
 use std::u32;
 
-use futures::lock::Mutex as AsyncMutex;
 use futures::pin_mut;
 use futures::stream::{FuturesUnordered, StreamExt};
+use libchromeos::sync::Mutex as AsyncMutex;
 
 use cros_async::{select4, AsyncError, U64Source};
 use data_model::{DataInit, Le16, Le32, Le64};
-use disk::DiskFile;
+use disk::{AsyncDisk, DiskFile};
 use msg_socket::{MsgError, MsgSender};
-use sync::Mutex;
 use sys_util::Error as SysError;
 use sys_util::Result as SysResult;
 use sys_util::{error, info, iov_max, warn, EventFd, GuestMemory, TimerFd};
@@ -32,12 +32,12 @@ use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_control::{DiskControlCommand, DiskControlResponseSocket, DiskControlResult};
 
 use super::{
-    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, VirtioDevice, Writer,
-    TYPE_BLOCK, VIRTIO_F_VERSION_1,
+    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, RegionReader, RegionWriter,
+    VirtioDevice, TYPE_BLOCK, VIRTIO_F_VERSION_1,
 };
 
 const QUEUE_SIZE: u16 = 256;
-const NUM_QUEUES: u16 = 1;
+const NUM_QUEUES: u16 = 16;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES as usize];
 const SECTOR_SHIFT: u8 = 9;
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
@@ -149,20 +149,19 @@ enum ExecuteError {
     SendingResponse(MsgError),
     WriteStatus(io::Error),
     /// Error arming the flush timer.
-    Flush(io::Error),
+    Flush(disk::Error),
     ReadIo {
         length: usize,
         sector: u64,
-        desc_error: io::Error,
+        desc_error: disk::Error,
     },
-    TimerFd(SysError),
     WriteIo {
         length: usize,
         sector: u64,
-        desc_error: io::Error,
+        desc_error: disk::Error,
     },
     DiscardWriteZeroes {
-        ioerr: Option<io::Error>,
+        ioerr: Option<disk::Error>,
         sector: u64,
         num_sectors: u32,
         flags: u32,
@@ -196,7 +195,6 @@ impl Display for ExecuteError {
                 "io error reading {} bytes from sector {}: {}",
                 length, sector, desc_error,
             ),
-            TimerFd(e) => write!(f, "{}", e),
             WriteIo {
                 length,
                 sector,
@@ -245,7 +243,6 @@ impl ExecuteError {
             ExecuteError::WriteStatus(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Flush(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::ReadIo { .. } => VIRTIO_BLK_S_IOERR,
-            ExecuteError::TimerFd(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::WriteIo { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::DiscardWriteZeroes { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::ReadOnly { .. } => VIRTIO_BLK_S_IOERR,
@@ -256,46 +253,56 @@ impl ExecuteError {
     }
 }
 
+// Errors that happen in block outside of executing a request.
 #[derive(Debug)]
-enum TimerError {
-    TimerFdCreate(sys_util::Error),
+enum OtherError {
+    AsyncKillCreate(AsyncError),
+    AsyncResampleCreate(AsyncError),
     AsyncTimerCreate(AsyncError),
+    CloneResampleEvent(sys_util::Error),
+    FsyncDisk(disk::Error),
+    ReadResampleEvent(AsyncError),
+    TimerFdCreate(sys_util::Error),
+    TimerReset(sys_util::Error),
 }
 
-impl Display for TimerError {
+impl Display for OtherError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::TimerError::*;
+        use self::OtherError::*;
 
         match self {
-            TimerFdCreate(e) => write!(f, "couldn't create a timer FD: {}", e),
+            AsyncKillCreate(e) => write!(f, "couldn't create an async kill event fd: {}", e),
             AsyncTimerCreate(e) => write!(f, "couldn't create an async timer: {}", e),
+            AsyncResampleCreate(e) => write!(f, "couldn't create an async resample event: {}", e),
+            CloneResampleEvent(e) => write!(f, "couldn't clone the resample event: {}", e),
+            FsyncDisk(e) => write!(f, "failed to fsync the disk: {}", e),
+            ReadResampleEvent(e) => write!(f, "couldn't read the resample event: {}", e),
+            TimerFdCreate(e) => write!(f, "couldn't create a timer FD: {}", e),
+            TimerReset(e) => write!(f, "couldn't reset the timer FD: {}", e),
         }
     }
 }
 
-#[derive(Debug)]
 struct DiskState {
-    disk_image: Box<dyn DiskFile>,
-    disk_size: Arc<RwLock<u64>>,
+    disk_image: Box<dyn AsyncDisk>,
+    disk_size: AsyncMutex<Arc<AtomicU64>>,
     read_only: bool,
     sparse: bool,
 }
 
-fn process_one_request(
-    avail_desc: DescriptorChain,
-    read_only: bool,
-    sparse: bool,
-    disk: &mut dyn DiskFile,
-    disk_size: u64,
-    flush_timer: &TimerFd,
-    flush_timer_armed: &AtomicBool,
-    mem: &GuestMemory,
+async fn process_one_request(
+    avail_desc: DescriptorChain<'_>,
+    disk_state: Rc<RefCell<DiskState>>,
+    flush_timer_armed: Rc<AtomicBool>,
+    mem: &Rc<GuestMemory>,
 ) -> result::Result<usize, ExecuteError> {
-    let mut reader = Reader::new(mem, avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
-    let mut writer = Writer::new(mem, avail_desc).map_err(ExecuteError::Descriptor)?;
+    let mut reader =
+        RegionReader::new(Rc::clone(mem), avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
+    let mut writer =
+        RegionWriter::new(Rc::clone(mem), avail_desc).map_err(ExecuteError::Descriptor)?;
 
     // The last byte of the buffer is virtio_blk_req::status.
-    // Split it into a separate Writer so that status_writer is the final byte and
+    // Split it into a separate RegionWriter so that status_writer is the final byte and
     // the original writer is left with just the actual block I/O data.
     let available_bytes = writer.available_bytes();
     let status_offset = available_bytes
@@ -303,22 +310,15 @@ fn process_one_request(
         .ok_or(ExecuteError::MissingStatus)?;
     let mut status_writer = writer.split_at(status_offset);
 
-    let status = match Block::execute_request(
-        &mut reader,
-        &mut writer,
-        read_only,
-        sparse,
-        disk,
-        disk_size,
-        flush_timer,
-        flush_timer_armed,
-    ) {
-        Ok(()) => VIRTIO_BLK_S_OK,
-        Err(e) => {
-            error!("failed executing disk request: {}", e);
-            e.status()
-        }
-    };
+    let status =
+        match Block::execute_request(&mut reader, &mut writer, disk_state, flush_timer_armed).await
+        {
+            Ok(()) => VIRTIO_BLK_S_OK,
+            Err(e) => {
+                error!("failed executing disk request: {}", e);
+                e.status()
+            }
+        };
 
     status_writer
         .write_all(&[status])
@@ -326,104 +326,124 @@ fn process_one_request(
     Ok(available_bytes)
 }
 
+async fn process_one_request_task(
+    queue: Rc<RefCell<Queue>>,
+    descriptor_index: u16,
+    disk_state: Rc<RefCell<DiskState>>,
+    mem: Rc<GuestMemory>,
+    interrupt: Rc<RefCell<Interrupt>>,
+    flush_timer_armed: Rc<AtomicBool>,
+) -> () {
+    let avail_desc = match queue.borrow().nth(descriptor_index, &mem) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let len = match process_one_request(avail_desc, Rc::clone(&disk_state), flush_timer_armed, &mem)
+        .await
+    {
+        Ok(len) => len,
+        Err(e) => {
+            error!("block: failed to handle request: {}", e);
+            0
+        }
+    };
+
+    let mut queue = queue.borrow_mut();
+    queue.add_used(&mem, descriptor_index, len as u32);
+    interrupt.borrow_mut().signal_used_queue(queue.vector);
+    queue.set_notify(&mem, true);
+}
+
 async fn handle_queue(
     mem: &GuestMemory,
     disk_state: Rc<RefCell<DiskState>>,
-    queue_mutex: Arc<AsyncMutex<Queue>>,
-    evt_mutex: Arc<AsyncMutex<U64Source<EventFd>>>,
-    flush_timer: &TimerFd,
-    flush_timer_armed: &AtomicBool,
+    queue: Rc<RefCell<Queue>>,
+    mut evt_mutex: U64Source<EventFd>,
     interrupt: Rc<RefCell<Interrupt>>,
+    flush_timer_armed: Rc<AtomicBool>,
 ) {
+    let mem = Rc::new(mem.clone());
     loop {
-        let avail_desc = {
-            let mut queue = queue_mutex.lock().await;
-            let mut evt = evt_mutex.lock().await;
-            let avail_desc = queue.next_async(mem, &mut evt).await;
-            match avail_desc {
+        let descriptor_index = queue.borrow_mut().pop_index(&mem);
+        let descriptor_index = match descriptor_index {
+            None => match evt_mutex.next_val().await {
                 Err(e) => {
                     error!("Failed to read the next descriptor from the queue: {}", e);
                     continue;
                 }
-                Ok(a) => a,
-            }
+                Ok(_) => continue,
+            },
+            Some(a) => a,
         };
 
-        let mut disk_state = disk_state.borrow_mut();
+        // Disable notification until we're done processing the next request.
+        queue.borrow_mut().set_notify(&mem, false);
 
-        // tricky lock work to prevent borrowing disk_state for the entire loop.
-        let disk_size_lock = disk_state.disk_size.clone();
-        let disk_size = disk_size_lock.read().unwrap();
-
-        //queue.set_notify(&mem, false); // TODO - might need to set notify to counter of contexts that disabled it.
-        let desc_index = avail_desc.index;
-
-        let len = match process_one_request(
-            avail_desc,
-            disk_state.read_only,
-            disk_state.sparse,
-            &mut *disk_state.disk_image,
-            *disk_size,
-            flush_timer,
-            flush_timer_armed,
-            &mem,
-        ) {
-            Ok(len) => len,
-            Err(e) => {
-                error!("block: failed to handle request: {}", e);
-                0
-            }
-        };
-
-        {
-            let mut queue = queue_mutex.lock().await;
-            queue.add_used(&mem, desc_index, len as u32);
-            interrupt.borrow_mut().signal_used_queue(queue.vector);
-            //    queue.set_notify(&mem, true);
+        if let Err(e) = cros_async::add_future(Box::pin(process_one_request_task(
+            Rc::clone(&queue),
+            descriptor_index,
+            Rc::clone(&disk_state),
+            Rc::clone(&mem),
+            Rc::clone(&interrupt),
+            Rc::clone(&flush_timer_armed),
+        ))) {
+            error!("Failed to queue disk request, aborting block: {}", e);
+            return; // The inability to run tasks can't be recovered from.
         }
     }
 }
 
-async fn flush_timer(
-    disk_state: Rc<RefCell<DiskState>>,
-    mut timer: U64Source<TimerFd>,
-    timer_armed: &AtomicBool,
-) {
-    loop {
-        let t = timer.next_val().await;
-        if let Err(e) = t {
-            error!("Error with flush timer: {}", e);
-            return;
-        }
-        timer_armed.store(false, Ordering::Relaxed);
-        let mut disk_state = disk_state.borrow_mut();
-        if let Err(e) = disk_state.disk_image.fsync() {
-            error!("Failed to flush the disk: {}", e);
-        }
+async fn flush_timer_task(disk_state: Rc<RefCell<DiskState>>, timer_armed: Rc<AtomicBool>) {
+    if let Err(e) = flush_timer(disk_state).await {
+        error!("Failed to flush the disk: {}", e);
     }
+
+    timer_armed.store(false, Ordering::Relaxed);
 }
 
-async fn handle_irq_resample(interrupt: Rc<RefCell<Interrupt>>) {
+async fn flush_timer(disk_state: Rc<RefCell<DiskState>>) -> result::Result<(), OtherError> {
+    // Delay after a write when the file is auto-flushed.
+    let flush_delay = Duration::from_secs(60);
+
+    let timer = TimerFd::new().map_err(OtherError::TimerFdCreate)?;
+    timer
+        .reset(flush_delay, None)
+        .map_err(OtherError::TimerReset)?;
+    let mut async_timer = U64Source::new(timer).map_err(OtherError::AsyncTimerCreate)?;
+
+    let _ = async_timer.next_val().await;
+
+    disk_state
+        .borrow()
+        .disk_image
+        .fsync()
+        .await
+        .map_err(OtherError::FsyncDisk)
+}
+
+async fn handle_irq_resample(interrupt: Rc<RefCell<Interrupt>>) -> result::Result<(), OtherError> {
     let resample_evt = interrupt
         .borrow_mut()
         .get_resample_evt()
         .try_clone()
-        .unwrap();
-    let mut resample_evt = U64Source::new(resample_evt).unwrap();
+        .map_err(OtherError::CloneResampleEvent)?;
+    let mut resample_evt = U64Source::new(resample_evt).map_err(OtherError::AsyncResampleCreate)?;
     loop {
-        if let Ok(_) = resample_evt.next_val().await {
-            interrupt.borrow_mut().interrupt_resample();
-        } else {
-            break;
-        }
+        let _ = resample_evt
+            .next_val()
+            .await
+            .map_err(OtherError::ReadResampleEvent)?;
+        interrupt.borrow_mut().do_interrupt_resample();
     }
 }
 
-async fn wait_kill(kill_evt: EventFd) {
-    let mut kill_evt = U64Source::new(kill_evt).unwrap();
+async fn wait_kill(kill_evt: EventFd) -> result::Result<(), OtherError> {
+    let mut kill_evt = U64Source::new(kill_evt).map_err(OtherError::AsyncKillCreate)?;
     // Once this event is readable, exit. Exiting this future will cause the main loop to
     // break and the device process to exit.
     let _ = kill_evt.next_val().await;
+    Ok(())
 }
 
 async fn handle_command_socket(
@@ -439,7 +459,7 @@ async fn handle_command_socket(
             Ok(command) => {
                 let resp = match command {
                     DiskControlCommand::Resize { new_size } => {
-                        resize(&mut disk_state.borrow_mut(), new_size)
+                        resize(&mut disk_state.borrow_mut(), new_size).await
                     }
                 };
 
@@ -453,7 +473,7 @@ async fn handle_command_socket(
     }
 }
 
-fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult {
+async fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult {
     if disk_state.read_only {
         error!("Attempted to resize read-only block device");
         return DiskControlResult::Err(SysError::new(libc::EROFS));
@@ -461,22 +481,22 @@ fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult {
 
     info!("Resizing block device to {} bytes", new_size);
 
-    if let Err(e) = disk_state.disk_image.set_len(new_size) {
+    if let Err(e) = disk_state.disk_image.inner().set_len(new_size) {
         error!("Resizing disk failed! {}", e);
         return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
     // Allocate new space if the disk image is not sparse.
-    if let Err(e) = disk_state.disk_image.allocate(0, new_size) {
+    if let Err(e) = disk_state.disk_image.inner_mut().allocate(0, new_size) {
         error!("Allocating disk space after resize failed! {}", e);
         return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
     disk_state.sparse = false;
 
-    if let Ok(new_disk_size) = disk_state.disk_image.get_len() {
-        let mut disk_size = disk_state.disk_size.write().unwrap();
-        *disk_size = new_disk_size;
+    if let Ok(new_disk_size) = disk_state.disk_image.inner().get_len() {
+        let disk_size = disk_state.disk_size.lock().await;
+        disk_size.store(new_disk_size, Ordering::Release);
     }
     DiskControlResult::Ok
 }
@@ -493,44 +513,33 @@ fn run_worker(
     // Wrap the interupt in a `RefCell` so it can be shared between async functions.
     let interrupt = Rc::new(RefCell::new(interrupt));
 
-    let timer = TimerFd::new().map_err(TimerError::TimerFdCreate).unwrap();
-    // TODO - better timerfd handling   let async_timer =
-    //       U64Source::new(timer.try_clone().map_err(TimerError::AsyncTimerCreate)?).unwrap();
-    let flush_timer_armed = AtomicBool::new(false);
-    //let flush_timer = flush_timer(disk_state.clone(), async_timer, &flush_timer_armed);
-    //pin_mut!(flush_timer);
+    // One flush timer per disk.
+    let flush_timer_armed = Rc::new(AtomicBool::new(false));
 
     // Handle all the queues in one sub-select call.
     let queue_handlers = queues
         .into_iter()
-        .map(|q| Arc::new(AsyncMutex::new(q)))
+        .filter(|q| q.ready())
+        .map(|q| Rc::new(RefCell::new(q)))
         .zip(
             queue_evts
                 .into_iter()
-                .map(|e| U64Source::new(e).unwrap())
-                .map(|e| Arc::new(AsyncMutex::new(e))),
+                .map(|e| U64Source::new(e).expect("Failed to create async event for queue")),
         )
-        .flat_map(|(queue, event)| {
+        .map(|(queue, event)| {
             // alias some refs so the lifetimes work.
             let mem = &mem;
-            let timer = &timer;
-            let timer_armed = &flush_timer_armed;
             let disk_state = &disk_state;
             let interrupt = &interrupt;
-            std::iter::repeat_with(move || {
-                handle_queue(
-                    mem,
-                    (*disk_state).clone(),
-                    queue.clone(),
-                    event.clone(),
-                    timer,
-                    timer_armed,
-                    interrupt.clone(),
-                )
-            })
-            .take(2) // TODO - more or less? Skip this and do something better.
+            Box::pin(handle_queue(
+                mem,
+                Rc::clone(disk_state),
+                Rc::clone(&queue),
+                event,
+                interrupt.clone(),
+                Rc::clone(&flush_timer_armed),
+            ))
         })
-        .map(Box::pin)
         .collect::<FuturesUnordered<_>>()
         .into_future();
 
@@ -546,12 +555,7 @@ fn run_worker(
     pin_mut!(kill);
 
     // And return once any future exits.
-    let _ = select4(
-        queue_handlers,
-        control,
-        /*flush_timer,*/ resample,
-        kill,
-    );
+    let _ = select4(queue_handlers, control, resample, kill);
 
     Ok(())
 }
@@ -561,7 +565,7 @@ pub struct Block {
     kill_evt: Option<EventFd>,
     worker_thread: Option<thread::JoinHandle<(Box<dyn DiskFile>, DiskControlResponseSocket)>>,
     disk_image: Option<Box<dyn DiskFile>>,
-    disk_size: Arc<RwLock<u64>>,
+    disk_size: Arc<AtomicU64>,
     avail_features: u64,
     read_only: bool,
     sparse: bool,
@@ -588,7 +592,7 @@ fn build_config_space(disk_size: u64, seg_max: u32, block_size: u32) -> virtio_b
 }
 
 impl Block {
-    /// Create a new virtio block device that operates on the given DiskFile.
+    /// Create a new virtio block device that operates on the given AsyncDisk.
     pub fn new(
         disk_image: Box<dyn DiskFile>,
         read_only: bool,
@@ -638,7 +642,7 @@ impl Block {
             kill_evt: None,
             worker_thread: None,
             disk_image: Some(disk_image),
-            disk_size: Arc::new(RwLock::new(disk_size)),
+            disk_size: Arc::new(AtomicU64::new(disk_size)),
             avail_features,
             read_only,
             sparse,
@@ -652,24 +656,18 @@ impl Block {
     // `writer` includes the data region only; the status byte is not included.
     // It is up to the caller to convert the result of this function into a status byte
     // and write it to the expected location in guest memory.
-    fn execute_request(
-        reader: &mut Reader,
-        writer: &mut Writer,
-        read_only: bool,
-        sparse: bool,
-        disk: &mut dyn DiskFile,
-        disk_size: u64,
-        flush_timer: &TimerFd,
-        flush_timer_armed: &AtomicBool,
+    async fn execute_request(
+        reader: &mut RegionReader,
+        writer: &mut RegionWriter,
+        disk_state: Rc<RefCell<DiskState>>,
+        flush_timer_armed: Rc<AtomicBool>,
     ) -> result::Result<(), ExecuteError> {
         let req_header: virtio_blk_req_header = reader.read_obj().map_err(ExecuteError::Read)?;
 
         let req_type = req_header.req_type.to_native();
         let sector = req_header.sector.to_native();
-        // Delay after a write when the file is auto-flushed.
-        let flush_delay = Duration::from_secs(60);
 
-        if read_only && req_type != VIRTIO_BLK_T_IN {
+        if disk_state.borrow().read_only && req_type != VIRTIO_BLK_T_IN {
             return Err(ExecuteError::ReadOnly {
                 request_type: req_type,
             });
@@ -692,15 +690,26 @@ impl Block {
             }
         }
 
+        let disk_image = &disk_state.borrow().disk_image;
+
+        // Take a read lock for the duration of this op so that the disk size doesn't change.
+        let disk = disk_state.borrow();
+        let disk_size_lock = disk.disk_size.read_lock().await;
+        let disk_size = disk_size_lock.load(Ordering::Relaxed);
+
         match req_type {
             VIRTIO_BLK_T_IN => {
                 let data_len = writer.available_bytes();
+                if data_len == 0 {
+                    return Ok(());
+                }
                 let offset = sector
                     .checked_shl(u32::from(SECTOR_SHIFT))
                     .ok_or(ExecuteError::OutOfRange)?;
                 check_range(offset, data_len as u64, disk_size)?;
                 writer
-                    .write_all_from_at(disk, data_len, offset)
+                    .write_all_from_at(&**disk_image, data_len, offset)
+                    .await
                     .map_err(|desc_error| ExecuteError::ReadIo {
                         length: data_len,
                         sector,
@@ -709,26 +718,35 @@ impl Block {
             }
             VIRTIO_BLK_T_OUT => {
                 let data_len = reader.available_bytes();
+                if data_len == 0 {
+                    return Ok(());
+                }
                 let offset = sector
                     .checked_shl(u32::from(SECTOR_SHIFT))
                     .ok_or(ExecuteError::OutOfRange)?;
                 check_range(offset, data_len as u64, disk_size)?;
                 reader
-                    .read_exact_to_at(disk, data_len, offset)
+                    .read_exact_to_at(&**disk_image, data_len, offset)
+                    .await
                     .map_err(|desc_error| ExecuteError::WriteIo {
                         length: data_len,
                         sector,
                         desc_error,
                     })?;
+                // Ignore send errors, they aren't the client's fault and aren't fatal to disk ops.
                 if !flush_timer_armed.load(Ordering::Relaxed) {
-                    flush_timer
-                        .reset(flush_delay, None)
-                        .map_err(ExecuteError::TimerFd)?;
-                    flush_timer_armed.store(true, Ordering::Relaxed);
+                    if cros_async::add_future(Box::pin(flush_timer_task(
+                        Rc::clone(&disk_state),
+                        Rc::clone(&flush_timer_armed),
+                    )))
+                    .is_ok()
+                    {
+                        flush_timer_armed.store(true, Ordering::Relaxed);
+                    }
                 }
             }
             VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
-                if req_type == VIRTIO_BLK_T_DISCARD && !sparse {
+                if req_type == VIRTIO_BLK_T_DISCARD && !disk_state.borrow().sparse {
                     // Discard is a hint; if this is a non-sparse disk, just ignore it.
                     return Ok(());
                 }
@@ -767,22 +785,21 @@ impl Block {
                     if req_type == VIRTIO_BLK_T_DISCARD {
                         // Since Discard is just a hint and some filesystems may not implement
                         // FALLOC_FL_PUNCH_HOLE, ignore punch_hole errors.
-                        let _ = disk.punch_hole(offset, length);
+                        let _ = disk_image.punch_hole(offset, length).await;
                     } else {
-                        disk.write_zeroes_all_at(offset, length as usize)
-                            .map_err(|e| ExecuteError::DiscardWriteZeroes {
+                        disk_image.write_zeroes(offset, length).await.map_err(|e| {
+                            ExecuteError::DiscardWriteZeroes {
                                 ioerr: Some(e),
                                 sector,
                                 num_sectors,
                                 flags,
-                            })?;
+                            }
+                        })?;
                     }
                 }
             }
             VIRTIO_BLK_T_FLUSH => {
-                disk.fsync().map_err(ExecuteError::Flush)?;
-                flush_timer.clear().map_err(ExecuteError::TimerFd)?;
-                flush_timer_armed.store(false, Ordering::Relaxed);
+                disk_image.fsync().await.map_err(ExecuteError::Flush)?;
             }
             t => return Err(ExecuteError::Unsupported(t)),
         };
@@ -832,8 +849,8 @@ impl VirtioDevice for Block {
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let config_space = {
-            let disk_size = self.disk_size.read().unwrap();
-            build_config_space(*disk_size, self.seg_max, self.block_size)
+            let disk_size = self.disk_size.load(Ordering::Acquire);
+            build_config_space(disk_size, self.seg_max, self.block_size)
         };
         copy_config(data, 0, config_space.as_slice(), offset);
     }
@@ -863,9 +880,13 @@ impl VirtioDevice for Block {
                     thread::Builder::new()
                         .name("virtio_blk".to_string())
                         .spawn(move || {
+                            let async_image = match disk_image.to_async_disk() {
+                                Ok(d) => d,
+                                Err(e) => panic!("Failed to create async disk {}", e),
+                            };
                             let disk_state = Rc::new(RefCell::new(DiskState {
-                                disk_image,
-                                disk_size,
+                                disk_image: async_image,
+                                disk_size: AsyncMutex::new(disk_size),
                                 read_only,
                                 sparse,
                             }));
@@ -881,8 +902,11 @@ impl VirtioDevice for Block {
                                 error!("{}", err_string);
                             }
 
-                            let disk_state = Rc::try_unwrap(disk_state).unwrap().into_inner();
-                            (disk_state.disk_image, control_socket)
+                            let disk_state = match Rc::try_unwrap(disk_state) {
+                                Ok(d) => d.into_inner(),
+                                Err(_) => panic!("too many refs to the disk"),
+                            };
+                            (disk_state.disk_image.to_inner(), control_socket)
                         });
 
                 match worker_result {
@@ -925,8 +949,11 @@ impl VirtioDevice for Block {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::TryFrom;
     use std::fs::{File, OpenOptions};
     use std::mem::size_of_val;
+
+    use disk::SingleFileDisk;
     use sys_util::GuestAddress;
     use tempfile::TempDir;
 
@@ -1010,7 +1037,7 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let mut path = tempdir.path().to_owned();
         path.push("disk_image");
-        let mut f = OpenOptions::new()
+        let f = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -1018,9 +1045,12 @@ mod tests {
             .unwrap();
         let disk_size = 0x1000;
         f.set_len(disk_size).unwrap();
+        let af = SingleFileDisk::try_from(f).expect("Failed to create SFD");
 
-        let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
-            .expect("Creating guest memory failed.");
+        let mem = Rc::new(
+            GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
+                .expect("Creating guest memory failed."),
+        );
 
         let req_hdr = virtio_blk_req_header {
             req_type: Le32::from(VIRTIO_BLK_T_IN),
@@ -1046,20 +1076,20 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let flush_timer = TimerFd::new().expect("failed to create flush_timer");
-        let flush_timer_armed = AtomicBool::new(false);
+        let flush_timer_armed = Rc::new(AtomicBool::new(false));
 
-        process_one_request(
-            avail_desc,
-            false,
-            true,
-            &mut f,
-            disk_size,
-            &flush_timer,
-            &flush_timer_armed,
-            &mem,
-        )
-        .expect("execute failed");
+        let disk_state = Rc::new(RefCell::new(DiskState {
+            disk_image: Box::new(af),
+            disk_size: AsyncMutex::new(Arc::new(AtomicU64::new(disk_size))),
+            read_only: false,
+            sparse: true,
+        }));
+
+        let fut = process_one_request(avail_desc, disk_state, Rc::clone(&flush_timer_armed), &mem);
+
+        cros_async::run_one(Box::pin(fut))
+            .expect("running executor failed")
+            .expect("execute failed");
 
         let status_offset = GuestAddress((0x1000 + size_of_val(&req_hdr) + 512) as u64);
         let status = mem.read_obj_from_addr::<u8>(status_offset).unwrap();
@@ -1071,7 +1101,7 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let mut path = tempdir.path().to_owned();
         path.push("disk_image");
-        let mut f = OpenOptions::new()
+        let f = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -1079,9 +1109,10 @@ mod tests {
             .unwrap();
         let disk_size = 0x1000;
         f.set_len(disk_size).unwrap();
-
-        let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
-            .expect("Creating guest memory failed.");
+        let mem = Rc::new(
+            GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
+                .expect("Creating guest memory failed."),
+        );
 
         let req_hdr = virtio_blk_req_header {
             req_type: Le32::from(VIRTIO_BLK_T_IN),
@@ -1107,20 +1138,20 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let flush_timer = TimerFd::new().expect("failed to create flush_timer");
-        let flush_timer_armed = AtomicBool::new(false);
+        let af = SingleFileDisk::try_from(f).expect("Failed to create SFD");
+        let flush_timer_armed = Rc::new(AtomicBool::new(false));
+        let disk_state = Rc::new(RefCell::new(DiskState {
+            disk_image: Box::new(af),
+            disk_size: AsyncMutex::new(Arc::new(AtomicU64::new(disk_size))),
+            read_only: false,
+            sparse: true,
+        }));
 
-        process_one_request(
-            avail_desc,
-            false,
-            true,
-            &mut f,
-            disk_size,
-            &flush_timer,
-            &flush_timer_armed,
-            &mem,
-        )
-        .expect("execute failed");
+        let fut = process_one_request(avail_desc, disk_state, Rc::clone(&flush_timer_armed), &mem);
+
+        cros_async::run_one(Box::pin(fut))
+            .expect("running executor failed")
+            .expect("execute failed");
 
         let status_offset = GuestAddress((0x1000 + size_of_val(&req_hdr) + 512 * 2) as u64);
         let status = mem.read_obj_from_addr::<u8>(status_offset).unwrap();

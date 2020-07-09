@@ -29,6 +29,7 @@ hypervisor = { path = "../hypervisor" }
 kvm = { path = "../kvm" }
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
+libchromeos = { path = "../../../platform2/libchromeos-rs" }
 libcras = "*"
 libvda = { version = "*", optional = true }
 linux_input_sys = { path = "../linux_input_sys" }
