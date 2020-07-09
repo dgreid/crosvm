@@ -90,6 +90,7 @@ pub trait DiskFile:
     + WriteZeroesAt
     + FileAllocate
     + Send
+    + ToAsyncDisk
     + AsRawFds
     + Debug
 {
@@ -103,6 +104,7 @@ impl<
             + WriteZeroesAt
             + FileAllocate
             + Send
+            + ToAsyncDisk
             + AsRawFds
             + Debug,
     > DiskFile for D
@@ -295,19 +297,22 @@ pub fn create_disk_file(raw_image: File) -> Result<Box<dyn DiskFile>> {
     Ok(match image_type {
         ImageType::Raw => Box::new(raw_image) as Box<dyn DiskFile>,
         ImageType::Qcow2 => {
-            Box::new(QcowFile::from(raw_image).map_err(Error::QcowError)?) as Box<dyn DiskFile>
+            panic!("qcow");
+            //Box::new(QcowFile::from(raw_image).map_err(Error::QcowError)?) as Box<dyn DiskFile>
         }
         #[cfg(feature = "composite-disk")]
         ImageType::CompositeDisk => {
             // Valid composite disk header present
-            Box::new(CompositeDiskFile::from_file(raw_image).map_err(Error::CreateCompositeDisk)?)
-                as Box<dyn DiskFile>
+            panic!("composite");
+            //Box::new(CompositeDiskFile::from_file(raw_image).map_err(Error::CreateCompositeDisk)?)
+            //   as Box<dyn DiskFile>
         }
         #[cfg(not(feature = "composite-disk"))]
         ImageType::CompositeDisk => return Err(Error::UnknownType),
         ImageType::AndroidSparse => {
-            Box::new(AndroidSparse::from_file(raw_image).map_err(Error::CreateAndroidSparseDisk)?)
-                as Box<dyn DiskFile>
+            panic!("sparse");
+            //Box::new(AndroidSparse::from_file(raw_image).map_err(Error::CreateAndroidSparseDisk)?)
+            //   as Box<dyn DiskFile>
         }
     })
 }
