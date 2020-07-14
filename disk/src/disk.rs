@@ -317,11 +317,12 @@ pub fn create_disk_file(raw_image: File) -> Result<Box<dyn DiskFile>> {
     })
 }
 
-/// Asynchronously accessible the disk.
+/// An asynchronously accessible disk.
 #[async_trait(?Send)]
 pub trait AsyncDisk {
-    fn inner(&self) -> &dyn DiskFile;
-    fn inner_mut(&mut self) -> &mut dyn DiskFile;
+    fn get_len(&self) -> io::Result<u64>;
+    fn set_len(&self, len: u64) -> io::Result<()>;
+    fn allocate(&mut self, offset: u64, len: u64) -> io::Result<()>;
     /// Return the inner file consuming self.
     fn to_inner(self: Box<Self>) -> Box<dyn DiskFile>;
     async fn fsync(&self) -> Result<()>;
@@ -358,12 +359,16 @@ impl TryFrom<File> for SingleFileDisk {
 
 #[async_trait(?Send)]
 impl AsyncDisk for SingleFileDisk {
-    fn inner(&self) -> &dyn DiskFile {
-        &self.inner as &File
+    fn get_len(&self) -> io::Result<u64> {
+        self.inner.get_len()
     }
 
-    fn inner_mut(&mut self) -> &mut dyn DiskFile {
-        &mut self.inner as &mut File
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn allocate(&mut self, offset: u64, len: u64) -> io::Result<()> {
+        self.inner.allocate(offset, len)
     }
 
     fn to_inner(self: Box<Self>) -> Box<dyn DiskFile> {

@@ -481,20 +481,20 @@ async fn resize(disk_state: &mut DiskState, new_size: u64) -> DiskControlResult 
 
     info!("Resizing block device to {} bytes", new_size);
 
-    if let Err(e) = disk_state.disk_image.inner().set_len(new_size) {
+    if let Err(e) = disk_state.disk_image.set_len(new_size) {
         error!("Resizing disk failed! {}", e);
         return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
     // Allocate new space if the disk image is not sparse.
-    if let Err(e) = disk_state.disk_image.inner_mut().allocate(0, new_size) {
+    if let Err(e) = disk_state.disk_image.allocate(0, new_size) {
         error!("Allocating disk space after resize failed! {}", e);
         return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
     disk_state.sparse = false;
 
-    if let Ok(new_disk_size) = disk_state.disk_image.inner().get_len() {
+    if let Ok(new_disk_size) = disk_state.disk_image.get_len() {
         let disk_size = disk_state.disk_size.lock().await;
         disk_size.store(new_disk_size, Ordering::Release);
     }
