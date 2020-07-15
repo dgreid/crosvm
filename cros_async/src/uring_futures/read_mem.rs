@@ -4,7 +4,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::io_source::IoSource;
@@ -17,14 +17,14 @@ use super::uring_fut::UringFutState;
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct ReadMem<'a, 'b, W: IoSource + ?Sized> {
     reader: &'a W,
-    state: UringFutState<(u64, Rc<dyn BackingMemory>, &'b [MemRegion]), Rc<dyn BackingMemory>>,
+    state: UringFutState<(u64, Arc<dyn BackingMemory>, &'b [MemRegion]), Arc<dyn BackingMemory>>,
 }
 
 impl<'a, 'b, R: IoSource + ?Sized + Unpin> ReadMem<'a, 'b, R> {
     pub(crate) fn new(
         reader: &'a R,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'b [MemRegion],
     ) -> Self {
         ReadMem {
@@ -51,7 +51,7 @@ impl<R: IoSource + ?Sized + Unpin> Future for ReadMem<'_, '_, R> {
                 Ok((
                     Pin::new(&self.reader).read_to_mem(
                         file_offset,
-                        Rc::clone(&mem),
+                        Arc::clone(&mem),
                         mem_offsets,
                     )?,
                     mem,
@@ -75,7 +75,7 @@ impl<R: IoSource + ?Sized + Unpin> Future for ReadMem<'_, '_, R> {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use futures::pin_mut;
 
@@ -89,17 +89,17 @@ mod tests {
             let f = File::open("/dev/zero").unwrap();
             let source = UringSource::new(f).unwrap();
             let v = vec![0x55u8; 64];
-            let vw = Rc::new(VecIoWrapper::from(v));
+            let vw = Arc::new(VecIoWrapper::from(v));
             let ret = source
                 .read_to_mem(
                     0,
-                    Rc::<VecIoWrapper>::clone(&vw),
+                    Arc::<VecIoWrapper>::clone(&vw),
                     &[MemRegion { offset: 0, len: 32 }],
                 )
                 .await
                 .unwrap();
             assert_eq!(32, ret);
-            let vec: Vec<u8> = match Rc::try_unwrap(vw) {
+            let vec: Vec<u8> = match Arc::try_unwrap(vw) {
                 Ok(v) => v.into(),
                 Err(_) => panic!("Too many vec refs"),
             };
@@ -108,11 +108,11 @@ mod tests {
 
             // test second half of memory too.
             let v = vec![0x55u8; 64];
-            let vw = Rc::new(VecIoWrapper::from(v));
+            let vw = Arc::new(VecIoWrapper::from(v));
             let ret = source
                 .read_to_mem(
                     0,
-                    Rc::<VecIoWrapper>::clone(&vw),
+                    Arc::<VecIoWrapper>::clone(&vw),
                     &[MemRegion {
                         offset: 32,
                         len: 32,
@@ -121,7 +121,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(32, ret);
-            let v: Vec<u8> = match Rc::try_unwrap(vw) {
+            let v: Vec<u8> = match Arc::try_unwrap(vw) {
                 Ok(v) => v.into(),
                 Err(_) => panic!("Too many vec refs"),
             };
@@ -140,11 +140,11 @@ mod tests {
             let f = File::open("/dev/zero").unwrap();
             let source = UringSource::new(f).unwrap();
             let v = vec![0x55u8; 64];
-            let vw = Rc::new(VecIoWrapper::from(v));
+            let vw = Arc::new(VecIoWrapper::from(v));
             let ret = source
                 .read_to_mem(
                     0,
-                    Rc::<VecIoWrapper>::clone(&vw),
+                    Arc::<VecIoWrapper>::clone(&vw),
                     &[MemRegion {
                         offset: 32,
                         len: 33,

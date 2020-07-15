@@ -5,7 +5,7 @@
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::io_source::IoSource;
@@ -61,7 +61,7 @@ impl<F: AsRawFd> IoSource for UringSource<F> {
     fn read_to_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation> {
         self.registered_source
@@ -71,7 +71,7 @@ impl<F: AsRawFd> IoSource for UringSource<F> {
     fn write_from_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation> {
         self.registered_source
@@ -130,7 +130,7 @@ mod tests {
     enum MemTestState<'a> {
         Init {
             file_offset: u64,
-            mem: Rc<dyn BackingMemory>,
+            mem: Arc<dyn BackingMemory>,
             mem_offsets: &'a [MemRegion],
         },
         Wait {
@@ -148,7 +148,7 @@ mod tests {
         fn new(
             io: &'a UringSource<F>,
             file_offset: u64,
-            mem: Rc<dyn BackingMemory>,
+            mem: Arc<dyn BackingMemory>,
             mem_offsets: &'a [MemRegion],
         ) -> Self {
             TestRead {
@@ -207,12 +207,12 @@ mod tests {
         });
 
         // Start with memory filled with 0x44s.
-        let buf: Rc<VecIoWrapper> = Rc::new(VecIoWrapper::from(vec![0x44; 8192]));
+        let buf: Arc<VecIoWrapper> = Arc::new(VecIoWrapper::from(vec![0x44; 8192]));
 
         let fut = TestRead::new(
             &io_obj,
             0,
-            Rc::<VecIoWrapper>::clone(&buf),
+            Arc::<VecIoWrapper>::clone(&buf),
             &[MemRegion {
                 offset: 0,
                 len: 8192,
@@ -220,7 +220,7 @@ mod tests {
         );
         pin_mut!(fut);
         assert_eq!(8192, crate::run_one_uring(fut).unwrap().unwrap());
-        let vec: Vec<u8> = match Rc::try_unwrap(buf) {
+        let vec: Vec<u8> = match Arc::try_unwrap(buf) {
             Ok(v) => v.into(),
             Err(_) => panic!("Too many vec refs"),
         };

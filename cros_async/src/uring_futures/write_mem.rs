@@ -4,7 +4,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::io_source::IoSource;
@@ -17,14 +17,14 @@ use super::uring_fut::UringFutState;
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct WriteMem<'a, 'b, W: IoSource + ?Sized> {
     writer: &'a W,
-    state: UringFutState<(u64, Rc<dyn BackingMemory>, &'b [MemRegion]), Rc<dyn BackingMemory>>,
+    state: UringFutState<(u64, Arc<dyn BackingMemory>, &'b [MemRegion]), Arc<dyn BackingMemory>>,
 }
 
 impl<'a, 'b, R: IoSource + ?Sized + Unpin> WriteMem<'a, 'b, R> {
     pub(crate) fn new(
         writer: &'a R,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'b [MemRegion],
     ) -> Self {
         WriteMem {
@@ -51,7 +51,7 @@ impl<R: IoSource + ?Sized + Unpin> Future for WriteMem<'_, '_, R> {
                 Ok((
                     Pin::new(&self.writer).write_from_mem(
                         file_offset,
-                        Rc::clone(&mem),
+                        Arc::clone(&mem),
                         mem_offsets,
                     )?,
                     mem,
@@ -75,7 +75,7 @@ impl<R: IoSource + ?Sized + Unpin> Future for WriteMem<'_, '_, R> {
 #[cfg(test)]
 mod tests {
     use std::fs::OpenOptions;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use futures::pin_mut;
 
@@ -93,7 +93,7 @@ mod tests {
                 .unwrap();
             let source = UringSource::new(f).unwrap();
             let v = vec![0x55u8; 64];
-            let vw = Rc::new(crate::uring_mem::VecIoWrapper::from(v));
+            let vw = Arc::new(crate::uring_mem::VecIoWrapper::from(v));
             let ret = source
                 .write_from_mem(0, vw, &[MemRegion { offset: 0, len: 32 }])
                 .await

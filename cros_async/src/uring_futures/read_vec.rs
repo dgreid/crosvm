@@ -4,7 +4,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::io_source::IoSource;
@@ -17,14 +17,14 @@ use super::uring_fut::UringFutState;
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct ReadVec<'a, R: IoSource + ?Sized> {
     reader: &'a R,
-    state: UringFutState<(u64, Rc<VecIoWrapper>), Rc<VecIoWrapper>>,
+    state: UringFutState<(u64, Arc<VecIoWrapper>), Arc<VecIoWrapper>>,
 }
 
 impl<'a, R: IoSource + ?Sized + Unpin> ReadVec<'a, R> {
     pub(crate) fn new(reader: &'a R, file_offset: u64, vec: Vec<u8>) -> Self {
         ReadVec {
             reader,
-            state: UringFutState::new((file_offset, Rc::new(VecIoWrapper::from(vec)))),
+            state: UringFutState::new((file_offset, Arc::new(VecIoWrapper::from(vec)))),
         }
     }
 }
@@ -39,7 +39,7 @@ impl<R: IoSource + ?Sized + Unpin> Future for ReadVec<'_, R> {
                 Ok((
                     Pin::new(&self.reader).read_to_mem(
                         file_offset,
-                        Rc::<VecIoWrapper>::clone(&wrapped_vec),
+                        Arc::<VecIoWrapper>::clone(&wrapped_vec),
                         &[MemRegion {
                             offset: 0,
                             len: wrapped_vec.len(),
@@ -61,7 +61,7 @@ impl<R: IoSource + ?Sized + Unpin> Future for ReadVec<'_, R> {
             Poll::Ready((r, wrapped_vec)) => match r {
                 Ok(r) => Poll::Ready(Ok((
                     r,
-                    match Rc::try_unwrap(wrapped_vec) {
+                    match Arc::try_unwrap(wrapped_vec) {
                         Ok(v) => v.into(),
                         Err(_) => {
                             panic!("too many refs on vec");

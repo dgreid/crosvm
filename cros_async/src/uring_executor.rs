@@ -37,18 +37,18 @@
 //!
 //! What if the kernel's reference to the buffer outlives the buffer itself?  This could happen if a
 //! read operation was submitted, then the memory is dropped.  To solve this, the executor takes an
-//! Rc to the backing memory. Vecs being read to are also wrapped in an Rc before being passed to
-//! the executor.  The executor holds the Rc and ensures all operations are complete before dropping
+//! Arc to the backing memory. Vecs being read to are also wrapped in an Arc before being passed to
+//! the executor.  The executor holds the Arc and ensures all operations are complete before dropping
 //! it, that guarantees the memory is valid for the duration.
 //!
 //! The buffers _have_ to be on the heap. Because we don't have a way to cancel a future if it is
 //! dropped(can't rely on drop running), there is no way to ensure the kernel's buffer remains valid
-//! until the operation completes unless the executor holds an Rc to the memory on the heap.
+//! until the operation completes unless the executor holds an Arc to the memory on the heap.
 //!
 //! ## Using `Vec` for reads/writes.
 //!
 //! There is a convenience wrapper `VecIoWrapper` provided for fully owned vectors. This type
-//! ensures that only the kernel is allowed to access the `Vec` and wraps the the `Vec` in an Rc to
+//! ensures that only the kernel is allowed to access the `Vec` and wraps the the `Vec` in an Arc to
 //! ensure it lives long enough.
 
 use std::cell::RefCell;
@@ -61,6 +61,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::task::Waker;
 use std::task::{Context, Poll};
 
@@ -175,7 +176,7 @@ impl RegisteredSource {
     pub fn start_read_to_mem(
         &self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         iovecs: &[MemRegion],
     ) -> Result<PendingOperation> {
         let op = IoOperation::ReadToVectored {
@@ -189,7 +190,7 @@ impl RegisteredSource {
     pub fn start_write_from_mem(
         &self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         iovecs: &[MemRegion],
     ) -> Result<PendingOperation> {
         let op = IoOperation::WriteFromVectored {
@@ -274,7 +275,7 @@ impl RingWakerState {
     }
 
     fn deregister_source(tag: &RegisteredSourceTag) {
-        // There isn't any need to pull pending ops out, the all have Rc's to the file and mem they
+        // There isn't any need to pull pending ops out, the all have Arc's to the file and mem they
         // need.let them complete. deregister with pending ops is not a common path no need to
         // optimize that case yet.
         let _ = Self::with(|state| {
@@ -355,7 +356,7 @@ impl RingWakerState {
     fn submit_read_to_vectored(
         &mut self,
         source_tag: &RegisteredSourceTag,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         offset: u64,
         addrs: &[MemRegion],
     ) -> Result<WakerToken> {
@@ -377,7 +378,7 @@ impl RingWakerState {
             .iter()
             .map(|&mem_range| mem.get_iovec(mem_range).unwrap().iovec());
         unsafe {
-            // Safe because all the addresses are within the Memory that an Rc is kept for the
+            // Safe because all the addresses are within the Memory that an Arc is kept for the
             // duration to ensure the memory is valid while the kernel accesses it.
             self.ctx
                 .add_readv_iter(iovecs, source.as_raw_fd(), offset, self.next_op_token)
@@ -398,7 +399,7 @@ impl RingWakerState {
     fn submit_write_from_vectored(
         &mut self,
         source_tag: &RegisteredSourceTag,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         offset: u64,
         addrs: &[MemRegion],
     ) -> Result<WakerToken> {
@@ -420,7 +421,7 @@ impl RingWakerState {
             .iter()
             .map(|&mem_range| mem.get_iovec(mem_range).unwrap().iovec());
         unsafe {
-            // Safe because all the addresses are within the Memory that an Rc is kept for the
+            // Safe because all the addresses are within the Memory that an Arc is kept for the
             // duration to ensure the memory is valid while the kernel accesses it.
             self.ctx
                 .add_writev_iter(iovecs, source.as_raw_fd(), offset, self.next_op_token)
@@ -565,12 +566,12 @@ unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
 
 enum IoOperation<'a> {
     ReadToVectored {
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         file_offset: u64,
         addrs: &'a [MemRegion],
     },
     WriteFromVectored {
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         file_offset: u64,
         addrs: &'a [MemRegion],
     },

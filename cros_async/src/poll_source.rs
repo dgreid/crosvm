@@ -11,7 +11,7 @@ use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use libc::O_NONBLOCK;
@@ -109,7 +109,7 @@ impl<F: AsRawFd> PollSource<F> {
     pub fn read_to_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'a [MemRegion],
     ) -> PollReadMem<'a, F>
     where
@@ -147,7 +147,7 @@ impl<F: AsRawFd> PollSource<F> {
     pub fn write_from_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'a [MemRegion],
     ) -> PollWriteMem<'a, F>
     where
@@ -409,7 +409,7 @@ impl<'a, F: AsRawFd> Future for PollWriteVec<'a, F> {
 pub struct PollReadMem<'a, F: AsRawFd> {
     reader: &'a PollSource<F>,
     file_offset: u64,
-    mem: Rc<dyn BackingMemory>,
+    mem: Arc<dyn BackingMemory>,
     mem_offsets: &'a [MemRegion],
     pending_waker: Option<PendingWaker>,
 }
@@ -477,7 +477,7 @@ impl<'a, F: AsRawFd> Future for PollReadMem<'a, F> {
 pub struct PollWriteMem<'a, F: AsRawFd> {
     writer: &'a PollSource<F>,
     file_offset: u64,
-    mem: Rc<dyn BackingMemory>,
+    mem: Arc<dyn BackingMemory>,
     mem_offsets: &'a [MemRegion],
     pending_waker: Option<PendingWaker>,
 }

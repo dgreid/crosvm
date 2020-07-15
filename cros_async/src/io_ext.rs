@@ -16,7 +16,7 @@
 //! Operations can only access memory in a `Vec` or an implementor of `BackingMemory`. See the
 //! `URingExecutor` documentation for an explaination of why.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::io_source::IoSource;
 use crate::uring_futures;
@@ -48,7 +48,7 @@ pub trait IoSourceExt: IoSource {
     fn read_to_mem<'a, 'b>(
         &'a self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'b [MemRegion],
     ) -> uring_futures::ReadMem<'a, 'b, Self>
     where
@@ -61,7 +61,7 @@ pub trait IoSourceExt: IoSource {
     fn write_from_mem<'a, 'b>(
         &'a self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'b [MemRegion],
     ) -> uring_futures::WriteMem<'a, 'b, Self>
     where

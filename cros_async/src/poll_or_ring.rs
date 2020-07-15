@@ -6,7 +6,7 @@
 
 use std::fmt::{self, Display};
 use std::os::unix::io::AsRawFd;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::io_ext::IoSourceExt;
 use crate::poll_source::PollSource;
@@ -139,7 +139,7 @@ impl<F: AsRawFd + Unpin> PollOrRing<F> {
     pub async fn read_to_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'a [MemRegion],
     ) -> Result<usize>
     where
@@ -163,7 +163,7 @@ impl<F: AsRawFd + Unpin> PollOrRing<F> {
     pub async fn write_from_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Rc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory>,
         mem_offsets: &'a [MemRegion],
     ) -> Result<usize>
     where
@@ -356,11 +356,11 @@ mod tests {
     #[test]
     fn readmem() {
         async fn go<F: AsRawFd + Unpin>(async_source: PollOrRing<F>) {
-            let mem = Rc::new(VecIoWrapper::from(vec![0x55u8; 8192]));
+            let mem = Arc::new(VecIoWrapper::from(vec![0x55u8; 8192]));
             let ret = async_source
                 .read_to_mem(
                     0,
-                    Rc::<VecIoWrapper>::clone(&mem),
+                    Arc::<VecIoWrapper>::clone(&mem),
                     &[
                         MemRegion { offset: 0, len: 32 },
                         MemRegion {
@@ -372,7 +372,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(ret, 32 + 56);
-            let vec: Vec<u8> = match Rc::try_unwrap(mem) {
+            let vec: Vec<u8> = match Arc::try_unwrap(mem) {
                 Ok(v) => v.into(),
                 Err(_) => panic!("Too many vec refs"),
             };
@@ -404,11 +404,11 @@ mod tests {
     #[test]
     fn writemem() {
         async fn go<F: AsRawFd + Unpin>(async_source: PollOrRing<F>) {
-            let mem = Rc::new(VecIoWrapper::from(vec![0x55u8; 8192]));
+            let mem = Arc::new(VecIoWrapper::from(vec![0x55u8; 8192]));
             let ret = async_source
                 .write_from_mem(
                     0,
-                    Rc::<VecIoWrapper>::clone(&mem),
+                    Arc::<VecIoWrapper>::clone(&mem),
                     &[MemRegion { offset: 0, len: 32 }],
                 )
                 .await
