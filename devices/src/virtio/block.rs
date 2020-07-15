@@ -294,12 +294,12 @@ async fn process_one_request(
     avail_desc: DescriptorChain<'_>,
     disk_state: Rc<RefCell<DiskState>>,
     flush_timer_armed: Rc<AtomicBool>,
-    mem: &Rc<GuestMemory>,
+    mem: &Arc<GuestMemory>,
 ) -> result::Result<usize, ExecuteError> {
     let mut reader =
-        RegionReader::new(Rc::clone(mem), avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
+        RegionReader::new(Arc::clone(mem), avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
     let mut writer =
-        RegionWriter::new(Rc::clone(mem), avail_desc).map_err(ExecuteError::Descriptor)?;
+        RegionWriter::new(Arc::clone(mem), avail_desc).map_err(ExecuteError::Descriptor)?;
 
     // The last byte of the buffer is virtio_blk_req::status.
     // Split it into a separate RegionWriter so that status_writer is the final byte and
@@ -330,7 +330,7 @@ async fn process_one_request_task(
     queue: Rc<RefCell<Queue>>,
     descriptor_index: u16,
     disk_state: Rc<RefCell<DiskState>>,
-    mem: Rc<GuestMemory>,
+    mem: Arc<GuestMemory>,
     interrupt: Rc<RefCell<Interrupt>>,
     flush_timer_armed: Rc<AtomicBool>,
 ) -> () {
@@ -363,7 +363,7 @@ async fn handle_queue(
     interrupt: Rc<RefCell<Interrupt>>,
     flush_timer_armed: Rc<AtomicBool>,
 ) {
-    let mem = Rc::new(mem.clone());
+    let mem = Arc::new(mem.clone());
     loop {
         let descriptor_index = queue.borrow_mut().pop_index(&mem);
         let descriptor_index = match descriptor_index {
@@ -384,7 +384,7 @@ async fn handle_queue(
             Rc::clone(&queue),
             descriptor_index,
             Rc::clone(&disk_state),
-            Rc::clone(&mem),
+            Arc::clone(&mem),
             Rc::clone(&interrupt),
             Rc::clone(&flush_timer_armed),
         ))) {

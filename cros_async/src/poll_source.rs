@@ -109,7 +109,7 @@ impl<F: AsRawFd> PollSource<F> {
     pub fn read_to_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         mem_offsets: &'a [MemRegion],
     ) -> PollReadMem<'a, F>
     where
@@ -147,7 +147,7 @@ impl<F: AsRawFd> PollSource<F> {
     pub fn write_from_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         mem_offsets: &'a [MemRegion],
     ) -> PollWriteMem<'a, F>
     where
@@ -409,7 +409,7 @@ impl<'a, F: AsRawFd> Future for PollWriteVec<'a, F> {
 pub struct PollReadMem<'a, F: AsRawFd> {
     reader: &'a PollSource<F>,
     file_offset: u64,
-    mem: Arc<dyn BackingMemory>,
+    mem: Arc<dyn BackingMemory + Send + Sync>,
     mem_offsets: &'a [MemRegion],
     pending_waker: Option<PendingWaker>,
 }
@@ -421,7 +421,7 @@ impl<'a, F: AsRawFd> Future for PollReadMem<'a, F> {
         fn do_readv(
             fd: RawFd,
             file_offset: u64,
-            mem: &dyn BackingMemory,
+            mem: &(dyn BackingMemory + Send + Sync),
             mem_offsets: &[MemRegion],
         ) -> sys_util::Result<usize> {
             let mut iovecs = mem_offsets
@@ -477,7 +477,7 @@ impl<'a, F: AsRawFd> Future for PollReadMem<'a, F> {
 pub struct PollWriteMem<'a, F: AsRawFd> {
     writer: &'a PollSource<F>,
     file_offset: u64,
-    mem: Arc<dyn BackingMemory>,
+    mem: Arc<dyn BackingMemory + Send + Sync>,
     mem_offsets: &'a [MemRegion],
     pending_waker: Option<PendingWaker>,
 }
@@ -489,7 +489,7 @@ impl<'a, F: AsRawFd> Future for PollWriteMem<'a, F> {
         fn do_writev(
             fd: RawFd,
             file_offset: u64,
-            mem: &dyn BackingMemory,
+            mem: &(dyn BackingMemory + Send + Sync),
             mem_offsets: &[MemRegion],
         ) -> sys_util::Result<usize> {
             let iovecs = mem_offsets

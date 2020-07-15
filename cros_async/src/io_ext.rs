@@ -48,7 +48,7 @@ pub trait IoSourceExt: IoSource {
     fn read_to_mem<'a, 'b>(
         &'a self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &'b [MemRegion],
     ) -> uring_futures::ReadMem<'a, 'b, Self>
     where
@@ -61,7 +61,7 @@ pub trait IoSourceExt: IoSource {
     fn write_from_mem<'a, 'b>(
         &'a self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &'b [MemRegion],
     ) -> uring_futures::WriteMem<'a, 'b, Self>
     where

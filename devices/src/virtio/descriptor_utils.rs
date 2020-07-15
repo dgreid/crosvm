@@ -11,8 +11,8 @@ use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::mem::{size_of, MaybeUninit};
 use std::ptr::copy_nonoverlapping;
-use std::rc::Rc;
 use std::result;
+use std::sync::Arc;
 
 use cros_async::MemRegion;
 use data_model::{DataInit, Le16, Le32, Le64, VolatileMemoryError, VolatileSlice};
@@ -186,7 +186,7 @@ impl DescriptorChainRegions {
 /// descriptor is encountered.
 #[derive(Clone)]
 pub struct RegionReader {
-    mem: Rc<GuestMemory>,
+    mem: Arc<GuestMemory>,
     regions: DescriptorChainRegions,
 }
 
@@ -210,7 +210,7 @@ impl<'a, T: DataInit> Iterator for RegionReaderIterator<'a, T> {
 
 impl RegionReader {
     /// Construct a new RegionReader wrapper over `desc_chain`.
-    pub fn new(mem: Rc<GuestMemory>, desc_chain: DescriptorChain) -> Result<RegionReader> {
+    pub fn new(mem: Arc<GuestMemory>, desc_chain: DescriptorChain) -> Result<RegionReader> {
         // TODO(jstaron): Update this code to take the indirect descriptors into account.
         let mut total_len: usize = 0;
         let regions = desc_chain
@@ -293,7 +293,7 @@ impl RegionReader {
     ) -> disk::Result<usize> {
         let mem_regions = self.regions.get_remaining_with_count(count);
         let written = dst
-            .write_from_mem(off, Rc::clone(&self.mem), &mem_regions)
+            .write_from_mem(off, Arc::clone(&self.mem), &mem_regions)
             .await?;
         self.regions.consume(written);
         Ok(written)
@@ -352,7 +352,7 @@ impl RegionReader {
     /// returned `RegionReader` will not be able to read any bytes.
     pub fn split_at(&mut self, offset: usize) -> RegionReader {
         RegionReader {
-            mem: Rc::clone(&self.mem),
+            mem: Arc::clone(&self.mem),
             regions: self.regions.split_at(offset),
         }
     }
@@ -397,13 +397,13 @@ impl io::Read for RegionReader {
 /// assume that all following descriptors are writable.
 #[derive(Clone)]
 pub struct RegionWriter {
-    mem: Rc<GuestMemory>,
+    mem: Arc<GuestMemory>,
     regions: DescriptorChainRegions,
 }
 
 impl RegionWriter {
     /// Construct a new RegionWriter wrapper over `desc_chain`.
-    pub fn new(mem: Rc<GuestMemory>, desc_chain: DescriptorChain) -> Result<RegionWriter> {
+    pub fn new(mem: Arc<GuestMemory>, desc_chain: DescriptorChain) -> Result<RegionWriter> {
         let mut total_len: usize = 0;
         let regions = desc_chain
             .into_iter()
@@ -473,7 +473,9 @@ impl RegionWriter {
         off: u64,
     ) -> disk::Result<usize> {
         let regions = self.regions.get_remaining_with_count(count);
-        let read = src.read_to_mem(off, Rc::clone(&self.mem), &regions).await?;
+        let read = src
+            .read_to_mem(off, Arc::clone(&self.mem), &regions)
+            .await?;
         self.regions.consume(read);
         Ok(read)
     }
@@ -509,7 +511,7 @@ impl RegionWriter {
     /// the returned `RegionWriter` will not be able to write any bytes.
     pub fn split_at(&mut self, offset: usize) -> RegionWriter {
         RegionWriter {
-            mem: Rc::clone(&self.mem),
+            mem: Arc::clone(&self.mem),
             regions: self.regions.split_at(offset),
         }
     }
@@ -1774,7 +1776,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -1790,7 +1792,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
         assert_eq!(reader.available_bytes(), 106);
         assert_eq!(reader.bytes_read(), 0);
 
@@ -1816,7 +1818,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -1832,7 +1834,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut writer =
-            RegionWriter::new(Rc::clone(&memory), chain).expect("failed to create RegionWriter");
+            RegionWriter::new(Arc::clone(&memory), chain).expect("failed to create RegionWriter");
         assert_eq!(writer.available_bytes(), 106);
         assert_eq!(writer.bytes_written(), 0);
 
@@ -1858,7 +1860,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -1869,7 +1871,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
         assert_eq!(reader.available_bytes(), 0);
         assert_eq!(reader.bytes_read(), 0);
 
@@ -1884,7 +1886,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -1895,7 +1897,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut writer =
-            RegionWriter::new(Rc::clone(&memory), chain).expect("failed to create RegionWriter");
+            RegionWriter::new(Arc::clone(&memory), chain).expect("failed to create RegionWriter");
         assert_eq!(writer.available_bytes(), 0);
         assert_eq!(writer.bytes_written(), 0);
 
@@ -1913,7 +1915,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -1925,7 +1927,7 @@ mod tests {
         .expect("create_descriptor_chain failed");
 
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         // Open a file in read-only mode so writes to it to trigger an I/O error.
         let ro_file = File::open("/dev/zero").expect("failed to open /dev/zero");
@@ -1949,7 +1951,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -1961,7 +1963,7 @@ mod tests {
         .expect("create_descriptor_chain failed");
 
         let mut writer =
-            RegionWriter::new(Rc::clone(&memory), chain).expect("failed to create RegionWriter");
+            RegionWriter::new(Arc::clone(&memory), chain).expect("failed to create RegionWriter");
 
         let tempdir = TempDir::new().unwrap();
         let mut path = tempdir.path().to_owned();
@@ -1991,7 +1993,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2008,10 +2010,10 @@ mod tests {
             0,
         )
         .expect("create_descriptor_chain failed");
-        let mut reader = RegionReader::new(Rc::clone(&memory), chain.clone())
+        let mut reader = RegionReader::new(Arc::clone(&memory), chain.clone())
             .expect("failed to create RegionReader");
         let mut writer =
-            RegionWriter::new(Rc::clone(&memory), chain).expect("failed to create RegionWriter");
+            RegionWriter::new(Arc::clone(&memory), chain).expect("failed to create RegionWriter");
 
         assert_eq!(reader.bytes_read(), 0);
         assert_eq!(writer.bytes_written(), 0);
@@ -2041,7 +2043,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let secret: Le32 = 0x12345678.into();
 
@@ -2054,7 +2056,7 @@ mod tests {
             123,
         )
         .expect("create_descriptor_chain failed");
-        let mut writer = RegionWriter::new(Rc::clone(&memory), chain_writer)
+        let mut writer = RegionWriter::new(Arc::clone(&memory), chain_writer)
             .expect("failed to create RegionWriter");
         if let Err(_) = writer.write_obj(secret) {
             panic!("write_obj should not fail here");
@@ -2069,7 +2071,7 @@ mod tests {
             123,
         )
         .expect("create_descriptor_chain failed");
-        let mut reader = RegionReader::new(Rc::clone(&memory), chain_reader)
+        let mut reader = RegionReader::new(Arc::clone(&memory), chain_reader)
             .expect("failed to create RegionReader");
         match reader.read_obj::<Le32>() {
             Err(_) => panic!("read_obj should not fail here"),
@@ -2082,7 +2084,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2094,7 +2096,7 @@ mod tests {
         .expect("create_descriptor_chain failed");
 
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let mut buf = Vec::with_capacity(1024);
         buf.resize(1024, 0);
@@ -2113,7 +2115,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2131,7 +2133,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let other = reader.split_at(32);
         assert_eq!(reader.available_bytes(), 32);
@@ -2143,7 +2145,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2161,7 +2163,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let other = reader.split_at(24);
         assert_eq!(reader.available_bytes(), 24);
@@ -2173,7 +2175,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2191,7 +2193,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let other = reader.split_at(128);
         assert_eq!(reader.available_bytes(), 128);
@@ -2203,7 +2205,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2221,7 +2223,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let other = reader.split_at(0);
         assert_eq!(reader.available_bytes(), 0);
@@ -2233,7 +2235,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2251,7 +2253,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let other = reader.split_at(256);
         assert_eq!(
@@ -2266,7 +2268,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2277,7 +2279,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut reader =
-            RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+            RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let mut buf = vec![0u8; 64];
         assert_eq!(
@@ -2291,7 +2293,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2302,7 +2304,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
         let mut writer =
-            RegionWriter::new(Rc::clone(&memory), chain).expect("failed to create RegionWriter");
+            RegionWriter::new(Arc::clone(&memory), chain).expect("failed to create RegionWriter");
 
         let buf = vec![0xdeu8; 64];
         assert_eq!(
@@ -2316,7 +2318,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
         let vs: Vec<Le64> = vec![
             0x0101010101010101.into(),
             0x0202020202020202.into(),
@@ -2331,7 +2333,7 @@ mod tests {
             0,
         )
         .expect("create_descriptor_chain failed");
-        let mut writer = RegionWriter::new(Rc::clone(&memory), write_chain)
+        let mut writer = RegionWriter::new(Arc::clone(&memory), write_chain)
             .expect("failed to create RegionWriter");
         writer
             .consume(vs.clone())
@@ -2345,7 +2347,7 @@ mod tests {
             0,
         )
         .expect("create_descriptor_chain failed");
-        let mut reader = RegionReader::new(Rc::clone(&memory), read_chain)
+        let mut reader = RegionReader::new(Arc::clone(&memory), read_chain)
             .expect("failed to create RegionReader");
         let vs_read = reader
             .collect::<io::Result<Vec<Le64>>, _>()
@@ -2358,7 +2360,7 @@ mod tests {
         use DescriptorType::*;
 
         let memory_start_addr = GuestAddress(0x0);
-        let memory = Rc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
+        let memory = Arc::new(GuestMemory::new(&vec![(memory_start_addr, 0x10000)]).unwrap());
 
         let chain = create_descriptor_chain(
             &memory,
@@ -2379,7 +2381,7 @@ mod tests {
         let RegionReader {
             mem: _mem,
             mut regions,
-        } = RegionReader::new(Rc::clone(&memory), chain).expect("failed to create RegionReader");
+        } = RegionReader::new(Arc::clone(&memory), chain).expect("failed to create RegionReader");
 
         let drain = regions
             .get_remaining_with_count(::std::usize::MAX)

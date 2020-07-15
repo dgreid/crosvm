@@ -19,3 +19,4 @@ features = ["alloc"]
 
 [dev-dependencies]
 tempfile = { path = "../tempfile" }
+async-trait = "*"

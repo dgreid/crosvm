@@ -176,7 +176,7 @@ impl RegisteredSource {
     pub fn start_read_to_mem(
         &self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         iovecs: &[MemRegion],
     ) -> Result<PendingOperation> {
         let op = IoOperation::ReadToVectored {
@@ -190,7 +190,7 @@ impl RegisteredSource {
     pub fn start_write_from_mem(
         &self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         iovecs: &[MemRegion],
     ) -> Result<PendingOperation> {
         let op = IoOperation::WriteFromVectored {
@@ -356,7 +356,7 @@ impl RingWakerState {
     fn submit_read_to_vectored(
         &mut self,
         source_tag: &RegisteredSourceTag,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         offset: u64,
         addrs: &[MemRegion],
     ) -> Result<WakerToken> {
@@ -399,7 +399,7 @@ impl RingWakerState {
     fn submit_write_from_vectored(
         &mut self,
         source_tag: &RegisteredSourceTag,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         offset: u64,
         addrs: &[MemRegion],
     ) -> Result<WakerToken> {
@@ -566,12 +566,12 @@ unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
 
 enum IoOperation<'a> {
     ReadToVectored {
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         file_offset: u64,
         addrs: &'a [MemRegion],
     },
     WriteFromVectored {
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Send + Sync>,
         file_offset: u64,
         addrs: &'a [MemRegion],
     },

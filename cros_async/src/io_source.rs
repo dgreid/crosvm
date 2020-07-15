@@ -18,7 +18,7 @@ pub trait IoSource {
     fn read_to_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation>;
 
@@ -27,7 +27,7 @@ pub trait IoSource {
     fn write_from_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation>;
 
@@ -66,7 +66,7 @@ macro_rules! deref_io_source {
         fn read_to_mem(
             self: Pin<&Self>,
             file_offset: u64,
-            mem: Arc<dyn BackingMemory>,
+            mem: Arc<dyn BackingMemory + Sync + Send>,
             mem_offsets: &[MemRegion],
         ) -> Result<PendingOperation> {
             Pin::new(&**self).read_to_mem(file_offset, mem, mem_offsets)
@@ -75,7 +75,7 @@ macro_rules! deref_io_source {
         fn write_from_mem(
             self: Pin<&Self>,
             file_offset: u64,
-            mem: Arc<dyn BackingMemory>,
+            mem: Arc<dyn BackingMemory + Sync + Send>,
             mem_offsets: &[MemRegion],
         ) -> Result<PendingOperation> {
             Pin::new(&**self).write_from_mem(file_offset, mem, mem_offsets)
@@ -128,7 +128,7 @@ where
     fn read_to_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation> {
         self.get_ref()
@@ -139,7 +139,7 @@ where
     fn write_from_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation> {
         self.get_ref()

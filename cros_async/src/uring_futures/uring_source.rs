@@ -61,7 +61,7 @@ impl<F: AsRawFd> IoSource for UringSource<F> {
     fn read_to_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation> {
         self.registered_source
@@ -71,7 +71,7 @@ impl<F: AsRawFd> IoSource for UringSource<F> {
     fn write_from_mem(
         self: Pin<&Self>,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &[MemRegion],
     ) -> Result<PendingOperation> {
         self.registered_source
@@ -130,7 +130,7 @@ mod tests {
     enum MemTestState<'a> {
         Init {
             file_offset: u64,
-            mem: Arc<dyn BackingMemory>,
+            mem: Arc<dyn BackingMemory + Sync + Send>,
             mem_offsets: &'a [MemRegion],
         },
         Wait {
@@ -148,7 +148,7 @@ mod tests {
         fn new(
             io: &'a UringSource<F>,
             file_offset: u64,
-            mem: Arc<dyn BackingMemory>,
+            mem: Arc<dyn BackingMemory + Sync + Send>,
             mem_offsets: &'a [MemRegion],
         ) -> Self {
             TestRead {

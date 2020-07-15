@@ -17,14 +17,17 @@ use super::uring_fut::UringFutState;
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct ReadMem<'a, 'b, W: IoSource + ?Sized> {
     reader: &'a W,
-    state: UringFutState<(u64, Arc<dyn BackingMemory>, &'b [MemRegion]), Arc<dyn BackingMemory>>,
+    state: UringFutState<
+        (u64, Arc<dyn BackingMemory + Sync + Send>, &'b [MemRegion]),
+        Arc<dyn BackingMemory + Sync + Send>,
+    >,
 }
 
 impl<'a, 'b, R: IoSource + ?Sized + Unpin> ReadMem<'a, 'b, R> {
     pub(crate) fn new(
         reader: &'a R,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &'b [MemRegion],
     ) -> Self {
         ReadMem {

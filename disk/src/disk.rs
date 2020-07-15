@@ -7,7 +7,7 @@ use std::convert::TryFrom;
 use std::fmt::{self, Debug, Display};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use libc::EINVAL;
@@ -318,7 +318,7 @@ pub fn create_disk_file(raw_image: File) -> Result<Box<dyn DiskFile>> {
 }
 
 /// An asynchronously accessible disk.
-#[async_trait(?Send)]
+#[async_trait]
 pub trait AsyncDisk {
     fn get_len(&self) -> io::Result<u64>;
     fn set_len(&self, len: u64) -> io::Result<()>;
@@ -329,13 +329,13 @@ pub trait AsyncDisk {
     async fn read_to_mem<'a>(
         &self,
         file_offset: u64,
-        mem: Rc<GuestMemory>,
+        mem: Arc<GuestMemory>,
         mem_offsets: &'a [cros_async::MemRegion],
     ) -> Result<usize>;
     async fn write_from_mem<'a>(
         &self,
         file_offset: u64,
-        mem: Rc<GuestMemory>,
+        mem: Arc<GuestMemory>,
         mem_offsets: &'a [cros_async::MemRegion],
     ) -> Result<usize>;
     async fn punch_hole(&self, file_offset: u64, length: u64) -> Result<()>;
@@ -357,7 +357,7 @@ impl TryFrom<File> for SingleFileDisk {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl AsyncDisk for SingleFileDisk {
     fn get_len(&self) -> io::Result<u64> {
         self.inner.get_len()
@@ -382,7 +382,7 @@ impl AsyncDisk for SingleFileDisk {
     async fn read_to_mem<'a>(
         &self,
         file_offset: u64,
-        mem: Rc<GuestMemory>,
+        mem: Arc<GuestMemory>,
         mem_offsets: &'a [cros_async::MemRegion],
     ) -> Result<usize> {
         self.inner
@@ -394,7 +394,7 @@ impl AsyncDisk for SingleFileDisk {
     async fn write_from_mem<'a>(
         &self,
         file_offset: u64,
-        mem: Rc<GuestMemory>,
+        mem: Arc<GuestMemory>,
         mem_offsets: &'a [cros_async::MemRegion],
     ) -> Result<usize> {
         self.inner
@@ -459,13 +459,13 @@ mod tests {
     #[test]
     fn read_async() {
         async fn read_zeros_async() {
-            let guest_mem = Rc::new(GuestMemory::new(&[(GuestAddress(0), 4096)]).unwrap());
+            let guest_mem = Arc::new(GuestMemory::new(&[(GuestAddress(0), 4096)]).unwrap());
             let f = File::open("/dev/zero").unwrap();
             let async_file = SingleFileDisk::try_from(f).unwrap();
             let result = async_file
                 .read_to_mem(
                     0,
-                    Rc::clone(&guest_mem),
+                    Arc::clone(&guest_mem),
                     &[MemRegion { offset: 0, len: 48 }],
                 )
                 .await;
@@ -480,13 +480,13 @@ mod tests {
     #[test]
     fn write_async() {
         async fn write_zeros_async() {
-            let guest_mem = Rc::new(GuestMemory::new(&[(GuestAddress(0), 4096)]).unwrap());
+            let guest_mem = Arc::new(GuestMemory::new(&[(GuestAddress(0), 4096)]).unwrap());
             let f = OpenOptions::new().write(true).open("/dev/null").unwrap();
             let async_file = SingleFileDisk::try_from(f).unwrap();
             let result = async_file
                 .write_from_mem(
                     0,
-                    Rc::clone(&guest_mem),
+                    Arc::clone(&guest_mem),
                     &[MemRegion { offset: 0, len: 48 }],
                 )
                 .await;

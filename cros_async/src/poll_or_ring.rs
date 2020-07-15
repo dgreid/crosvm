@@ -139,7 +139,7 @@ impl<F: AsRawFd + Unpin> PollOrRing<F> {
     pub async fn read_to_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &'a [MemRegion],
     ) -> Result<usize>
     where
@@ -163,7 +163,7 @@ impl<F: AsRawFd + Unpin> PollOrRing<F> {
     pub async fn write_from_mem<'a>(
         &'a self,
         file_offset: u64,
-        mem: Arc<dyn BackingMemory>,
+        mem: Arc<dyn BackingMemory + Sync + Send>,
         mem_offsets: &'a [MemRegion],
     ) -> Result<usize>
     where
