@@ -7,6 +7,7 @@ use std::convert::TryFrom;
 use std::fmt::{self, Debug, Display};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -292,10 +293,10 @@ pub fn detect_image_type(file: &File) -> Result<ImageType> {
 }
 
 /// Inspect the image file type and create an appropriate disk file to match it.
-pub fn create_disk_file(raw_image: File) -> Result<Box<dyn DiskFile>> {
+pub fn create_disk_file(raw_image: File) -> Result<Box<dyn AsyncDisk>> {
     let image_type = detect_image_type(&raw_image)?;
     Ok(match image_type {
-        ImageType::Raw => Box::new(raw_image) as Box<dyn DiskFile>,
+        ImageType::Raw => Box::new(SingleFileDisk::try_from(raw_image)?) as Box<dyn AsyncDisk>,
         ImageType::Qcow2 => {
             panic!("qcow");
             //Box::new(QcowFile::from(raw_image).map_err(Error::QcowError)?) as Box<dyn DiskFile>
@@ -323,6 +324,7 @@ pub trait AsyncDisk {
     fn get_len(&self) -> io::Result<u64>;
     fn set_len(&self, len: u64) -> io::Result<()>;
     fn allocate(&mut self, offset: u64, len: u64) -> io::Result<()>;
+    fn as_raw_fds(&self) -> Vec<RawFd>;
     /// Return the inner file consuming self.
     fn to_inner(self: Box<Self>) -> Box<dyn DiskFile>;
     async fn fsync(&self) -> Result<()>;
@@ -369,6 +371,10 @@ impl AsyncDisk for SingleFileDisk {
 
     fn allocate(&mut self, offset: u64, len: u64) -> io::Result<()> {
         self.inner.allocate(offset, len)
+    }
+
+    fn as_raw_fds(&self) -> Vec<RawFd> {
+        self.inner.as_raw_fds()
     }
 
     fn to_inner(self: Box<Self>) -> Box<dyn DiskFile> {

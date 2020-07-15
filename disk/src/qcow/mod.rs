@@ -444,18 +444,20 @@ impl QcowFile {
             return Err(Error::FileTooBig(header.size));
         }
 
-        let backing_file = if let Some(backing_file_path) = header.backing_file_path.as_ref() {
-            let path = backing_file_path.clone();
-            let backing_raw_file = OpenOptions::new()
-                .read(true)
-                .open(path)
-                .map_err(Error::BackingFileIo)?;
-            let backing_file = create_disk_file(backing_raw_file)
-                .map_err(|e| Error::BackingFileOpen(Box::new(e)))?;
-            Some(backing_file)
-        } else {
-            None
-        };
+        /*
+                let backing_file = if let Some(backing_file_path) = header.backing_file_path.as_ref() {
+                    let path = backing_file_path.clone();
+                    let backing_raw_file = OpenOptions::new()
+                        .read(true)
+                        .open(path)
+                        .map_err(Error::BackingFileIo)?;
+                let backing_file = create_disk_file(backing_raw_file)
+                    .map_err(|e| Error::BackingFileOpen(Box::new(e)))?;
+                Some(backing_file)
+                } else {
+                    None
+                };
+        */
 
         // Only support two byte refcounts.
         let refcount_bits: u64 = 0x01u64
@@ -557,7 +559,7 @@ impl QcowFile {
             current_offset: 0,
             unref_clusters: Vec::new(),
             avail_clusters: Vec::new(),
-            backing_file,
+            backing_file: None, /*backing_file,*/
         };
 
         // Check that the L1 and refcount tables fit in a 64bit address space.
@@ -583,6 +585,7 @@ impl QcowFile {
 
     /// Creates a new QcowFile at the given path.
     pub fn new_from_backing(file: File, backing_file_name: &str) -> Result<QcowFile> {
+        /*
         let backing_raw_file = OpenOptions::new()
             .read(true)
             .open(backing_file_name)
@@ -590,9 +593,11 @@ impl QcowFile {
         let backing_file =
             create_disk_file(backing_raw_file).map_err(|e| Error::BackingFileOpen(Box::new(e)))?;
         let size = backing_file.get_len().map_err(Error::BackingFileIo)?;
-        let header = QcowHeader::create_for_size_and_path(size, Some(backing_file_name))?;
+        */
+        let header =
+            QcowHeader::create_for_size_and_path(0 /*size*/, Some(backing_file_name))?;
         let mut result = QcowFile::new_from_header(file, header)?;
-        result.backing_file = Some(backing_file);
+        //TODO result.backing_file = Some(backing_file);
         Ok(result)
     }
 

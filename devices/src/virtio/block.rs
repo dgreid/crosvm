@@ -23,7 +23,7 @@ use libchromeos::sync::Mutex as AsyncMutex;
 
 use cros_async::{select4, AsyncError, U64Source};
 use data_model::{DataInit, Le16, Le32, Le64};
-use disk::{AsyncDisk, DiskFile};
+use disk::AsyncDisk;
 use msg_socket::{MsgError, MsgSender};
 use sys_util::Error as SysError;
 use sys_util::Result as SysResult;
@@ -284,7 +284,7 @@ impl Display for OtherError {
 }
 
 struct DiskState {
-    disk_image: Box<dyn AsyncDisk>,
+    disk_image: Box<dyn AsyncDisk + Send>,
     disk_size: AsyncMutex<Arc<AtomicU64>>,
     read_only: bool,
     sparse: bool,
@@ -563,8 +563,9 @@ fn run_worker(
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct Block {
     kill_evt: Option<EventFd>,
-    worker_thread: Option<thread::JoinHandle<(Box<dyn DiskFile>, DiskControlResponseSocket)>>,
-    disk_image: Option<Box<dyn DiskFile>>,
+    worker_thread:
+        Option<thread::JoinHandle<(Box<dyn AsyncDisk + Send>, DiskControlResponseSocket)>>,
+    disk_image: Option<Box<dyn AsyncDisk + Send>>,
     disk_size: Arc<AtomicU64>,
     avail_features: u64,
     read_only: bool,
@@ -594,7 +595,7 @@ fn build_config_space(disk_size: u64, seg_max: u32, block_size: u32) -> virtio_b
 impl Block {
     /// Create a new virtio block device that operates on the given AsyncDisk.
     pub fn new(
-        disk_image: Box<dyn DiskFile>,
+        disk_image: Box<dyn AsyncDisk + Send>,
         read_only: bool,
         sparse: bool,
         block_size: u32,
@@ -880,12 +881,8 @@ impl VirtioDevice for Block {
                     thread::Builder::new()
                         .name("virtio_blk".to_string())
                         .spawn(move || {
-                            let async_image = match disk_image.to_async_disk() {
-                                Ok(d) => d,
-                                Err(e) => panic!("Failed to create async disk {}", e),
-                            };
                             let disk_state = Rc::new(RefCell::new(DiskState {
-                                disk_image: async_image,
+                                disk_image,
                                 disk_size: AsyncMutex::new(disk_size),
                                 read_only,
                                 sparse,
@@ -906,7 +903,7 @@ impl VirtioDevice for Block {
                                 Ok(d) => d.into_inner(),
                                 Err(_) => panic!("too many refs to the disk"),
                             };
-                            (disk_state.disk_image.to_inner(), control_socket)
+                            (disk_state.disk_image, control_socket)
                         });
 
                 match worker_result {
