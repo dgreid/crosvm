@@ -293,10 +293,12 @@ pub fn detect_image_type(file: &File) -> Result<ImageType> {
 }
 
 /// Inspect the image file type and create an appropriate disk file to match it.
-pub fn create_disk_file(raw_image: File) -> Result<Box<dyn AsyncDisk>> {
+pub fn create_disk_file(raw_image: File) -> Result<Box<dyn AsyncDisk + Send>> {
     let image_type = detect_image_type(&raw_image)?;
     Ok(match image_type {
-        ImageType::Raw => Box::new(SingleFileDisk::try_from(raw_image)?) as Box<dyn AsyncDisk>,
+        ImageType::Raw => {
+            Box::new(SingleFileDisk::try_from(raw_image)?) as Box<dyn AsyncDisk + Send>
+        }
         ImageType::Qcow2 => {
             panic!("qcow");
             //Box::new(QcowFile::from(raw_image).map_err(Error::QcowError)?) as Box<dyn DiskFile>
