@@ -29,6 +29,7 @@ gpu_renderer = { path = "../gpu_renderer", optional = true }
 hypervisor = { path = "../hypervisor" }
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
+libchromeos = "*"
 libcras = "*"
 libvda = { version = "*", optional = true }
 linux_input_sys = { path = "../linux_input_sys" }

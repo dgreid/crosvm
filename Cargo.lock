@@ -232,6 +232,7 @@ dependencies = [
  "hypervisor",
  "kvm_sys",
  "libc",
+ "libchromeos",
  "libcras",
  "libvda",
  "linux_input_sys",
@@ -548,6 +549,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libchromeos"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "getopts",
+ "intrusive-collections",
+ "libc",
+ "log",
+ "protobuf",
+]
+
+[[package]]
 name = "libcras"
 version = "0.1.0"
 dependencies = [
@@ -590,6 +603,15 @@ name = "memchr"
 version = "2.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ee1c47aaa256ecabcaea351eae4a9b01ef39ed810004e298d2511ed284b1525"
+
+[[package]]
+name = "memoffset"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "043175f069eda7b85febe4a74abbaeff828d9f8b448515d3151a14a3542811aa"
+dependencies = [
+ "autocfg",
+]
 
 [[package]]
 name = "memoffset"

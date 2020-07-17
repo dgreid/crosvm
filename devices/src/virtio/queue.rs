@@ -2,10 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::cell::RefCell;
 use std::cmp::min;
 use std::num::Wrapping;
-use std::rc::Rc;
 use std::sync::atomic::{fence, Ordering};
 
 use base::error;
@@ -427,6 +425,16 @@ impl Queue {
             .unwrap();
     }
 
+    /// Updates the index at which the driver should signal the device next.
+    pub fn update_int_required(&mut self, mem: &GuestMemory) {
+        let avail_index_addr = mem.checked_offset(self.avail_ring, 2).unwrap();
+        let avail_index: u16 = mem.read_obj_from_addr(avail_index_addr).unwrap();
+        let avail_event_off = self
+            .used_ring
+            .unchecked_add((4 + 8 * self.actual_size()).into());
+        mem.write_obj_at_addr(avail_index, avail_event_off).unwrap();
+    }
+
     /// Enable / Disable guest notify device that requests are available on
     /// the descriptor chain.
     pub fn set_notify(&mut self, mem: &GuestMemory, enable: bool) {
@@ -437,12 +445,7 @@ impl Queue {
         }
 
         if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
-            let avail_index_addr = mem.checked_offset(self.avail_ring, 2).unwrap();
-            let avail_index: u16 = mem.read_obj_from_addr(avail_index_addr).unwrap();
-            let avail_event_off = self
-                .used_ring
-                .unchecked_add((4 + 8 * self.actual_size()).into());
-            mem.write_obj_at_addr(avail_index, avail_event_off).unwrap();
+            self.update_int_required(mem);
         } else {
             let mut used_flags: u16 = mem.read_obj_from_addr(self.used_ring).unwrap();
             if self.notification_disable_count == 0 {
@@ -497,29 +500,6 @@ impl Queue {
     /// Acknowledges that this set of features should be enabled on this queue.
     pub fn ack_features(&mut self, features: u64) {
         self.features |= features;
-    }
-}
-
-/// Used to temporarily disable notifications while processing a request. Notification will be
-/// re-enabled on drop.
-pub struct NotifyGuard {
-    queue: Rc<RefCell<Queue>>,
-    mem: GuestMemory,
-}
-
-impl NotifyGuard {
-    /// Disable notifications for the lifetime of the returned guard. Useful when the caller is
-    /// processing a descriptor and doesn't need notifications of further messages from the guest.
-    pub fn new(queue: Rc<RefCell<Queue>>, mem: GuestMemory) -> Self {
-        // Disable notification until we're done processing the next request.
-        queue.borrow_mut().set_notify(&mem, false);
-        NotifyGuard { queue, mem }
-    }
-}
-
-impl Drop for NotifyGuard {
-    fn drop(&mut self) {
-        self.queue.borrow_mut().set_notify(&self.mem, true);
     }
 }
 
