@@ -247,6 +247,7 @@ dependencies = [
  "hypervisor",
  "kvm_sys",
  "libc",
+ "libchromeos",
  "libcras",
  "libvda",
  "linux_input_sys",
