@@ -495,7 +495,6 @@ impl PassthroughFs {
         let data = self.find_inode(inode)?;
 
         let mut buf = Vec::with_capacity(libc::PATH_MAX as usize);
-        buf.resize(libc::PATH_MAX as usize, 0);
 
         let path = CString::new(format!("self/fd/{}", data.file.as_raw_fd()))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -506,14 +505,17 @@ impl PassthroughFs {
                 self.proc.as_raw_fd(),
                 path.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
+                buf.capacity(),
             )
         };
         if res < 0 {
             return Err(io::Error::last_os_error());
         }
 
-        buf.resize(res as usize, 0);
+        // Safe because buf has been filled by readlinkat
+        unsafe {
+            buf.set_len(res as usize);
+        }
         CString::new(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
@@ -1738,7 +1740,6 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(inode)?;
 
         let mut buf = Vec::with_capacity(libc::PATH_MAX as usize);
-        buf.resize(libc::PATH_MAX as usize, 0);
 
         // Safe because this is a constant value and a valid C string.
         let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
@@ -1749,14 +1750,17 @@ impl FileSystem for PassthroughFs {
                 data.file.as_raw_fd(),
                 empty.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
+                buf.capacity(),
             )
         };
         if res < 0 {
             return Err(io::Error::last_os_error());
         }
 
-        buf.resize(res as usize, 0);
+        // Safe because buf has been filled by readlinkat
+        unsafe {
+            buf.set_len(res as usize);
+        }
         Ok(buf)
     }
 
