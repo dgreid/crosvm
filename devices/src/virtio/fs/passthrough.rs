@@ -494,7 +494,7 @@ impl PassthroughFs {
     fn get_path(&self, inode: Inode) -> io::Result<CString> {
         let data = self.find_inode(inode)?;
 
-        let mut buf = Vec::with_capacity(libc::PATH_MAX as usize);
+        let mut buf: Vec<MaybeUninit<u8>> = Vec::with_capacity(libc::PATH_MAX as usize);
 
         let path = CString::new(format!("self/fd/{}", data.file.as_raw_fd()))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -513,10 +513,11 @@ impl PassthroughFs {
         }
 
         // Safe because buf has been filled by readlinkat
-        unsafe {
+        let string_chars = unsafe {
             buf.set_len(res as usize);
-        }
-        CString::new(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            mem::transmute::<_, Vec<u8>>(buf)
+        };
+        CString::new(string_chars).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     fn find_inode(&self, inode: Inode) -> io::Result<Arc<InodeData>> {
