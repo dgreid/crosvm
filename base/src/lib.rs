@@ -4,6 +4,7 @@
 
 pub use sys_util::*;
 
+mod async_types;
 mod event;
 mod ioctl;
 mod mmap;

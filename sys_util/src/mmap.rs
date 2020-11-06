@@ -215,6 +215,26 @@ impl MemoryMapping {
         MemoryMapping::from_fd_offset_protection(fd, size, offset, Protection::read_write())
     }
 
+    /// Maps `size` bytes starting at `offset` from the given `fd` as read/write, and requests
+    /// that the pages are pre-populated.
+    /// # Arguments
+    /// * `fd` - File descriptor to mmap from.
+    /// * `size` - Size of memory region in bytes.
+    /// * `offset` - Offset in bytes from the beginning of `fd` to start the mmap.
+    pub fn from_fd_offset_populate(
+        fd: &dyn AsRawFd,
+        size: usize,
+        offset: u64,
+    ) -> Result<MemoryMapping> {
+        MemoryMapping::from_fd_offset_flags(
+            fd,
+            size,
+            offset,
+            libc::MAP_SHARED | libc::MAP_POPULATE,
+            Protection::read_write(),
+        )
+    }
+
     /// Maps the `size` bytes starting at `offset` bytes of the given `fd` as read/write.
     ///
     /// # Arguments
