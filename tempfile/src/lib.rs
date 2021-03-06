@@ -19,7 +19,7 @@
 //! }
 //! ```
 
-use libc::{mkdtemp, mkstemp};
+use libc::{mkdtemp, mkstemp, tmpnam};
 use std::env;
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -61,6 +61,26 @@ impl Builder {
     pub fn prefix(&mut self, prefix: &str) -> &mut Self {
         self.prefix = prefix.to_owned();
         self
+    }
+
+    /// Ceates a `PathBuf` without creating a file or directory at that location.
+    /// Useful if the path wants to be used for purposes such as opening a temporary socket.
+    pub fn path(&self) -> Result<PathBuf> {
+        let template = temp_path_template(&self.prefix)?;
+        let ptr = template.into_raw();
+        // Safe because ownership of the buffer is handed off to mkstemp() only
+        // until it returns, and ownership is reclaimed by calling CString::from_raw()
+        // on the same pointer returned by into_raw().
+        let path = unsafe {
+            let ret = tmpnam(ptr);
+            if ret.is_null() {
+                return Err(Error::last_os_error());
+            }
+            CString::from_raw(ret)
+        };
+        Ok(PathBuf::from(path.to_str().map_err(|_| {
+            Error::new(ErrorKind::InvalidData, "Path to string conversion failed")
+        })?))
     }
 
     /// Creates a new temporary directory under libc's preferred system
