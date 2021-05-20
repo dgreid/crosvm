@@ -53,7 +53,7 @@ tpm2 = { path = "../tpm2", optional = true }
 usb_util = { path = "../usb_util" }
 vfio_sys = { path = "../vfio_sys" }
 vhost = { path = "../vhost" }
-vmm_vhost = { version = "*", features = ["vhost-user-master"] }
+vmm_vhost = { path = "../../../third_party/rust-vmm/vhost", version = "*", features = ["vhost-user-master", "vhost-user-slave"] }
 virtio_sys = { path = "../virtio_sys" }
 vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
@@ -65,3 +65,11 @@ default-features = false
 
 [dev-dependencies]
 tempfile = { path = "../tempfile" }
+
+[lib]
+name = "devices"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vhost_user_blk"
+path = "src/virtio/vhost_user_blk.rs"
