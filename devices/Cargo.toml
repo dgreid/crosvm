@@ -69,7 +69,3 @@ tempfile = { path = "../tempfile" }
 [lib]
 name = "devices"
 path = "src/lib.rs"
-
-[[bin]]
-name = "vhost_user_blk"
-path = "src/virtio/vhost_user_blk.rs"

@@ -15,6 +15,10 @@ name = "vhost-user-net-device"
 path = "src/net.rs"
 required-features = ["net"]
 
+[[bin]]
+name = "vhost-user-block-device"
+path = "src/block.rs"
+
 [dependencies]
 anyhow = "*"
 base = { path = "../base" }

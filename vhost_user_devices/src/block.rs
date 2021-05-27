@@ -1,6 +1,5 @@
 // Copyright (C) 2019 Alibaba Cloud Computing. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-extern crate vhost;
 
 use std::fs::OpenOptions;
 use std::os::unix::io::RawFd;
