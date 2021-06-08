@@ -1164,6 +1164,7 @@ dependencies = [
  "cros_async",
  "data_model",
  "devices",
+ "disk",
  "futures",
  "getopts",
  "libc",
