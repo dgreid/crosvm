@@ -643,6 +643,7 @@ impl arch::LinuxArch for AArch64 {
             root_config: pci_root,
             platform_devices,
             hotplug_bus: BTreeMap::new(),
+            fdt_address: None,
         })
     }
 

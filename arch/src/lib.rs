@@ -187,6 +187,8 @@ pub struct VmComponents {
 pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub bat_control: Option<BatControl>,
     pub delay_rt: bool,
+    /// the address where the DTB was loaded, needed for configure_vcpu on riscv.
+    pub fdt_address: Option<GuestAddress>,
     #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>,
     pub has_bios: bool,
