@@ -94,6 +94,12 @@ use {
     devices::IrqChipAArch64 as IrqChipArch,
     hypervisor::{VcpuAArch64 as VcpuArch, VmAArch64 as VmArch},
 };
+#[cfg(target_arch = "riscv64")]
+use {
+    devices::IrqChipRiscv64 as IrqChipArch,
+    hypervisor::{VcpuRiscv64 as VcpuArch, VmRiscv64 as VmArch},
+    riscv64::Riscv64 as Arch,
+};
 
 use device_helpers::*;
 use jail_helpers::*;
@@ -2008,6 +2014,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             },
             cfg.userspace_msr.clone(),
             guest_suspended_cvar.clone(),
+            linux.fdt_address,
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }

@@ -20,6 +20,7 @@ use base::*;
 use devices::{self, Bus, IrqChip, VcpuRunState};
 use hypervisor::{IoOperation, IoParams, Vcpu, VcpuExit, VcpuRunHandle};
 use vm_control::*;
+use vm_memory::GuestAddress;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use vm_memory::GuestMemory;
 
@@ -29,6 +30,12 @@ use {
     aarch64::{AArch64 as Arch, MsrHandlers},
     devices::IrqChipAArch64 as IrqChipArch,
     hypervisor::{VcpuAArch64 as VcpuArch, VcpuInitAArch64 as VcpuInitArch, VmAArch64 as VmArch},
+};
+#[cfg(target_arch = "riscv64")]
+use {
+    devices::IrqChipRiscv64 as IrqChipArch,
+    hypervisor::{VcpuInitRiscv64 as VcpuInitArch, VcpuRiscv64 as VcpuArch, VmRiscv64 as VmArch},
+    riscv64::{MsrHandlers, Riscv64 as Arch},
 };
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use {
@@ -144,6 +151,7 @@ pub fn runnable_vcpu<V>(
     enable_pnp_data: bool,
     itmt: bool,
     force_calibrated_tsc_leaf: bool,
+    fdt_address: Option<GuestAddress>,
 ) -> Result<(V, VcpuRunHandle)>
 where
     V: VcpuArch,
@@ -182,7 +190,7 @@ where
         enable_pnp_data,
         itmt,
         force_calibrated_tsc_leaf,
-        None,
+        fdt_address,
     )
     .context("failed to configure vcpu")?;
 
@@ -520,6 +528,27 @@ where
                         run_mode = VmRunMode::Breakpoint;
                     }
                 }
+                Ok(VcpuExit::Sbi {
+                    extension_id: _,
+                    function_id: _,
+                    args: _,
+                }) => {
+                    unimplemented!("Sbi exits not yet supported");
+                }
+                Ok(VcpuExit::RiscvCsr {
+                    csr_num,
+                    new_value,
+                    write_mask,
+                    ret_value: _,
+                }) => {
+                    unimplemented!(
+                        "csr exit! {:#x} to {:#x} mask {:#x}",
+                        csr_num,
+                        new_value,
+                        write_mask
+                    );
+                }
+
                 Ok(r) => warn!("unexpected vcpu exit: {:?}", r),
                 Err(e) => match e.errno() {
                     libc::EINTR => interrupted_by_signal = true,
@@ -583,6 +612,7 @@ pub fn run_vcpu<V>(
     vcpu_cgroup_tasks_file: Option<File>,
     userspace_msr: BTreeMap<u32, MsrConfig>,
     guest_suspended_cvar: Arc<(Mutex<bool>, Condvar)>,
+    fdt_address: Option<GuestAddress>,
 ) -> Result<JoinHandle<()>>
 where
     V: VcpuArch + 'static,
@@ -621,6 +651,7 @@ where
                     enable_pnp_data,
                     itmt,
                     force_calibrated_tsc_leaf,
+                    fdt_address,
                 );
 
                 // Add MSR handlers after CPU affinity setting.
