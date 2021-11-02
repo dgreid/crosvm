@@ -736,6 +736,7 @@ impl arch::LinuxArch for AArch64 {
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
             vm_request_tube: None,
+            fdt_address: None,
         })
     }
 

@@ -1041,6 +1041,7 @@ impl arch::LinuxArch for X8664arch {
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
             vm_request_tube,
+            fdt_address: None,
         })
     }
 
