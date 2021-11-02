@@ -91,6 +91,8 @@ use devices::HotPlugBus;
 use devices::IommuDevType;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use devices::IrqChipAArch64 as IrqChipArch;
+#[cfg(target_arch = "riscv64")]
+use devices::IrqChipRiscv64 as IrqChipArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::IrqChipX86_64 as IrqChipArch;
 use devices::IrqEventIndex;
@@ -127,6 +129,8 @@ use gpu::*;
 use hypervisor::kvm::Kvm;
 use hypervisor::kvm::KvmVcpu;
 use hypervisor::kvm::KvmVm;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::CpuConfigRiscv64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::CpuConfigX86_64;
 use hypervisor::Hypervisor;
@@ -134,12 +138,16 @@ use hypervisor::HypervisorCap;
 use hypervisor::ProtectionType;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VcpuAArch64 as VcpuArch;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VcpuRiscv64 as VcpuArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VcpuX86_64 as VcpuArch;
 use hypervisor::Vm;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VmAArch64 as VmArch;
 use hypervisor::VmCap;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VmRiscv64 as VmArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64 as VmArch;
 use jail_helpers::*;
@@ -150,6 +158,8 @@ use resources::Alloc;
 #[cfg(feature = "direct")]
 use resources::Error as ResourceError;
 use resources::SystemAllocator;
+#[cfg(target_arch = "riscv64")]
+use riscv64::Riscv64 as Arch;
 use rutabaga_gfx::RutabagaGralloc;
 #[cfg(feature = "swap")]
 use swap::SwapController;
@@ -2530,6 +2540,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         let cpu_config = None;
+
+        #[cfg(target_arch = "riscv64")]
+        let cpu_config = linux.fdt_address.map(CpuConfigRiscv64::new);
 
         let handle = vcpu::run_vcpu(
             cpu_id,
