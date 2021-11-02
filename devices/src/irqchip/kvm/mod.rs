@@ -7,6 +7,8 @@ use base::{error, Error, Event, Result};
 use hypervisor::kvm::KvmVcpu;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VmAArch64;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VmRiscv64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64;
 use hypervisor::{HypervisorCap, IrqRoute, MPState, Vcpu};
@@ -22,6 +24,11 @@ pub use x86_64::*;
 mod aarch64;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub use aarch64::*;
+
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
+#[cfg(target_arch = "riscv64")]
+pub use riscv64::*;
 
 use crate::{IrqChip, IrqChipCap, IrqEventIndex, VcpuRunState};
 

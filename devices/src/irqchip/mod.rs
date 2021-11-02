@@ -9,8 +9,27 @@ use base::{Event, Result};
 use hypervisor::{IrqRoute, MPState, Vcpu};
 use resources::SystemAllocator;
 
+#[cfg(any(
+    target_arch = "arm",
+    target_arch = "aarch64",
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "riscv64",
+))]
 mod kvm;
+#[cfg(any(
+    target_arch = "arm",
+    target_arch = "aarch64",
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "riscv64",
+))]
 pub use self::kvm::KvmKernelIrqChip;
+
+#[cfg(target_arch = "riscv64")]
+pub use self::kvm::{
+    aia_addr_imsic, aia_aplic_addr, aia_imsic_addr, aia_imsic_size, AIA_APLIC_SIZE, AIA_IMSIC_BASE,
+};
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub use self::kvm::{AARCH64_GIC_NR_IRQS, AARCH64_GIC_NR_SPIS};
@@ -39,6 +58,11 @@ mod ioapic;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use ioapic::*;
+
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
+#[cfg(target_arch = "riscv64")]
+pub use riscv64::*;
 
 pub type IrqEventIndex = usize;
 
