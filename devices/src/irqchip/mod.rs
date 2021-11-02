@@ -48,10 +48,19 @@ cfg_if::cfg_if! {
     } else if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
         mod aarch64;
         pub use aarch64::*;
+    } else if #[cfg(target_arch = "riscv64")] {
+        mod riscv64;
+        pub use riscv64::*;
     }
+
 }
 
 pub type IrqEventIndex = usize;
+
+#[cfg(target_arch = "riscv64")]
+pub use self::kvm::{
+    aia_addr_imsic, aia_aplic_addr, aia_imsic_addr, aia_imsic_size, AIA_APLIC_SIZE, AIA_IMSIC_BASE,
+};
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 struct IrqEvent {
