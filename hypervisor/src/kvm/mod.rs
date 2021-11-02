@@ -12,6 +12,11 @@ mod x86_64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use x86_64::*;
 
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
+#[cfg(target_arch = "riscv64")]
+use riscv64::*;
+
 use std::cell::RefCell;
 use std::cmp::{min, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
@@ -549,8 +554,8 @@ impl Vm for KvmVm {
                     flags: 0,
                 },
 
-                // ARM has additional DeviceKinds, so it needs the catch-all pattern
-                #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                // ARM and risc-v have additional DeviceKinds, so it needs the catch-all pattern
+                #[cfg(any(target_arch = "arm", target_arch = "aarch64", target_arch = "riscv64"))]
                 _ => return Err(Error::new(libc::ENXIO)),
             }
         };
@@ -949,6 +954,32 @@ impl Vcpu for KvmVcpu {
                 let index = msr.index;
                 let data = msr.data;
                 Ok(VcpuExit::WrMsr { index, data })
+            }
+            #[cfg(target_arch = "riscv64")]
+            KVM_EXIT_RISCV_SBI => {
+                // Safe because we trust the kernel to correctly fill in the union
+                let extension_id = unsafe { run.__bindgen_anon_1.riscv_sbi.extension_id };
+                let function_id = unsafe { run.__bindgen_anon_1.riscv_sbi.function_id };
+                let args = unsafe { run.__bindgen_anon_1.riscv_sbi.args };
+                Ok(VcpuExit::Sbi {
+                    extension_id,
+                    function_id,
+                    args,
+                })
+            }
+            #[cfg(target_arch = "riscv64")]
+            KVM_EXIT_RISCV_CSR => {
+                // Safe because we trust the kernel to correctly fill in the union
+                let csr_num = unsafe { run.__bindgen_anon_1.riscv_csr.csr_num };
+                let new_value = unsafe { run.__bindgen_anon_1.riscv_csr.new_value };
+                let write_mask = unsafe { run.__bindgen_anon_1.riscv_csr.write_mask };
+                let ret_value = unsafe { run.__bindgen_anon_1.riscv_csr.ret_value };
+                Ok(VcpuExit::RiscvCsr {
+                    csr_num,
+                    new_value,
+                    write_mask,
+                    ret_value,
+                })
             }
             r => panic!("unknown kvm exit reason: {}", r),
         }
