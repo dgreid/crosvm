@@ -44,6 +44,11 @@ use {
     devices::IrqChipAArch64 as IrqChipArch,
     hypervisor::{Hypervisor as HypervisorArch, VcpuAArch64 as VcpuArch, VmAArch64 as VmArch},
 };
+#[cfg(target_arch = "riscv64")]
+use {
+    devices::IrqChipRiscv64 as IrqChipArch,
+    hypervisor::{Hypervisor as HypervisorArch, VcpuRiscv64 as VcpuArch, VmRiscv64 as VmArch},
+};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use {
     devices::IrqChipX86_64 as IrqChipArch,
