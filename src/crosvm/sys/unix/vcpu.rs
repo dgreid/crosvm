@@ -182,6 +182,7 @@ where
         enable_pnp_data,
         itmt,
         force_calibrated_tsc_leaf,
+        None,
     )
     .context("failed to configure vcpu")?;
 
