@@ -707,6 +707,7 @@ impl arch::LinuxArch for AArch64 {
             platform_devices,
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
+            fdt_address: None,
         })
     }
 
