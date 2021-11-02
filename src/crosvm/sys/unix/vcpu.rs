@@ -197,7 +197,7 @@ where
         cpu_id,
         vcpu_count,
         has_bios,
-        cpu_config,
+        None,
     )
     .context("failed to configure vcpu")?;
 
