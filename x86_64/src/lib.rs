@@ -754,6 +754,7 @@ impl arch::LinuxArch for X8664arch {
             pm: Some(acpi_dev_resource.pm),
             root_config: pci,
             hotplug_bus: Vec::new(),
+            fdt_address: None,
         })
     }
 
@@ -771,6 +772,7 @@ impl arch::LinuxArch for X8664arch {
         enable_pnp_data: bool,
         itmt: bool,
         force_calibrated_tsc_leaf: bool,
+        _fdt_address: Option<GuestAddress>,
     ) -> Result<()> {
         if !vm.check_capability(VmCap::EarlyInitCpuid) {
             cpuid::setup_cpuid(

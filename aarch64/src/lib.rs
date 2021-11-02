@@ -547,6 +547,7 @@ impl arch::LinuxArch for AArch64 {
             resume_notify_devices: Vec::new(),
             root_config: pci_root,
             hotplug_bus: Vec::new(),
+            fdt_address: None,
         })
     }
 
@@ -564,6 +565,7 @@ impl arch::LinuxArch for AArch64 {
         _enable_pnp_data: bool,
         _itmt: bool,
         _force_calibrated_tsc_leaf: bool,
+        _fdt_address: Option<GuestAddress>,
     ) -> std::result::Result<(), Self::Error> {
         // AArch64 doesn't configure vcpus on the vcpu thread, so nothing to do here.
         Ok(())
