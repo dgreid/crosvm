@@ -1,0 +1,251 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Extensions to `Target` which add support for various subsets of the GDB Remote Serial Protocol."><meta name="keywords" content="rust, rustlang, rust-lang, ext"><title>gdbstub::target::ext - Rust</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings" ></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../../../favicon.svg"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../gdbstub/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a><h2 class="location">Module ext</h2><div class="sidebar-elems"><div class="block items"><ul><li><a href="#modules">Modules</a></li></ul></div><div id="sidebar-vars" data-name="ext" data-ty="mod" data-relpath="./"></div><script defer src="./sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../../../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../../../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../../../wheel.svg"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../../index.html">gdbstub</a>::<wbr><a href="../index.html">target</a>::<wbr><a class="mod" href="#">ext</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../../../clipboard.svg" width="19" height="18" alt="Copy item path"></button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../../src/gdbstub/target/ext/mod.rs.html#1-264" title="goto source code">[src]</a></span></h1><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Extensions to <a href="../trait.Target.html"><code>Target</code></a> which add support for various
+subsets of the GDB Remote Serial Protocol.</p>
+<h3 id="note-missing-protocol-extensions" class="section-header"><a href="#note-missing-protocol-extensions">Note: Missing Protocol Extensions</a></h3>
+<p><code>gdbstub</code>’s development is guided by the needs of its contributors, with
+new features being added on an “as-needed” basis.</p>
+<p>If there’s a GDB protocol extensions you’re interested in that hasn’t been
+implemented in <code>gdbstub</code> yet, (e.g: remote filesystem access, tracepoint
+support, etc…), consider opening an issue / filing a PR on GitHub!</p>
+<p>Check out the <a href="https://sourceware.org/gdb/onlinedocs/gdb/Remote-Configuration.html">GDB Remote Configuration Docs</a>
+for a table of GDB commands + their corresponding Remote Serial Protocol
+packets.</p>
+<h2 id="how-protocol-extensions-work---inlineable-dyn-extension-traits-idets" class="section-header"><a href="#how-protocol-extensions-work---inlineable-dyn-extension-traits-idets">How Protocol Extensions Work - Inlineable Dyn Extension Traits (IDETs)</a></h2>
+<p>The GDB protocol is massive, and contains all sorts of optional
+functionality. In the early versions of <code>gdbstub</code>, the <code>Target</code> trait
+directly had a method for <em>every single protocol extension</em>, which if taken
+to the extreme, would have resulted in literally <em>hundreds</em> of associated
+methods!</p>
+<p>Aside from the cognitive complexity of having so many methods on a single
+trait, this approach had numerous other drawbacks as well:</p>
+<ul>
+<li>Implementations that did not implement all available protocol extensions
+still had to “pay” for the unused packet parsing/handler code, resulting
+in substantial code bloat, even on <code>no_std</code> platforms.</li>
+<li><code>GdbStub</code>’s internal implementation needed to include <em>runtime</em> checks to
+deal with incorrectly implemented <code>Target</code>s.
+<ul>
+<li>No way to enforce “mutually-dependent” trait methods at compile-time.
+<ul>
+<li>e.g: When implementing hardware breakpoint extensions, targets
+<em>must</em> implement both the <code>add_breakpoint</code> and
+<code>remove_breakpoints</code> methods.</li>
+</ul>
+</li>
+<li>No way to enforce “mutually-exclusive” trait methods at compile-time.
+<ul>
+<li>e.g: The <code>resume</code> method for single-threaded targets has a much
+simpler API than for multi-threaded targets, but it would be
+incorrect for a target to implement both.</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p>At first blush, it seems the the solution to all these issues is obvious:
+simply tie each protocol extension to a <code>cargo</code> feature! And yes, while
+would would indeed work, there would be several serious ergonomic drawbacks:</p>
+<ul>
+<li>There would be <em>hundreds</em> of individual feature flags that would need to
+be toggled by end users.</li>
+<li>It would be functionally impossible to <em>test</em> all permutations of
+enabled/disabled cargo features.</li>
+<li>A single binary would need to rely on some <a href="https://github.com/rust-lang/cargo/issues/674">non-trivial <code>cargo</code>-fu</a>
+in order to have multiple <code>Target</code> implementations in a single binary.</li>
+</ul>
+<p>After much experimentation and iteration, <code>gdbstub</code> ended up taking a
+radically different approach to implementing and enumerating available
+features, using a technique called <strong>Inlineable Dyn Extension Traits</strong>.</p>
+<blockquote>
+<p><em>Author’s note:</em> As far as I can tell, this isn’t a very well-known trick,
+or at the very least, I’ve personally never encountered any library that
+uses this sort of API. As such, I’ve decided to be a bit cheeky and give it
+a name! At some point, I’m hoping to write a standalone blog post which
+further explores this technique, comparing it to other/existing approaches,
+and diving into details of the how the compiler optimizes this sort of code.
+In fact, I’ve already got a <a href="https://github.com/daniel5151/optional-trait-methods">very rough github repo</a> with some of my
+findings.</p>
+</blockquote>
+<p>So, what are “Inlineable Dyn Extension Traits”? Well, let’s break it down:</p>
+<ul>
+<li><strong>Extension Traits</strong> - A common <a href="https://rust-lang.github.io/rfcs/0445-extension-trait-conventions.html#what-is-an-extension-trait">Rust convention</a>
+to extend the functionality of a Trait, <em>without</em> modifying the original
+trait.</li>
+<li><strong>Dyn</strong> - Alludes to the use of Dynamic Dispatch via <a href="https://doc.rust-lang.org/book/ch17-02-trait-objects.html">Trait Objects</a>.</li>
+<li><strong>Inlineable</strong> - Alludes to the fact that this approach can be easily
+inlined, making it a truly zero-cost abstraction.</li>
+</ul>
+<p>In a nutshell, Inlineable Dyn Extension Traits (or IDETs) are an abuse of
+the Rust trait system + modern compiler optimizations to emulate zero-cost,
+runtime-enumerable optional trait methods!</p>
+<h4 id="technical-overview" class="section-header"><a href="#technical-overview">Technical overview</a></h4>
+<p>The basic principles behind Inlineable Dyn Extension Traits are best
+explained though example:</p>
+<p>Lets say we want to add an optional protocol extension described by an
+<code>ProtocolExt</code> trait to a base <code>Protocol</code> trait. How would we do that using
+IDETs?</p>
+<ul>
+<li>(library) Define a <code>trait ProtocolExt: Protocol { ... }</code> which includes
+all the methods required by the protocol extension:
+<ul>
+<li><em>Note:</em> Making <code>ProtocolExt</code> a subtrait of <code>Protocol</code> is not strictly
+required, but it does enable transparently using <code>Protocol</code>’s
+associated types as part of <code>ProtocolExt</code>’s method definitions.</li>
+</ul>
+</li>
+</ul>
+
+<div class='information'><div class='tooltip ignore'>ⓘ</div></div><div class="example-wrap"><pre class="rust rust-example-rendered ignore"><code><span class="doccomment">/// `foo` and `bar` are mutually-dependent methods.</span>
+<span class="kw">trait</span> <span class="ident">ProtocolExt</span>: <span class="ident">Protocol</span> {
+    <span class="kw">fn</span> <span class="ident">foo</span>(<span class="kw-2">&amp;</span><span class="self">self</span>);
+    <span class="comment">// can use associated types in method signature!</span>
+    <span class="kw">fn</span> <span class="ident">bar</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Result</span><span class="op">&lt;</span>(), <span class="ident"><span class="self">Self</span>::Error</span><span class="op">&gt;</span>;
+}</code></pre></div>
+<ul>
+<li>(library) “Associate” the <code>ProtocolExt</code> extension trait to the original
+<code>Protocol</code> trait by adding a new <code>Protocol</code> method that “downcasts” <code>self</code>
+into a <code>&amp;mut dyn ProtocolExt</code>.</li>
+</ul>
+
+<div class='information'><div class='tooltip ignore'>ⓘ</div></div><div class="example-wrap"><pre class="rust rust-example-rendered ignore"><code><span class="kw">trait</span> <span class="ident">Protocol</span> {
+    <span class="comment">// ... other methods ...</span>
+
+    <span class="comment">// Optional extension</span>
+    <span class="attribute">#[<span class="ident">inline</span>(<span class="ident">always</span>)]</span>
+    <span class="kw">fn</span> <span class="ident">get_protocol_ext</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident">ProtocolExtOps</span><span class="op">&lt;</span><span class="self">Self</span><span class="op">&gt;</span><span class="op">&gt;</span> {
+        <span class="comment">// disabled by default</span>
+        <span class="prelude-val">None</span>
+    }
+
+    <span class="comment">// Mutually-exclusive extensions</span>
+    <span class="kw">fn</span> <span class="ident">get_ext_a_or_b</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">EitherOrExt</span><span class="op">&lt;</span><span class="ident"><span class="self">Self</span>::Arch</span>, <span class="ident"><span class="self">Self</span>::Error</span><span class="op">&gt;</span>;
+}
+
+<span class="comment">// Using a typedef for readability</span>
+<span class="kw">type</span> <span class="ident">ProtocolExtOps</span><span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span> <span class="op">=</span>
+    <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="kw-2">mut</span> <span class="kw">dyn</span> <span class="ident">ProtocolExt</span><span class="op">&lt;</span><span class="ident">Arch</span> <span class="op">=</span> <span class="op">&lt;</span><span class="ident">T</span> <span class="kw">as</span> <span class="ident">Protocol</span><span class="op">&gt;</span><span class="ident">::Arch</span>, <span class="ident">Error</span> <span class="op">=</span> <span class="op">&lt;</span><span class="ident">T</span> <span class="kw">as</span> <span class="ident">Protocol</span><span class="op">&gt;</span><span class="ident">::Error</span><span class="op">&gt;</span>;
+
+<span class="kw">enum</span> <span class="ident">EitherOrExt</span><span class="op">&lt;</span><span class="ident">A</span>, <span class="ident">E</span><span class="op">&gt;</span> {
+    <span class="ident">ProtocolExtA</span>(<span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="kw-2">mut</span> <span class="kw">dyn</span> <span class="ident">ProtocolExtA</span><span class="op">&lt;</span><span class="ident">Arch</span> <span class="op">=</span> <span class="ident">A</span>, <span class="ident">Error</span> <span class="op">=</span> <span class="ident">E</span><span class="op">&gt;</span>),
+    <span class="ident">ProtocolExtB</span>(<span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="kw-2">mut</span> <span class="kw">dyn</span> <span class="ident">ProtocolExtB</span><span class="op">&lt;</span><span class="ident">Arch</span> <span class="op">=</span> <span class="ident">A</span>, <span class="ident">Error</span> <span class="op">=</span> <span class="ident">E</span><span class="op">&gt;</span>),
+}</code></pre></div>
+<ul>
+<li>(user) Implements the <code>ProtocolExt</code> extension for their target (just like
+a normal trait).</li>
+</ul>
+
+<div class='information'><div class='tooltip ignore'>ⓘ</div></div><div class="example-wrap"><pre class="rust rust-example-rendered ignore"><code><span class="kw">impl</span> <span class="ident">ProtocolExt</span> <span class="kw">for</span> <span class="ident">MyTarget</span> {
+    <span class="kw">fn</span> <span class="ident">foo</span>(<span class="kw-2">&amp;</span><span class="self">self</span>) { ... }
+    <span class="kw">fn</span> <span class="ident">bar</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Result</span><span class="op">&lt;</span>(), <span class="ident"><span class="self">Self</span>::Error</span><span class="op">&gt;</span> { ... }
+}</code></pre></div>
+<ul>
+<li>(user) Implements the base <code>Protocol</code> trait, overriding the
+<code>get_protocol_ext</code> method to return <code>Some(self)</code>, which will effectively
+“enable” the extension.</li>
+</ul>
+
+<div class='information'><div class='tooltip ignore'>ⓘ</div></div><div class="example-wrap"><pre class="rust rust-example-rendered ignore"><code><span class="kw">impl</span> <span class="ident">Protocol</span> <span class="kw">for</span> <span class="ident">MyTarget</span> {
+    <span class="comment">// Optional extension</span>
+    <span class="attribute">#[<span class="ident">inline</span>(<span class="ident">always</span>)]</span>
+    <span class="kw">fn</span> <span class="ident">get_protocol_ext</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident">ProtocolExtOps</span><span class="op">&lt;</span><span class="self">Self</span><span class="op">&gt;</span><span class="op">&gt;</span> {
+        <span class="prelude-val">Some</span>(<span class="self">self</span>) <span class="comment">// will not compile unless `MyTarget` also implements `ProtocolExt`</span>
+    }
+
+    <span class="comment">// Mutually-exclusive extensions</span>
+    <span class="attribute">#[<span class="ident">inline</span>(<span class="ident">always</span>)]</span>
+    <span class="kw">fn</span> <span class="ident">get_ext_a_or_b</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">EitherOrExt</span><span class="op">&lt;</span><span class="ident"><span class="self">Self</span>::Arch</span>, <span class="ident"><span class="self">Self</span>::Error</span><span class="op">&gt;</span> {
+        <span class="ident">EitherOrExt::ProtocolExtA</span>(<span class="self">self</span>)
+    }
+}</code></pre></div>
+<blockquote>
+<p>Please note the use of <code>#[inline(always)]</code> when enabling IDET methods.
+While LLVM is usually smart enough to inline single-level IDETs (such as in
+the example above), nested IDETs will often require a bit of “help” from the
+<code>inline</code> directive to be correctly optimized.</p>
+</blockquote>
+<p>Now, here’s where IDETs really shine: If the user didn’t implement
+<code>ProtocolExt</code>, but <em>did</em> try to enable the feature by overriding
+<code>get_protocol_ext</code> to return <code>Some(self)</code>, they’ll get a compile-time error
+that looks something like this:</p>
+<div class="example-wrap"><pre class="language-text"><code>error[E0277]: the trait bound `MyTarget: ProtocolExt` is not satisfied
+  --&gt; path/to/implementation.rs:44:14
+   |
+44 |         Some(self)
+   |              ^^^^ the trait `ProtocolExt` is not implemented for `MyTarget`
+   |
+   = note: required for the cast to the object type `dyn ProtocolExt&lt;Arch = ..., Error = ...&gt;`</code></pre></div>
+<p>The Rust compiler is preventing you from enabling a feature you haven’t
+implemented <em>at compile time!</em></p>
+<ul>
+<li>(library) Is able to <em>query</em> whether or not an extension is available,
+<em>without</em> having to actually invoke any method on the target!</li>
+</ul>
+
+<div class='information'><div class='tooltip ignore'>ⓘ</div></div><div class="example-wrap"><pre class="rust rust-example-rendered ignore"><code><span class="kw">fn</span> <span class="ident">execute_protocol</span>(<span class="kw-2">mut</span> <span class="ident">target</span>: <span class="kw">impl</span> <span class="ident">Target</span>) {
+    <span class="kw">match</span> <span class="ident">target</span>.<span class="ident">get_protocol_ext</span>() {
+        <span class="prelude-val">Some</span>(<span class="ident">ops</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="ident">ops</span>.<span class="ident">foo</span>(),
+        <span class="prelude-val">None</span> <span class="op">=</span><span class="op">&gt;</span> { <span class="comment">/* fallback when not enabled */</span> }
+    }
+}</code></pre></div>
+<p>This is already pretty cool, but what’s <em>even cooler</em> is that if you take a
+look at the generated assembly of a monomorphized <code>execute_protocol</code> method
+(e.g: using godbolt.org), you’ll find that the compiler is able to
+efficiently inline and devirtualize <em>all</em> the calls to <code>get_protocol_ext</code>
+method, which in-turn allows the dead-code-eliminator to work its magic, and
+remove the unused branches from the generated code! i.e: If a target
+implemention didn’t implement the <code>ProtocolExt</code> extension, then that <code>match</code>
+statement in <code>execute_protocol</code> would simply turn into a noop!</p>
+<p>If IDETs are something you’re interested in, consider checking out
+<a href="https://github.com/daniel5151/optional-trait-methods">daniel5151/optional-trait-methods</a>
+for some sample code that shows off the power of IDETs. It’s not
+particularly polished, but it does includes code snippets which can be
+pasted into godbolt.org directly to confirm the optimizations described
+above, and a brief writeup which compares / contrasts alternatives to IDETs.</p>
+<p>Long story short: Optimizing compilers really are magic!</p>
+<h4 id="summary-the-benefits-of-idets" class="section-header"><a href="#summary-the-benefits-of-idets">Summary: The Benefits of IDETs</a></h4>
+<p>IDETs solve the numerous issues and shortcomings that arise from the
+traditional single trait + “optional” methods approach:</p>
+<ul>
+<li><strong>Compile-time enforcement of mutually-dependent methods</strong>
+<ul>
+<li>By grouping mutually-dependent methods behind a single extension trait
+and marking them all as required methods, the Rust compiler is able to
+catch missing mutually-dependent methods at compile time, with no need
+for any runtime checks!</li>
+</ul>
+</li>
+<li><strong>Compile-time enforcement of mutually-exclusive methods</strong>
+<ul>
+<li>By grouping mutually-exclusive methods behind two extension traits, and
+wrapping those in an <code>enum</code>, the API is able to document
+mutually-exclusive functions <em>at the type-level</em>, in-turn enabling the
+library to omit any runtime checks!</li>
+<li><em>Note:</em> Strictly speaking, this isn’t really compile time
+“enforcement”, as there’s nothing stopping an “adversarial”
+implementation from implementing both sets of methods, and then
+“flipping” between the two at runtime. Nonetheless, it serves as a good
+guardrail.</li>
+</ul>
+</li>
+<li><strong>Enforce dead-code-elimination <em>without</em> <code>cargo</code> feature flags</strong>
+<ul>
+<li>This is a really awesome trick: by wrapping code in a <code>if target.get_protocol_ext().is_some()</code> block, it’s possible to specify
+<em>arbitrary</em> blocks of code to be feature-dependent!</li>
+<li>This is used to great effect in <code>gdbstub</code> to optimize-out any packet
+parsing / handler code for unimplemented protocol extensions.</li>
+</ul>
+</li>
+</ul>
+</div></details><h2 id="modules" class="section-header"><a href="#modules">Modules</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="mod" href="base/index.html" title="gdbstub::target::ext::base mod">base</a></div><div class="item-right docblock-short"><p>Base operations required to debug any target (read/write memory/registers,
+step/resume, etc…)</p>
+</div><div class="item-left module-item"><a class="mod" href="breakpoints/index.html" title="gdbstub::target::ext::breakpoints mod">breakpoints</a></div><div class="item-right docblock-short"><p>Add/Remove various kinds of breakpoints.</p>
+</div><div class="item-left module-item"><a class="mod" href="extended_mode/index.html" title="gdbstub::target::ext::extended_mode mod">extended_mode</a></div><div class="item-right docblock-short"><p>Enables <a href="https://sourceware.org/gdb/current/onlinedocs/gdb/Connecting.html">Extended Mode</a>
+functionality when connecting using <code>target extended-remote</code>, such as
+spawning new processes and/or attaching to existing processes.</p>
+</div><div class="item-left module-item"><a class="mod" href="monitor_cmd/index.html" title="gdbstub::target::ext::monitor_cmd mod">monitor_cmd</a></div><div class="item-right docblock-short"><p>Create custom target-specific debugging commands accessible via GDB’s
+<code>monitor</code> command!</p>
+</div><div class="item-left module-item"><a class="mod" href="section_offsets/index.html" title="gdbstub::target::ext::section_offsets mod">section_offsets</a></div><div class="item-right docblock-short"><p>Get section/segment relocation offsets from the target.</p>
+</div><div class="item-left module-item"><a class="mod" href="target_description_xml_override/index.html" title="gdbstub::target::ext::target_description_xml_override mod">target_description_xml_override</a></div><div class="item-right docblock-short"><p>Override the target description XML specified by <code>Target::Arch</code>.</p>
+</div></div></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="gdbstub" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script>
+</body></html>

@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["Block","Virtio device for exposing block level read/write operations on a host file."]]});

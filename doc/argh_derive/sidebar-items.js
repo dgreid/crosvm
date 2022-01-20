@@ -1,0 +1,1 @@
+initSidebarItems({"derive":[["FromArgs","Entrypoint for `#[derive(FromArgs)]`."]]});

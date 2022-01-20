@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["socket","Structs for Unix Domain Socket listener and endpoint."]],"trait":[["Endpoint","Abstracts a vhost-user connection and related operations."],["EndpointExt","Abstracts VVU message parsing, sending and receiving."],["Listener","Listener for accepting connections."]]});

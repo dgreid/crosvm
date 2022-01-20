@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["ModifyUsbError",""]],"fn":[["do_modify_battery",""],["do_usb_attach",""],["do_usb_detach",""],["do_usb_list",""],["handle_request",""],["vms_request",""]],"type":[["DoModifyBatteryResult",""],["HandleRequestResult",""],["ModifyUsbResult",""],["VmsRequestResult",""]]});

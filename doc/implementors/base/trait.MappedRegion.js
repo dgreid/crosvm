@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["base"] = [{"text":"impl <a class=\"trait\" href=\"base/trait.MappedRegion.html\" title=\"trait base::MappedRegion\">MappedRegion</a> for <a class=\"struct\" href=\"base/struct.MemoryMapping.html\" title=\"struct base::MemoryMapping\">MemoryMapping</a>","synthetic":false,"types":["base::mmap::MemoryMapping"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

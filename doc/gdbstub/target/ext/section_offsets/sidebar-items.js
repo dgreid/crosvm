@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Offsets","Describes the offset the target loaded the image sections at, so the target can notify GDB that it needs to adjust the addresses of symbols."]],"trait":[["SectionOffsets","Target Extension - Get section/segment relocation offsets from the target."]],"type":[["SectionOffsetsOps","See `SectionOffsets`."]]});

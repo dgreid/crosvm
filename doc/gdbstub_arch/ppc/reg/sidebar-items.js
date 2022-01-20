@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["id","`RegId` definitions for PowerPC architectures."]],"struct":[["PowerPcCommonRegs","32-bit PowerPC core registers, FPU registers, and AltiVec SIMD registers."]]});

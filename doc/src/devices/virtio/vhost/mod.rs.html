@@ -1,0 +1,222 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `devices&#x2F;src&#x2F;virtio&#x2F;vhost&#x2F;mod.rs`."><meta name="keywords" content="rust, rustlang, rust-lang"><title>mod.rs - source</title><link rel="stylesheet" type="text/css" href="../../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../../ayu.css" disabled ><script id="default-settings" ></script><script src="../../../../storage.js"></script><script src="../../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../../../../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../../../../favicon.svg"><style type="text/css">#crate-search{background-image:url("../../../../down-arrow.svg");}</style></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../../devices/index.html'><div class='logo-container rust-logo'><img src='../../../../rust-logo.png' alt='logo'></div></a></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../../../../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../../../../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../../../../wheel.svg"></a></div></form></nav><section id="main" class="content"><div class="example-wrap"><pre class="line-numbers"><span id="1">  1</span>
+<span id="2">  2</span>
+<span id="3">  3</span>
+<span id="4">  4</span>
+<span id="5">  5</span>
+<span id="6">  6</span>
+<span id="7">  7</span>
+<span id="8">  8</span>
+<span id="9">  9</span>
+<span id="10"> 10</span>
+<span id="11"> 11</span>
+<span id="12"> 12</span>
+<span id="13"> 13</span>
+<span id="14"> 14</span>
+<span id="15"> 15</span>
+<span id="16"> 16</span>
+<span id="17"> 17</span>
+<span id="18"> 18</span>
+<span id="19"> 19</span>
+<span id="20"> 20</span>
+<span id="21"> 21</span>
+<span id="22"> 22</span>
+<span id="23"> 23</span>
+<span id="24"> 24</span>
+<span id="25"> 25</span>
+<span id="26"> 26</span>
+<span id="27"> 27</span>
+<span id="28"> 28</span>
+<span id="29"> 29</span>
+<span id="30"> 30</span>
+<span id="31"> 31</span>
+<span id="32"> 32</span>
+<span id="33"> 33</span>
+<span id="34"> 34</span>
+<span id="35"> 35</span>
+<span id="36"> 36</span>
+<span id="37"> 37</span>
+<span id="38"> 38</span>
+<span id="39"> 39</span>
+<span id="40"> 40</span>
+<span id="41"> 41</span>
+<span id="42"> 42</span>
+<span id="43"> 43</span>
+<span id="44"> 44</span>
+<span id="45"> 45</span>
+<span id="46"> 46</span>
+<span id="47"> 47</span>
+<span id="48"> 48</span>
+<span id="49"> 49</span>
+<span id="50"> 50</span>
+<span id="51"> 51</span>
+<span id="52"> 52</span>
+<span id="53"> 53</span>
+<span id="54"> 54</span>
+<span id="55"> 55</span>
+<span id="56"> 56</span>
+<span id="57"> 57</span>
+<span id="58"> 58</span>
+<span id="59"> 59</span>
+<span id="60"> 60</span>
+<span id="61"> 61</span>
+<span id="62"> 62</span>
+<span id="63"> 63</span>
+<span id="64"> 64</span>
+<span id="65"> 65</span>
+<span id="66"> 66</span>
+<span id="67"> 67</span>
+<span id="68"> 68</span>
+<span id="69"> 69</span>
+<span id="70"> 70</span>
+<span id="71"> 71</span>
+<span id="72"> 72</span>
+<span id="73"> 73</span>
+<span id="74"> 74</span>
+<span id="75"> 75</span>
+<span id="76"> 76</span>
+<span id="77"> 77</span>
+<span id="78"> 78</span>
+<span id="79"> 79</span>
+<span id="80"> 80</span>
+<span id="81"> 81</span>
+<span id="82"> 82</span>
+<span id="83"> 83</span>
+<span id="84"> 84</span>
+<span id="85"> 85</span>
+<span id="86"> 86</span>
+<span id="87"> 87</span>
+<span id="88"> 88</span>
+<span id="89"> 89</span>
+<span id="90"> 90</span>
+<span id="91"> 91</span>
+<span id="92"> 92</span>
+<span id="93"> 93</span>
+<span id="94"> 94</span>
+<span id="95"> 95</span>
+<span id="96"> 96</span>
+<span id="97"> 97</span>
+<span id="98"> 98</span>
+<span id="99"> 99</span>
+<span id="100">100</span>
+<span id="101">101</span>
+<span id="102">102</span>
+<span id="103">103</span>
+<span id="104">104</span>
+<span id="105">105</span>
+<span id="106">106</span>
+<span id="107">107</span>
+<span id="108">108</span>
+<span id="109">109</span>
+</pre><pre class="rust"><code><span class="comment">// Copyright 2017 The Chromium OS Authors. All rights reserved.</span>
+<span class="comment">// Use of this source code is governed by a BSD-style license that can be</span>
+<span class="comment">// found in the LICENSE file.</span>
+
+<span class="doccomment">//! Implements vhost-based virtio devices.</span>
+
+<span class="kw">use</span> <span class="ident">base</span>::{<span class="ident">Error</span> <span class="kw">as</span> <span class="ident">SysError</span>, <span class="ident">TubeError</span>};
+<span class="kw">use</span> <span class="ident">net_util::Error</span> <span class="kw">as</span> <span class="ident">TapError</span>;
+<span class="kw">use</span> <span class="ident">remain::sorted</span>;
+<span class="kw">use</span> <span class="ident">thiserror::Error</span>;
+<span class="kw">use</span> <span class="ident">vhost::Error</span> <span class="kw">as</span> <span class="ident">VhostError</span>;
+
+<span class="kw">mod</span> <span class="ident">control_socket</span>;
+<span class="kw">mod</span> <span class="ident">net</span>;
+<span class="kw">pub</span> <span class="kw">mod</span> <span class="ident">user</span>;
+<span class="kw">mod</span> <span class="ident">vsock</span>;
+<span class="kw">mod</span> <span class="ident">worker</span>;
+
+<span class="kw">pub</span> <span class="kw">use</span> <span class="ident"><span class="self">self</span>::control_socket</span>::<span class="kw-2">*</span>;
+<span class="kw">pub</span> <span class="kw">use</span> <span class="ident"><span class="self">self</span>::net::Net</span>;
+<span class="kw">pub</span> <span class="kw">use</span> <span class="ident"><span class="self">self</span>::vsock::Vsock</span>;
+
+<span class="attribute">#[<span class="ident">sorted</span>]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Error</span>, <span class="ident">Debug</span>)]</span>
+<span class="kw">pub</span> <span class="kw">enum</span> <span class="ident">Error</span> {
+    <span class="doccomment">/// Cloning kill event failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to clone kill event: {0}&quot;</span>)]</span>
+    <span class="ident">CloneKillEvent</span>(<span class="ident">SysError</span>),
+    <span class="doccomment">/// Creating kill event failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to create kill event: {0}&quot;</span>)]</span>
+    <span class="ident">CreateKillEvent</span>(<span class="ident">SysError</span>),
+    <span class="doccomment">/// Creating tube failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to create tube: {0}&quot;</span>)]</span>
+    <span class="ident">CreateTube</span>(<span class="ident">TubeError</span>),
+    <span class="doccomment">/// Creating wait context failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to create poll context: {0}&quot;</span>)]</span>
+    <span class="ident">CreateWaitContext</span>(<span class="ident">SysError</span>),
+    <span class="doccomment">/// Enabling tap interface failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to enable tap interface: {0}&quot;</span>)]</span>
+    <span class="ident">TapEnable</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Open tap device failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to open tap device: {0}&quot;</span>)]</span>
+    <span class="ident">TapOpen</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Setting tap IP failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set tap IP: {0}&quot;</span>)]</span>
+    <span class="ident">TapSetIp</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Setting tap mac address failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set tap mac address: {0}&quot;</span>)]</span>
+    <span class="ident">TapSetMacAddress</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Setting tap netmask failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set tap netmask: {0}&quot;</span>)]</span>
+    <span class="ident">TapSetNetmask</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Setting tap interface offload flags failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set tap interface offload flags: {0}&quot;</span>)]</span>
+    <span class="ident">TapSetOffload</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Setting vnet header size failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set vnet header size: {0}&quot;</span>)]</span>
+    <span class="ident">TapSetVnetHdrSize</span>(<span class="ident">TapError</span>),
+    <span class="doccomment">/// Get features failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to get features: {0}&quot;</span>)]</span>
+    <span class="ident">VhostGetFeatures</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Failed to create vhost event.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to create vhost event: {0}&quot;</span>)]</span>
+    <span class="ident">VhostIrqCreate</span>(<span class="ident">SysError</span>),
+    <span class="doccomment">/// Failed to read vhost event.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to read vhost event: {0}&quot;</span>)]</span>
+    <span class="ident">VhostIrqRead</span>(<span class="ident">SysError</span>),
+    <span class="doccomment">/// Net set backend failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;net set backend failed: {0}&quot;</span>)]</span>
+    <span class="ident">VhostNetSetBackend</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Failed to open vhost device.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to open vhost device: {0}&quot;</span>)]</span>
+    <span class="ident">VhostOpen</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set features failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set features: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetFeatures</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set mem table failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set mem table: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetMemTable</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set owner failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set owner: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetOwner</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set vring addr failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set vring addr: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetVringAddr</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set vring base failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set vring base: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetVringBase</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set vring call failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set vring call: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetVringCall</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set vring kick failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set vring kick: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetVringKick</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Set vring num failed.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set vring num: {0}&quot;</span>)]</span>
+    <span class="ident">VhostSetVringNum</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Failed to set CID for guest.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to set CID for guest: {0}&quot;</span>)]</span>
+    <span class="ident">VhostVsockSetCid</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Failed to start vhost-vsock driver.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed to start vhost-vsock driver: {0}&quot;</span>)]</span>
+    <span class="ident">VhostVsockStart</span>(<span class="ident">VhostError</span>),
+    <span class="doccomment">/// Error while waiting for events.</span>
+    <span class="attribute">#[<span class="ident">error</span>(<span class="string">&quot;failed waiting for events: {0}&quot;</span>)]</span>
+    <span class="ident">WaitError</span>(<span class="ident">SysError</span>),
+}
+
+<span class="kw">pub</span> <span class="kw">type</span> <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span> <span class="op">=</span> <span class="ident">std::result::Result</span><span class="op">&lt;</span><span class="ident">T</span>, <span class="ident">Error</span><span class="op">&gt;</span>;
+</code></pre></div>
+</section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../../" data-current-crate="devices" data-search-index-js="../../../../search-index.js" data-search-js="../../../../search.js"></div>
+    <script src="../../../../main.js"></script><script src="../../../../source-script.js"></script><script src="../../../../source-files.js"></script>
+</body></html>

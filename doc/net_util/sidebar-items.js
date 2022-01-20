@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Error",""],["MacAddressError",""]],"mod":[["fakes",""]],"struct":[["MacAddress","An Ethernet mac address. This struct is compatible with the C `struct sockaddr`."],["Tap","Handle for a network tap interface."]],"trait":[["TapT",""]],"type":[["Result",""]]});

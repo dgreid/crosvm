@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["id","`RegId` definitions for various TI-MSP430 CPUs."]],"struct":[["Msp430Regs","16-bit TI-MSP430 registers."]]});

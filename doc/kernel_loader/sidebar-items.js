@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Error",""]],"fn":[["load_cmdline","Writes the command line string to the given memory slice."],["load_kernel","Loads a kernel from a vmlinux elf image to a slice"]],"type":[["Result",""]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["FIELD_NUMBER_MAX","Max possible field number"],["TAG_TYPE_BITS","Tag occupies 3 bits"],["TAG_TYPE_MASK","Tag mask"]],"enum":[["WireType","One of six defined protobuf wire types"]],"struct":[["Tag","Parsed protobuf tag, which is a pair of field number and wire type"]]});

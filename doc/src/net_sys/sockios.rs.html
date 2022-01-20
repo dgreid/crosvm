@@ -1,0 +1,182 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `net_sys&#x2F;src&#x2F;sockios.rs`."><meta name="keywords" content="rust, rustlang, rust-lang"><title>sockios.rs - source</title><link rel="stylesheet" type="text/css" href="../../normalize.css"><link rel="stylesheet" type="text/css" href="../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../ayu.css" disabled ><script id="default-settings" ></script><script src="../../storage.js"></script><script src="../../crates.js"></script><noscript><link rel="stylesheet" href="../../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../../favicon.svg"><style type="text/css">#crate-search{background-image:url("../../down-arrow.svg");}</style></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../net_sys/index.html'><div class='logo-container rust-logo'><img src='../../rust-logo.png' alt='logo'></div></a></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../../wheel.svg"></a></div></form></nav><section id="main" class="content"><div class="example-wrap"><pre class="line-numbers"><span id="1"> 1</span>
+<span id="2"> 2</span>
+<span id="3"> 3</span>
+<span id="4"> 4</span>
+<span id="5"> 5</span>
+<span id="6"> 6</span>
+<span id="7"> 7</span>
+<span id="8"> 8</span>
+<span id="9"> 9</span>
+<span id="10">10</span>
+<span id="11">11</span>
+<span id="12">12</span>
+<span id="13">13</span>
+<span id="14">14</span>
+<span id="15">15</span>
+<span id="16">16</span>
+<span id="17">17</span>
+<span id="18">18</span>
+<span id="19">19</span>
+<span id="20">20</span>
+<span id="21">21</span>
+<span id="22">22</span>
+<span id="23">23</span>
+<span id="24">24</span>
+<span id="25">25</span>
+<span id="26">26</span>
+<span id="27">27</span>
+<span id="28">28</span>
+<span id="29">29</span>
+<span id="30">30</span>
+<span id="31">31</span>
+<span id="32">32</span>
+<span id="33">33</span>
+<span id="34">34</span>
+<span id="35">35</span>
+<span id="36">36</span>
+<span id="37">37</span>
+<span id="38">38</span>
+<span id="39">39</span>
+<span id="40">40</span>
+<span id="41">41</span>
+<span id="42">42</span>
+<span id="43">43</span>
+<span id="44">44</span>
+<span id="45">45</span>
+<span id="46">46</span>
+<span id="47">47</span>
+<span id="48">48</span>
+<span id="49">49</span>
+<span id="50">50</span>
+<span id="51">51</span>
+<span id="52">52</span>
+<span id="53">53</span>
+<span id="54">54</span>
+<span id="55">55</span>
+<span id="56">56</span>
+<span id="57">57</span>
+<span id="58">58</span>
+<span id="59">59</span>
+<span id="60">60</span>
+<span id="61">61</span>
+<span id="62">62</span>
+<span id="63">63</span>
+<span id="64">64</span>
+<span id="65">65</span>
+<span id="66">66</span>
+<span id="67">67</span>
+<span id="68">68</span>
+<span id="69">69</span>
+<span id="70">70</span>
+<span id="71">71</span>
+<span id="72">72</span>
+<span id="73">73</span>
+<span id="74">74</span>
+<span id="75">75</span>
+<span id="76">76</span>
+<span id="77">77</span>
+<span id="78">78</span>
+<span id="79">79</span>
+<span id="80">80</span>
+<span id="81">81</span>
+<span id="82">82</span>
+<span id="83">83</span>
+<span id="84">84</span>
+<span id="85">85</span>
+<span id="86">86</span>
+<span id="87">87</span>
+<span id="88">88</span>
+<span id="89">89</span>
+</pre><pre class="rust"><code><span class="comment">// Copyright 2019 The Chromium OS Authors. All rights reserved.</span>
+<span class="comment">// Use of this source code is governed by a BSD-style license that can be</span>
+<span class="comment">// found in the LICENSE file.</span>
+
+<span class="comment">/* automatically generated by rust-bindgen */</span>
+
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">FIOSETOWN</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35073</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSPGRP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35074</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">FIOGETOWN</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35075</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGPGRP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35076</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCATMARK</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35077</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGSTAMP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35078</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGSTAMPNS</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35079</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SOCK_IOC_TYPE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">137</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCADDRT</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35083</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDELRT</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35084</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCRTMSG</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35085</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFNAME</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35088</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFLINK</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35089</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFCONF</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35090</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFFLAGS</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35091</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFFLAGS</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35092</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35093</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35094</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFDSTADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35095</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFDSTADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35096</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFBRDADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35097</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFBRDADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35098</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFNETMASK</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35099</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFNETMASK</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35100</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFMETRIC</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35101</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFMETRIC</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35102</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFMEM</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35103</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFMEM</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35104</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFMTU</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35105</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFMTU</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35106</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFNAME</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35107</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFHWADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35108</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFENCAP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35109</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFENCAP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35110</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFHWADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35111</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFSLAVE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35113</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFSLAVE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35120</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCADDMULTI</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35121</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDELMULTI</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35122</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFINDEX</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35123</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOGIFINDEX</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35123</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFPFLAGS</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35124</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFPFLAGS</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35125</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDIFADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35126</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFHWBROADCAST</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35127</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFCOUNT</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35128</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFBR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35136</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFBR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35137</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFTXQLEN</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35138</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFTXQLEN</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35139</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCETHTOOL</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35142</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGMIIPHY</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35143</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGMIIREG</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35144</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSMIIREG</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35145</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCWANDEV</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35146</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCOUTQNSD</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35147</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGSKNS</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35148</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDARP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35155</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGARP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35156</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSARP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35157</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDRARP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35168</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGRARP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35169</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSRARP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35170</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFMAP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35184</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFMAP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35185</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCADDDLCI</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35200</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDELDLCI</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35201</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGIFVLAN</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35202</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSIFVLAN</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35203</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBONDENSLAVE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35216</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBONDRELEASE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35217</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBONDSETHWADDR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35218</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBONDSLAVEINFOQUERY</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35219</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBONDINFOQUERY</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35220</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBONDCHANGEACTIVE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35221</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBRADDBR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35232</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBRDELBR</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35233</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBRADDIF</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35234</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCBRDELIF</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35235</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCSHWTSTAMP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35248</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCGHWTSTAMP</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35249</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCDEVPRIVATE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35312</span>;
+<span class="kw">pub</span> <span class="kw">const</span> <span class="ident">SIOCPROTOPRIVATE</span>: <span class="ident">::std::os::raw::c_uint</span> <span class="op">=</span> <span class="number">35296</span>;
+</code></pre></div>
+</section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../" data-current-crate="net_sys" data-search-index-js="../../search-index.js" data-search-js="../../search.js"></div>
+    <script src="../../main.js"></script><script src="../../source-script.js"></script><script src="../../source-files.js"></script>
+</body></html>

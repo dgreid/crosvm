@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Error","The error type for command line building operations."]],"struct":[["Cmdline","A builder for a kernel command line string that validates the string as its being built. A `CString` can be constructed from this directly using `CString::new`."]],"type":[["Result","Specialized Result type for command line operations."]]});

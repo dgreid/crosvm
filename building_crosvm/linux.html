@@ -1,0 +1,308 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>For Linux - Book of crosvm</title>
+        <!-- Custom HTML head -->
+        <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+    </head>
+    <body>
+        <!-- Provide site root to javascript -->
+        <script type="text/javascript">
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script type="text/javascript">
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script type="text/javascript">
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script type="text/javascript">
+            var html = document.querySelector('html');
+            var sidebar = 'hidden';
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="../introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li><li class="chapter-item expanded "><a href="../building_crosvm/index.html"><strong aria-hidden="true">2.</strong> Building Crosvm</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../building_crosvm/linux.html" class="active"><strong aria-hidden="true">2.1.</strong> For Linux</a></li><li class="chapter-item expanded "><a href="../building_crosvm/chromium_os.html"><strong aria-hidden="true">2.2.</strong> For Chromium OS</a></li></ol></li><li class="chapter-item expanded "><a href="../running_crosvm/index.html"><strong aria-hidden="true">3.</strong> Running Crosvm</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../running_crosvm/basic_usage.html"><strong aria-hidden="true">3.1.</strong> Basic Usage</a></li><li class="chapter-item expanded "><a href="../running_crosvm/usage.html"><strong aria-hidden="true">3.2.</strong> Command Line Options</a></li><li class="chapter-item expanded "><a href="../running_crosvm/requirements.html"><strong aria-hidden="true">3.3.</strong> System Requirements</a></li><li class="chapter-item expanded "><a href="../running_crosvm/features.html"><strong aria-hidden="true">3.4.</strong> Features</a></li><li class="chapter-item expanded "><a href="../running_crosvm/devices.html"><strong aria-hidden="true">3.5.</strong> Devices</a></li></ol></li><li class="chapter-item expanded "><a href="../architecture.html"><strong aria-hidden="true">4.</strong> Architecture</a></li><li class="chapter-item expanded "><a href="../contributing.html"><strong aria-hidden="true">5.</strong> Contributing</a></li><li class="spacer"></li><li class="chapter-item expanded "><a href="../onboarding.html"><strong aria-hidden="true">6.</strong> Onboarding Resources</a></li><li class="chapter-item expanded "><a href="../appendix/index.html"><strong aria-hidden="true">7.</strong> Appendix</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../appendix/example_usage.html"><strong aria-hidden="true">7.1.</strong> Example Usage (Outdated)</a></li><li class="chapter-item expanded "><a href="../appendix/sandboxing.html"><strong aria-hidden="true">7.2.</strong> Sandboxing</a></li><li class="chapter-item expanded "><a href="../appendix/seccomp.html"><strong aria-hidden="true">7.3.</strong> Seccomp</a></li><li class="chapter-item expanded "><a href="../appendix/minijail.html"><strong aria-hidden="true">7.4.</strong> Minijail</a></li><li class="spacer"></li></ol></li><li class="chapter-item expanded "><a href="../api.html">API Documentation</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light (default)</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Book of crosvm</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script type="text/javascript">
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="building-for-linux"><a class="header" href="#building-for-linux">Building for Linux</a></h1>
+<h2 id="checking-out"><a class="header" href="#checking-out">Checking out</a></h2>
+<p>Obtain the source code via git clone.</p>
+<pre><code>git clone https://chromium.googlesource.com/chromiumos/platform/crosvm
+</code></pre>
+<h2 id="setting-up-the-development-environment"><a class="header" href="#setting-up-the-development-environment">Setting up the development environment</a></h2>
+<p>Crosvm uses submodules to manage external dependencies. Initialize them via:</p>
+<pre><code class="language-sh">git submodule update --init
+</code></pre>
+<p>It is recommended to enable automatic recursive operations to keep the
+submodules in sync with the main repository (But do not push them, as that can
+conflict with <code>repo</code>):</p>
+<pre><code class="language-sh">git config --global submodule.recurse true
+git config push.recurseSubmodules no
+</code></pre>
+<p>Crosvm development best works on Debian derivatives. First install rust via
+https://rustup.rs/. Then for the rest, we provide a script to install the
+necessary packages on Debian:</p>
+<pre><code>$ ./tools/install-deps
+</code></pre>
+<p>For other systems, please see below for instructions on
+<a href="#using-the-development-container">Using the development container</a>.</p>
+<h3 id="setting-up-for-cross-compilation"><a class="header" href="#setting-up-for-cross-compilation">Setting up for cross-compilation</a></h3>
+<p>Crosvm is built and tested on x86, aarch64 and armhf. Your host needs to be set
+up to allow installation of foreign architecture packages.</p>
+<p>On Debian this is as easy as:</p>
+<pre><code class="language-sh">$ sudo dpkg --add-architecture arm64
+$ sudo dpkg --add-architecture armhf
+$ sudo apt update
+</code></pre>
+<p>On ubuntu this is a little harder and needs some
+<a href="https://askubuntu.com/questions/430705/how-to-use-apt-get-to-download-multi-arch-library">manual modifications</a>
+of APT sources.</p>
+<p>For other systems (<strong>including gLinux</strong>), please see below for instructions on
+<a href="#using-the-development-container">Using the development container</a>.</p>
+<p>With that enabled, the following scripts will install the needed packages:</p>
+<pre><code class="language-sh">$ ./tools/install-aarch64-deps
+$ ./tools/install-armhf-deps
+</code></pre>
+<h3 id="using-the-development-container"><a class="header" href="#using-the-development-container">Using the development container</a></h3>
+<p>We provide a Debian container with the required packages installed. With
+<a href="https://docs.docker.com/get-docker/">Docker installed</a>, it can be started with:</p>
+<pre><code class="language-sh">$ ./tools/dev_container
+</code></pre>
+<p>The container image is big and may take a while to download when first used.
+Once started, you can follow all instructions in this document within the
+container shell.</p>
+<p>Instead of using the interactive shell, commands to execute can be provided
+directly:</p>
+<pre><code class="language-sh">$ ./tools/dev_container cargo build
+</code></pre>
+<p>Note: The container and build artifacts are preserved between calls to
+<code>./tools/dev_container</code>. If you wish to start fresh, use the <code>--reset</code> flag.</p>
+<h2 id="building-a-binary"><a class="header" href="#building-a-binary">Building a binary</a></h2>
+<p>If you simply want to try crosvm, run <code>cargo build</code>. Then the binary is
+generated at <code>./target/debug/crosvm</code>. Now you can move to
+<a href="../running_crosvm/basic_usage.html">Basic Usage</a>.</p>
+<p>If you want to enable <a href="../running_crosvm/features.html">additional features</a>, use
+the <code>--features</code> flag. (e.g. <code>cargo build --features=gdb</code>)</p>
+<h2 id="development"><a class="header" href="#development">Development</a></h2>
+<h3 id="iterative-development"><a class="header" href="#iterative-development">Iterative development</a></h3>
+<p>You can use cargo as usual for crosvm development to <code>cargo build</code> and
+<code>cargo test</code> single crates that you are working on.</p>
+<p>If you are working on aarch64 specific code, you can use the <code>set_test_target</code>
+tool to instruct cargo to build for aarch64 and run tests on a VM:</p>
+<pre><code class="language-sh">$ ./tools/set_test_target vm:aarch64 &amp;&amp; source .envrc
+$ cd mycrate &amp;&amp; cargo test
+</code></pre>
+<p>The script will start a VM for testing and write environment variables for cargo
+to <code>.envrc</code>. With those <code>cargo build</code> will build for aarch64 and <code>cargo test</code>
+will run tests inside the VM.</p>
+<p>The aarch64 VM can be managed with the <code>./tools/aarch64vm</code> script.</p>
+<h3 id="running-all-tests"><a class="header" href="#running-all-tests">Running all tests</a></h3>
+<p>Crosvm cannot use <code>cargo test --workspace</code> because of various restrictions of
+cargo. So we have our own test runner:</p>
+<pre><code class="language-sh">$ ./tools/run_tests
+</code></pre>
+<p>Which will run all tests locally. Since we have some architecture-dependent
+code, we also have the option of running tests within an aarch64 VM:</p>
+<pre><code class="language-sh">$ ./tools/run_tests --target=vm:aarch64
+</code></pre>
+<p>When working on a machine that does not support cross-compilation (e.g. gLinux),
+you can use the dev container to build and run the tests.</p>
+<pre><code class="language-sh">$ ./tools/dev_container ./tools/run_tests --target=vm:aarch64
+</code></pre>
+<p>It is also possible to run tests on a remote machine via ssh. The target
+architecture is automatically detected:</p>
+<pre><code class="language-sh">$ ./tools/run_tests --target=ssh:hostname
+</code></pre>
+<p>However, it is your responsibility to make sure the required libraries for
+crosvm are installed and password-less authentication is set up. See
+<code>./tools/impl/testvm/cloud_init.yaml</code> for hints on what the VM has installed.</p>
+<h3 id="presubmit-checks"><a class="header" href="#presubmit-checks">Presubmit checks</a></h3>
+<p>To verify changes before submitting, use the <code>presubmit</code> script:</p>
+<pre><code>$ ./tools/presubmit
+</code></pre>
+<p>This will run clippy, formatters and runs all tests. The presubmits will use the
+dev container to build for other platforms if your host is not set up to do so.</p>
+<p>To run checks faster, they can be run in parallel in multiple tmux panes:</p>
+<pre><code>$ ./tools/presubmit --tmux
+</code></pre>
+<p>The <code>--quick</code> variant will skip some slower checks, like building for other
+platforms altogether:</p>
+<pre><code>$ ./tools/presubmit --quick
+</code></pre>
+<h2 id="known-issues"><a class="header" href="#known-issues">Known issues</a></h2>
+<ul>
+<li>By default, crosvm is running devices in sandboxed mode, which requires
+seccomp policy files to be set up. For local testing it is often easier to
+<code>--disable-sandbox</code> to run everything in a single process.</li>
+<li>If your Linux header files are too old, you may find minijail rejecting
+seccomp filters for containing unknown syscalls. You can try removing the
+offending lines from the filter file, or add <code>--seccomp-log-failures</code> to the
+crosvm command line to turn these into warnings. Note that this option will
+also stop minijail from killing processes that violate the seccomp rule,
+making the sandboxing much less aggressive.</li>
+<li>Seccomp policy files have hardcoded absolute paths. You can either fix up
+the paths locally, or set up an awesome hacky symlink:
+<code>sudo mkdir /usr/share/policy &amp;&amp; sudo ln -s /path/to/crosvm/seccomp/x86_64 /usr/share/policy/crosvm</code>.
+We'll eventually build the precompiled policies
+<a href="http://crbug.com/1052126">into the crosvm binary</a>.</li>
+<li>Devices can't be jailed if <code>/var/empty</code> doesn't exist.
+<code>sudo mkdir -p /var/empty</code> to work around this for now.</li>
+<li>You need read/write permissions for <code>/dev/kvm</code> to run tests or other crosvm
+instances. Usually it's owned by the <code>kvm</code> group, so
+<code>sudo usermod -a -G kvm $USER</code> and then log out and back in again to fix
+this.</li>
+<li>Some other features (networking) require <code>CAP_NET_ADMIN</code> so those usually
+need to be run as root.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../building_crosvm/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+                            <a rel="next" href="../building_crosvm/chromium_os.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../building_crosvm/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+                    <a rel="next" href="../building_crosvm/chromium_os.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+        <script type="text/javascript">
+            window.playground_copyable = true;
+        </script>
+        <script src="../elasticlunr.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="../mark.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="../searcher.js" type="text/javascript" charset="utf-8"></script>
+        <script src="../clipboard.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="../highlight.js" type="text/javascript" charset="utf-8"></script>
+        <script src="../book.js" type="text/javascript" charset="utf-8"></script>
+
+        <!-- Custom JS scripts -->
+        <script type="text/javascript" src="../mermaid.min.js"></script>
+        <script type="text/javascript" src="../mermaid-init.js"></script>
+    </body>
+</html>

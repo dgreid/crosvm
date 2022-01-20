@@ -1,0 +1,144 @@
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_PATH
+cargo:rerun-if-changed=src/display_wl.c
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_STATIC
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-changed=protocol/aura-shell.xml
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_STATIC
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-changed=//usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_STATIC
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-changed=//usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_STATIC
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-changed=//usr/share/wayland-protocols/stable/viewporter/viewporter.xml
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_STATIC
+cargo:rerun-if-env-changed=WAYLAND_PROTOCOLS_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-changed=protocol/virtio-gpu-metadata-v1.xml
+TARGET = Some("x86_64-unknown-linux-gnu")
+OPT_LEVEL = Some("0")
+HOST = Some("x86_64-unknown-linux-gnu")
+CC_x86_64-unknown-linux-gnu = None
+CC_x86_64_unknown_linux_gnu = None
+HOST_CC = None
+CC = None
+CFLAGS_x86_64-unknown-linux-gnu = None
+CFLAGS_x86_64_unknown_linux_gnu = None
+HOST_CFLAGS = None
+CFLAGS = None
+CRATE_CC_NO_DEFAULTS = None
+DEBUG = Some("true")
+CARGO_CFG_TARGET_FEATURE = Some("fxsr,sse,sse2")
+running: "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-fno-omit-frame-pointer" "-m64" "-I" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out" "-Wall" "-Wextra" "-std=gnu11" "-Werror" "-o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/src/display_wl.o" "-c" "src/display_wl.c"
+exit status: 0
+running: "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-fno-omit-frame-pointer" "-m64" "-I" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out" "-Wall" "-Wextra" "-std=gnu11" "-Werror" "-o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/aura-shell.o" "-c" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/aura-shell.c"
+exit status: 0
+running: "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-fno-omit-frame-pointer" "-m64" "-I" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out" "-Wall" "-Wextra" "-std=gnu11" "-Werror" "-o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/linux-dmabuf-unstable-v1.o" "-c" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/linux-dmabuf-unstable-v1.c"
+exit status: 0
+running: "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-fno-omit-frame-pointer" "-m64" "-I" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out" "-Wall" "-Wextra" "-std=gnu11" "-Werror" "-o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/xdg-shell.o" "-c" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/xdg-shell.c"
+exit status: 0
+running: "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-fno-omit-frame-pointer" "-m64" "-I" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out" "-Wall" "-Wextra" "-std=gnu11" "-Werror" "-o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/viewporter.o" "-c" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/viewporter.c"
+exit status: 0
+running: "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-fno-omit-frame-pointer" "-m64" "-I" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out" "-Wall" "-Wextra" "-std=gnu11" "-Werror" "-o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/virtio-gpu-metadata-v1.o" "-c" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/virtio-gpu-metadata-v1.c"
+exit status: 0
+AR_x86_64-unknown-linux-gnu = None
+AR_x86_64_unknown_linux_gnu = None
+HOST_AR = None
+AR = None
+running: "ar" "cq" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/libdisplay_wl.a" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/src/display_wl.o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/aura-shell.o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/linux-dmabuf-unstable-v1.o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/xdg-shell.o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/viewporter.o" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/virtio-gpu-metadata-v1.o"
+exit status: 0
+running: "ar" "s" "/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out/libdisplay_wl.a"
+exit status: 0
+cargo:rustc-link-lib=static=display_wl
+cargo:rustc-link-search=native=/home/runner/work/crosvm/crosvm/./docs/target/debug/build/gpu_display-25eee351d08f8f07/out
+cargo:rustc-link-lib=dylib=wayland-client

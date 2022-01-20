@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Community-created implementations of [`gdbstub::arch::Arch`] for various architectures."><meta name="keywords" content="rust, rustlang, rust-lang, gdbstub_arch"><title>gdbstub_arch - Rust</title><link rel="stylesheet" type="text/css" href="../normalize.css"><link rel="stylesheet" type="text/css" href="../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../ayu.css" disabled ><script id="default-settings" ></script><script src="../storage.js"></script><script src="../crates.js"></script><noscript><link rel="stylesheet" href="../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../favicon.svg"><style type="text/css">#crate-search{background-image:url("../down-arrow.svg");}</style></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../gdbstub_arch/index.html'><div class='logo-container rust-logo'><img src='../rust-logo.png' alt='logo'></div></a><h2 class="location">Crate gdbstub_arch</h2><div class="block version"><div class="narrow-helper"></div><p>Version 0.1.1</p></div><div class="sidebar-elems"><a id="all-types" href="all.html"><p>See all gdbstub_arch's items</p></a><div class="block items"><ul><li><a href="#modules">Modules</a></li></ul></div><div id="sidebar-vars" data-name="gdbstub_arch" data-ty="mod" data-relpath=""></div><script defer src="sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../wheel.svg"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Crate <a class="mod" href="#">gdbstub_arch</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../clipboard.svg" width="19" height="18" alt="Copy item path"></button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../src/gdbstub_arch/lib.rs.html#1-65" title="goto source code">[src]</a></span></h1><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Community-created implementations of <a href="../gdbstub/arch/trait.Arch.html" title="gdbstub::arch::Arch"><code>gdbstub::arch::Arch</code></a> for various
+architectures.</p>
+<p><em>Note:</em> If an architecture is missing from this crate, that does <em>not</em> mean
+that it can’t be used with <code>gdbstub</code>! So-long as there’s support for the
+target architecture in GDB, it should be fairly straightforward to implement
+<code>Arch</code> manually.</p>
+<p>Please consider upstreaming any missing <code>Arch</code> implementations you happen to
+implement yourself! Aside from the altruistic motive of improving <code>gdbstub</code>,
+upstreaming your <code>Arch</code> implementation will ensure that it’s kept up-to-date
+with any future breaking API changes.</p>
+<p><strong>Disclaimer:</strong> These implementations are all community contributions, and
+while they are tested (by the PR’s author) and code-reviewed, it’s not
+particularly feasible to write detailed tests for each architecture! If you
+spot a bug in any of the implementations, please file an issue / open a PR!</p>
+<h1 id="whats-with-regidimpl" class="section-header"><a href="#whats-with-regidimpl">What’s with <code>RegIdImpl</code>?</a></h1>
+<p>Supporting the <code>Target::read/write_register</code> API required introducing a new
+<a href="../gdbstub/arch/trait.RegId.html" title="RegId"><code>RegId</code></a> trait + <a href="../gdbstub/arch/trait.Arch.html#associatedtype.RegId" title="Arch::RegId"><code>Arch::RegId</code></a> associated type. <code>RegId</code> is used by
+<code>gdbstub</code> to translate raw GDB register ids (a protocol level arch-dependent
+<code>usize</code>) into human-readable enum variants.</p>
+<p>Unfortunately, this API was added after several contributors had already
+upstreamed their <code>Arch</code> implementations, and as a result, there are several
+built-in arch implementations which are missing proper <code>RegId</code> enums
+(tracked under <a href="https://github.com/daniel5151/gdbstub/issues/29">issue #29</a>).</p>
+<p>As a stop-gap measure, affected <code>Arch</code> implementations have been modified to
+accept a <code>RegIdImpl</code> type parameter, which requires users to manually
+specify a <code>RegId</code> implementation.</p>
+<p>If you’re not interested in implementing the <code>Target::read/write_register</code>
+methods and just want to get up-and-running with <code>gdbstub</code>, it’s fine to
+set <code>RegIdImpl</code> to <code>()</code> and use the built-in stubbed <code>impl RegId for ()</code>.</p>
+<p>A better approach would be to implement (and hopefully upstream!) a proper
+<code>RegId</code> enum. While this will require doing a bit of digging through the GDB
+docs + <a href="https://github.com/bminor/binutils-gdb/tree/master/gdb/features/">architecture XML definitions</a>,
+it’s not too tricky to get a working implementation up and running, and
+makes it possible to safely and efficiently implement the
+<code>Target::read/write_register</code> API. As an example, check out
+<a href="arm/reg/id/enum.ArmCoreRegId.html#impl-RegId"><code>ArmCoreRegId</code></a>.</p>
+<p>Whenever a <code>RegId</code> enum is upstreamed, the associated <code>Arch</code>’s <code>RegIdImpl</code>
+parameter will be defaulted to the newly added enum. This will simplify the
+API without requiring an explicit breaking API change. Once all <code>RegIdImpl</code>
+have a default implementation, only a single breaking API change will be
+required to remove <code>RegIdImpl</code> entirely (along with this documentation).</p>
+</div></details><h2 id="modules" class="section-header"><a href="#modules">Modules</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="mod" href="arm/index.html" title="gdbstub_arch::arm mod">arm</a></div><div class="item-right docblock-short"><p>Implementations for various ARM architectures.</p>
+</div><div class="item-left module-item"><a class="mod" href="mips/index.html" title="gdbstub_arch::mips mod">mips</a></div><div class="item-right docblock-short"><p>Implementations for the MIPS architecture.</p>
+</div><div class="item-left module-item"><a class="mod" href="msp430/index.html" title="gdbstub_arch::msp430 mod">msp430</a></div><div class="item-right docblock-short"><p>Implementations for the TI-MSP430 family of MCUs.</p>
+</div><div class="item-left module-item"><a class="mod" href="ppc/index.html" title="gdbstub_arch::ppc mod">ppc</a></div><div class="item-right docblock-short"><p>Implementations for various PowerPC architectures.</p>
+</div><div class="item-left module-item"><a class="mod" href="riscv/index.html" title="gdbstub_arch::riscv mod">riscv</a></div><div class="item-right docblock-short"><p>Implementations for the <a href="https://riscv.org/">RISC-V</a> architecture.</p>
+</div><div class="item-left module-item"><a class="mod" href="x86/index.html" title="gdbstub_arch::x86 mod">x86</a></div><div class="item-right docblock-short"><p>Implementations for various x86 architectures.</p>
+</div></div></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../" data-current-crate="gdbstub_arch" data-search-index-js="../search-index.js" data-search-js="../search.js"></div>
+    <script src="../main.js"></script>
+</body></html>

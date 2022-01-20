@@ -1,0 +1,4 @@
+(function() {var implementors = {};
+implementors["disk"] = [{"text":"impl <a class=\"trait\" href=\"sys_util/file_traits/trait.FileSetLen.html\" title=\"trait sys_util::file_traits::FileSetLen\">FileSetLen</a> for <a class=\"struct\" href=\"disk/struct.QcowFile.html\" title=\"struct disk::QcowFile\">QcowFile</a>","synthetic":false,"types":["disk::qcow::QcowFile"]},{"text":"impl <a class=\"trait\" href=\"sys_util/file_traits/trait.FileSetLen.html\" title=\"trait sys_util::file_traits::FileSetLen\">FileSetLen</a> for <a class=\"struct\" href=\"disk/struct.SingleFileDisk.html\" title=\"struct disk::SingleFileDisk\">SingleFileDisk</a>","synthetic":false,"types":["disk::SingleFileDisk"]}];
+implementors["sys_util"] = [];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

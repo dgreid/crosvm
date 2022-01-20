@@ -1,0 +1,80 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="github crates-io docs-rs"><meta name="keywords" content="rust, rustlang, rust-lang, remain"><title>remain - Rust</title><link rel="stylesheet" type="text/css" href="../normalize.css"><link rel="stylesheet" type="text/css" href="../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../ayu.css" disabled ><script id="default-settings" ></script><script src="../storage.js"></script><script src="../crates.js"></script><noscript><link rel="stylesheet" href="../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../favicon.svg"><style type="text/css">#crate-search{background-image:url("../down-arrow.svg");}</style></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../remain/index.html'><div class='logo-container rust-logo'><img src='../rust-logo.png' alt='logo'></div></a><h2 class="location">Crate remain</h2><div class="block version"><div class="narrow-helper"></div><p>Version 0.2.2</p></div><div class="sidebar-elems"><a id="all-types" href="all.html"><p>See all remain's items</p></a><div id="sidebar-vars" data-name="remain" data-ty="mod" data-relpath=""></div><script defer src="sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../wheel.svg"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Crate <a class="mod" href="#">remain</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../clipboard.svg" width="19" height="18" alt="Copy item path"></button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../src/remain/lib.rs.html#1-188" title="goto source code">[src]</a></span></h1><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><a href="https://github.com/dtolnay/remain"><img src="https://img.shields.io/badge/github-8da0cb?style=for-the-badge&amp;labelColor=555555&amp;logo=github" alt="github" /></a> <a href="https://crates.io/crates/remain"><img src="https://img.shields.io/badge/crates.io-fc8d62?style=for-the-badge&amp;labelColor=555555&amp;logo=rust" alt="crates-io" /></a> <a href="https://docs.rs/remain"><img src="https://img.shields.io/badge/docs.rs-66c2a5?style=for-the-badge&amp;labelColor=555555&amp;logoColor=white&amp;logo=data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgdmlld0JveD0iMCAwIDUxMiA1MTIiPjxwYXRoIGZpbGw9IiNmNWY1ZjUiIGQ9Ik00ODguNiAyNTAuMkwzOTIgMjE0VjEwNS41YzAtMTUtOS4zLTI4LjQtMjMuNC0zMy43bC0xMDAtMzcuNWMtOC4xLTMuMS0xNy4xLTMuMS0yNS4zIDBsLTEwMCAzNy41Yy0xNC4xIDUuMy0yMy40IDE4LjctMjMuNCAzMy43VjIxNGwtOTYuNiAzNi4yQzkuMyAyNTUuNSAwIDI2OC45IDAgMjgzLjlWMzk0YzAgMTMuNiA3LjcgMjYuMSAxOS45IDMyLjJsMTAwIDUwYzEwLjEgNS4xIDIyLjEgNS4xIDMyLjIgMGwxMDMuOS01MiAxMDMuOSA1MmMxMC4xIDUuMSAyMi4xIDUuMSAzMi4yIDBsMTAwLTUwYzEyLjItNi4xIDE5LjktMTguNiAxOS45LTMyLjJWMjgzLjljMC0xNS05LjMtMjguNC0yMy40LTMzLjd6TTM1OCAyMTQuOGwtODUgMzEuOXYtNjguMmw4NS0zN3Y3My4zek0xNTQgMTA0LjFsMTAyLTM4LjIgMTAyIDM4LjJ2LjZsLTEwMiA0MS40LTEwMi00MS40di0uNnptODQgMjkxLjFsLTg1IDQyLjV2LTc5LjFsODUtMzguOHY3NS40em0wLTExMmwtMTAyIDQxLjQtMTAyLTQxLjR2LS42bDEwMi0zOC4yIDEwMiAzOC4ydi42em0yNDAgMTEybC04NSA0Mi41di03OS4xbDg1LTM4Ljh2NzUuNHptMC0xMTJsLTEwMiA0MS40LTEwMi00MS40di0uNmwxMDItMzguMiAxMDIgMzguMnYuNnoiPjwvcGF0aD48L3N2Zz4K" alt="docs-rs" /></a></p>
+<br>
+<p>This crate provides an attribute macro to check at compile time that the
+variants of an enum or the arms of a match expression are written in sorted
+order.</p>
+<h1 id="syntax" class="section-header"><a href="#syntax">Syntax</a></h1>
+<p>Place a <code>#[remain::sorted]</code> attribute on enums, structs, match-expressions,
+or let-statements whose value is a match-expression.</p>
+<p>Alternatively, import as <code>use remain::sorted;</code> and use <code>#[sorted]</code> as the
+attribute.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="attribute">#[<span class="ident">remain::sorted</span>]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Debug</span>)]</span>
+<span class="kw">pub</span> <span class="kw">enum</span> <span class="ident">Error</span> {
+    <span class="ident">BlockSignal</span>(<span class="ident">signal::Error</span>),
+    <span class="ident">CreateCrasClient</span>(<span class="ident">libcras::Error</span>),
+    <span class="ident">CreateEventFd</span>(<span class="ident">sys_util::Error</span>),
+    <span class="ident">CreateSignalFd</span>(<span class="ident">sys_util::SignalFdError</span>),
+    <span class="ident">CreateSocket</span>(<span class="ident">io::Error</span>),
+    <span class="ident">DetectImageType</span>(<span class="ident">qcow::Error</span>),
+    <span class="ident">DeviceJail</span>(<span class="ident">io_jail::Error</span>),
+    <span class="ident">NetDeviceNew</span>(<span class="ident">virtio::NetError</span>),
+    <span class="ident">SpawnVcpu</span>(<span class="ident">io::Error</span>),
+}
+
+<span class="kw">impl</span> <span class="ident">Display</span> <span class="kw">for</span> <span class="ident">Error</span> {
+    <span class="kw">fn</span> <span class="ident">fmt</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">f</span>: <span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="ident">fmt::Formatter</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">fmt::Result</span> {
+        <span class="kw">use</span> <span class="ident"><span class="self">self</span>::Error</span>::<span class="kw-2">*</span>;
+
+        <span class="attribute">#[<span class="ident">remain::sorted</span>]</span>
+        <span class="kw">match</span> <span class="self">self</span> {
+            <span class="ident">BlockSignal</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to block signal: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">CreateCrasClient</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to create cras client: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">CreateEventFd</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to create eventfd: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">CreateSignalFd</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to create signalfd: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">CreateSocket</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to create socket: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">DetectImageType</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to detect disk image type: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">DeviceJail</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to jail device: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">NetDeviceNew</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to set up virtio networking: {}&quot;</span>, <span class="ident">e</span>),
+            <span class="ident">SpawnVcpu</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="macro">write!</span>(<span class="ident">f</span>, <span class="string">&quot;failed to spawn VCPU thread: {}&quot;</span>, <span class="ident">e</span>),
+        }
+    }
+}</code></pre></div>
+<p>If an enum variant, struct field, or match arm is inserted out of order,</p>
+<div class="example-wrap"><pre class="language-diff"><code>      NetDeviceNew(virtio::NetError),
+      SpawnVcpu(io::Error),
++     AaaUhOh(Box&lt;dyn StdError&gt;),
+  }</code></pre></div>
+<p>then the macro produces a compile error.</p>
+<div class="example-wrap"><pre class="language-console"><code>error: AaaUhOh should sort before BlockSignal
+  --&gt; tests/stable.rs:49:5
+   |
+49 |     AaaUhOh(Box&lt;dyn StdError&gt;),
+   |     ^^^^^^^</code></pre></div><h1 id="compiler-support" class="section-header"><a href="#compiler-support">Compiler support</a></h1>
+<p>The attribute on enums is supported on any rustc version 1.31+.</p>
+<p>Rust does not yet have stable support for user-defined attributes within a
+function body, so the attribute on match-expressions and let-statements
+requires a nightly compiler and the following two features enabled:</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="attribute">#![<span class="ident">feature</span>(<span class="ident">proc_macro_hygiene</span>, <span class="ident">stmt_expr_attributes</span>)]</span></code></pre></div>
+<p>As a stable alternative, this crate provides a function-level attribute
+called <code>#[remain::check]</code> which makes match-expression and let-statement
+attributes work on any rustc version 1.31+. Place this attribute on any
+function containing <code>#[sorted]</code> to make them work on a stable compiler.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">impl</span> <span class="ident">Display</span> <span class="kw">for</span> <span class="ident">Error</span> {
+    <span class="attribute">#[<span class="ident">remain::check</span>]</span>
+    <span class="kw">fn</span> <span class="ident">fmt</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">f</span>: <span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="ident">fmt::Formatter</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">fmt::Result</span> {
+        <span class="kw">use</span> <span class="ident"><span class="self">self</span>::Error</span>::<span class="kw-2">*</span>;
+
+        <span class="attribute">#[<span class="ident">sorted</span>]</span>
+        <span class="kw">match</span> <span class="self">self</span> {
+            <span class="comment">/* ... */</span>
+        }
+    }
+}</code></pre></div>
+</div></details><h2 id="attributes" class="section-header"><a href="#attributes">Attribute Macros</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="attr" href="attr.check.html" title="remain::check attr">check</a></div><div class="item-right docblock-short"></div><div class="item-left module-item"><a class="attr" href="attr.sorted.html" title="remain::sorted attr">sorted</a></div><div class="item-right docblock-short"></div></div></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../" data-current-crate="remain" data-search-index-js="../search-index.js" data-search-js="../search.js"></div>
+    <script src="../main.js"></script>
+</body></html>

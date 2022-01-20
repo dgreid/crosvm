@@ -1,0 +1,147 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="An ergonomic and easy-to-integrate implementation of the GDB Remote Serial Protocol in Rust, with full `#![no_std]` support."><meta name="keywords" content="rust, rustlang, rust-lang, gdbstub"><title>gdbstub - Rust</title><link rel="stylesheet" type="text/css" href="../normalize.css"><link rel="stylesheet" type="text/css" href="../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../ayu.css" disabled ><script id="default-settings" ></script><script src="../storage.js"></script><script src="../crates.js"></script><noscript><link rel="stylesheet" href="../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../favicon.svg"><style type="text/css">#crate-search{background-image:url("../down-arrow.svg");}</style></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../gdbstub/index.html'><div class='logo-container rust-logo'><img src='../rust-logo.png' alt='logo'></div></a><h2 class="location">Crate gdbstub</h2><div class="block version"><div class="narrow-helper"></div><p>Version 0.5.0</p></div><div class="sidebar-elems"><a id="all-types" href="all.html"><p>See all gdbstub's items</p></a><div class="block items"><ul><li><a href="#modules">Modules</a></li><li><a href="#macros">Macros</a></li><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li><li><a href="#traits">Traits</a></li></ul></div><div id="sidebar-vars" data-name="gdbstub" data-ty="mod" data-relpath=""></div><script defer src="sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../wheel.svg"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Crate <a class="mod" href="#">gdbstub</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../clipboard.svg" width="19" height="18" alt="Copy item path"></button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../src/gdbstub/lib.rs.html#1-168" title="goto source code">[src]</a></span></h1><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>An ergonomic and easy-to-integrate implementation of the
+<a href="https://sourceware.org/gdb/onlinedocs/gdb/Remote-Protocol.html#Remote-Protocol">GDB Remote Serial Protocol</a>
+in Rust, with full <code>#![no_std]</code> support.</p>
+<h2 id="getting-started" class="section-header"><a href="#getting-started">Getting Started</a></h2>
+<p>This section provides a brief overview of the key traits and types used in
+<code>gdbstub</code>, and walks though the basic steps required to integrate <code>gdbstub</code>
+into a project.</p>
+<p>At a high level, there are only two things that are required to get up and
+running with <code>gdbstub</code>: a <a href="#the-connection-trait"><code>Connection</code></a>, and a
+<a href="#the-target-trait"><code>Target</code></a></p>
+<blockquote>
+<p><em>Note:</em> I <em>highly recommended</em> referencing some of the
+<a href="https://github.com/daniel5151/gdbstub/blob/master/README.md#examples">examples</a>
+listed in the project README when integrating <code>gdbstub</code> into a project for
+the first time.</p>
+</blockquote>
+<blockquote>
+<p>In particular, the in-tree
+<a href="https://github.com/daniel5151/gdbstub/tree/master/examples/armv4t"><code>armv4t</code></a>
+example contains basic implementations off almost all protocol extensions,
+making it an incredibly valuable reference when implementing protocol
+extensions.</p>
+</blockquote>
+<h3 id="the-connection-trait" class="section-header"><a href="#the-connection-trait">The <code>Connection</code> Trait</a></h3>
+<p>First things first: <code>gdbstub</code> needs some way to communicate with a GDB
+client. To facilitate this communication, <code>gdbstub</code> uses a custom
+<a href="trait.Connection.html" title="Connection"><code>Connection</code></a> trait.</p>
+<p><code>Connection</code> is automatically implemented for common <code>std</code> types such as
+<a href="https://doc.rust-lang.org/1.56.1/std/net/tcp/struct.TcpStream.html"><code>TcpStream</code></a> and
+<a href="https://doc.rust-lang.org/1.56.1/std/os/imp/unix/net/stream/struct.UnixStream.html"><code>UnixStream</code></a>.</p>
+<p>If you’re using <code>gdbstub</code> in a <code>#![no_std]</code> environment, <code>Connection</code> will
+most likely need to be manually implemented on top of whatever in-order,
+serial, byte-wise I/O your particular platform has available (e.g:
+putchar/getchar over UART, using an embedded TCP stack, etc.).</p>
+<p>One common way to start a remote debugging session is to simply wait for a
+GDB client to connect via TCP:</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use</span> <span class="ident">std::io</span>;
+<span class="kw">use</span> <span class="ident">std::net</span>::{<span class="ident">TcpListener</span>, <span class="ident">TcpStream</span>};
+
+<span class="kw">fn</span> <span class="ident">wait_for_gdb_connection</span>(<span class="ident">port</span>: <span class="ident">u16</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">io::Result</span><span class="op">&lt;</span><span class="ident">TcpStream</span><span class="op">&gt;</span> {
+    <span class="kw">let</span> <span class="ident">sockaddr</span> <span class="op">=</span> <span class="macro">format!</span>(<span class="string">&quot;localhost:{}&quot;</span>, <span class="ident">port</span>);
+    <span class="macro">eprintln!</span>(<span class="string">&quot;Waiting for a GDB connection on {:?}...&quot;</span>, <span class="ident">sockaddr</span>);
+    <span class="kw">let</span> <span class="ident">sock</span> <span class="op">=</span> <span class="ident">TcpListener::bind</span>(<span class="ident">sockaddr</span>)<span class="question-mark">?</span>;
+    <span class="kw">let</span> (<span class="ident">stream</span>, <span class="ident">addr</span>) <span class="op">=</span> <span class="ident">sock</span>.<span class="ident">accept</span>()<span class="question-mark">?</span>;
+
+    <span class="comment">// Blocks until a GDB client connects via TCP.</span>
+    <span class="comment">// i.e: Running `target remote localhost:&lt;port&gt;` from the GDB prompt.</span>
+
+    <span class="macro">eprintln!</span>(<span class="string">&quot;Debugger connected from {}&quot;</span>, <span class="ident">addr</span>);
+    <span class="prelude-val">Ok</span>(<span class="ident">stream</span>) <span class="comment">// `TcpStream` implements `gdbstub::Connection`</span>
+}</code></pre></div>
+<h3 id="the-target-trait" class="section-header"><a href="#the-target-trait">The <code>Target</code> Trait</a></h3>
+<p>The <a href="target/trait.Target.html"><code>Target</code></a> trait describes how to control and modify
+a system’s execution state during a GDB debugging session, and serves as the
+primary bridge between <code>gdbstub</code>’s generic GDB protocol implementation and a
+specific target’s project/platform-specific code.</p>
+<p>At a high level, the <code>Target</code> trait is a collection of user-defined handler
+methods that the GDB client can invoke via the GDB remote serial protocol.
+For example, the <code>Target</code> trait includes methods to read/write
+registers/memory, start/stop execution, etc…</p>
+<p><strong><code>Target</code> is the most important trait in <code>gdbstub</code>, and must be implemented
+by anyone integrating <code>gdbstub</code> into their project!</strong></p>
+<p>Please refer to the <a href="target/index.html"><code>target</code> module documentation</a> for in-depth
+instructions on how to implement <a href="target/trait.Target.html"><code>Target</code></a> for a particular
+platform.</p>
+<h3 id="starting-the-debugging-session-using-gdbstub" class="section-header"><a href="#starting-the-debugging-session-using-gdbstub">Starting the debugging session using <code>GdbStub</code></a></h3>
+<p>Once a <a href="#the-connection-trait"><code>Connection</code></a> has been established and
+<a href="#the-target-trait"><code>Target</code></a> has been all wired up, all that’s left is to
+hand things off to <a href="struct.GdbStub.html"><code>gdbstub::GdbStub</code></a> and let it do the rest!</p>
+
+<div class='information'><div class='tooltip ignore'>ⓘ</div></div><div class="example-wrap"><pre class="rust rust-example-rendered ignore"><code><span class="comment">// Set-up a valid `Target`</span>
+<span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">target</span> <span class="op">=</span> <span class="ident">MyTarget::new</span>()<span class="question-mark">?</span>; <span class="comment">// implements `Target`</span>
+
+<span class="comment">// Establish a `Connection`</span>
+<span class="kw">let</span> <span class="ident">connection</span>: <span class="ident">TcpStream</span> <span class="op">=</span> <span class="ident">wait_for_gdb_connection</span>(<span class="number">9001</span>);
+
+<span class="comment">// Create a new `gdbstub::GdbStub` using the established `Connection`.</span>
+<span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">debugger</span> <span class="op">=</span> <span class="ident">gdbstub::GdbStub::new</span>(<span class="ident">connection</span>);
+
+<span class="comment">// Instead of taking ownership of the system, `GdbStub` takes a &amp;mut, yielding</span>
+<span class="comment">// ownership back to the caller once the debugging session is closed.</span>
+<span class="kw">match</span> <span class="ident">debugger</span>.<span class="ident">run</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="ident">target</span>) {
+    <span class="prelude-val">Ok</span>(<span class="ident">disconnect_reason</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="kw">match</span> <span class="ident">disconnect_reason</span> {
+        <span class="ident">DisconnectReason::Disconnect</span> <span class="op">=</span><span class="op">&gt;</span> <span class="macro">println!</span>(<span class="string">&quot;GDB client disconnected.&quot;</span>),
+        <span class="ident">DisconnectReason::TargetHalted</span> <span class="op">=</span><span class="op">&gt;</span> <span class="macro">println!</span>(<span class="string">&quot;Target halted!&quot;</span>),
+        <span class="ident">DisconnectReason::Kill</span> <span class="op">=</span><span class="op">&gt;</span> <span class="macro">println!</span>(<span class="string">&quot;GDB client sent a kill command!&quot;</span>),
+    }
+    <span class="comment">// Handle any target-specific errors</span>
+    <span class="prelude-val">Err</span>(<span class="ident">GdbStubError::TargetError</span>(<span class="ident">e</span>)) <span class="op">=</span><span class="op">&gt;</span> {
+        <span class="macro">println!</span>(<span class="string">&quot;Target raised a fatal error: {:?}&quot;</span>, <span class="ident">e</span>);
+        <span class="comment">// `gdbstub` will not immediate close the debugging session if a</span>
+        <span class="comment">// fatal error occurs, enabling &quot;post mortem&quot; debugging if required.</span>
+        <span class="ident">debugger</span>.<span class="ident">run</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="ident">target</span>)<span class="question-mark">?</span>;
+    }
+    <span class="prelude-val">Err</span>(<span class="ident">e</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">e</span>.<span class="ident">into</span>())
+}</code></pre></div>
+<h2 id="feature-flags" class="section-header"><a href="#feature-flags">Feature flags</a></h2>
+<p>By default, both the <code>std</code> and <code>alloc</code> features are enabled.</p>
+<p>When using <code>gdbstub</code> in <code>#![no_std]</code> contexts, make sure to set
+<code>default-features = false</code>.</p>
+<ul>
+<li><code>alloc</code>
+<ul>
+<li>Implement <code>Connection</code> for <code>Box&lt;dyn Connection&gt;</code>.</li>
+<li>Log outgoing packets via <code>log::trace!</code> (uses a heap-allocated output
+buffer).</li>
+<li>Provide built-in implementations for certain protocol features:
+<ul>
+<li>Use a heap-allocated packet buffer in <code>GdbStub</code> (if none is
+provided via <code>GdbStubBuilder::with_packet_buffer</code>).</li>
+<li>(Monitor Command) Use a heap-allocated output buffer in
+<code>ConsoleOutput</code>.</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>std</code> (implies <code>alloc</code>)
+<ul>
+<li>Implement <code>Connection</code> for <a href="https://doc.rust-lang.org/1.56.1/std/net/tcp/struct.TcpStream.html"><code>TcpStream</code></a> and
+<a href="https://doc.rust-lang.org/1.56.1/std/os/imp/unix/net/stream/struct.UnixStream.html"><code>UnixStream</code></a>.</li>
+<li>Implement <a href="https://doc.rust-lang.org/1.56.1/std/error/trait.Error.html" title="std::error::Error"><code>std::error::Error</code></a> for <code>gdbstub::Error</code>.</li>
+<li>Add a <code>TargetError::Io</code> error variant to simplify I/O Error handling
+from <code>Target</code> methods.</li>
+</ul>
+</li>
+</ul>
+</div></details><h2 id="modules" class="section-header"><a href="#modules">Modules</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="mod" href="arch/index.html" title="gdbstub::arch mod">arch</a></div><div class="item-right docblock-short"><p>Traits to encode architecture-specific target information.</p>
+</div><div class="item-left module-item"><a class="mod" href="common/index.html" title="gdbstub::common mod">common</a></div><div class="item-right docblock-short"><p>Common types and definitions.</p>
+</div><div class="item-left module-item"><a class="mod" href="target/index.html" title="gdbstub::target mod">target</a></div><div class="item-right docblock-short"><p>The core <a href="target/trait.Target.html" title="Target"><code>Target</code></a> trait, and all its various protocol extension traits.</p>
+</div></div><h2 id="macros" class="section-header"><a href="#macros">Macros</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="macro" href="macro.output.html" title="gdbstub::output macro">output</a></div><div class="item-right docblock-short"><p>Send formatted data to the GDB client console.</p>
+</div><div class="item-left module-item"><a class="macro" href="macro.outputln.html" title="gdbstub::outputln macro">outputln</a></div><div class="item-right docblock-short"><p>Send formatted data to the GDB client console, with a newline appended.</p>
+</div></div><h2 id="structs" class="section-header"><a href="#structs">Structs</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="struct" href="struct.GdbStub.html" title="gdbstub::GdbStub struct">GdbStub</a></div><div class="item-right docblock-short"><p>Debug a <a href="target/trait.Target.html" title="Target"><code>Target</code></a> using the GDB Remote Serial Protocol over a given
+<a href="trait.Connection.html" title="Connection"><code>Connection</code></a>.</p>
+</div><div class="item-left module-item"><a class="struct" href="struct.GdbStubBuilder.html" title="gdbstub::GdbStubBuilder struct">GdbStubBuilder</a></div><div class="item-right docblock-short"><p>Helper to construct and customize <a href="struct.GdbStub.html" title="GdbStub"><code>GdbStub</code></a>.</p>
+</div></div><h2 id="enums" class="section-header"><a href="#enums">Enums</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="enum" href="enum.DisconnectReason.html" title="gdbstub::DisconnectReason enum">DisconnectReason</a></div><div class="item-right docblock-short"><p>Describes why the GDB session ended.</p>
+</div><div class="item-left module-item"><a class="enum" href="enum.GdbStubBuilderError.html" title="gdbstub::GdbStubBuilderError enum">GdbStubBuilderError</a></div><div class="item-right docblock-short"><p>An error which may occur when building a <a href="struct.GdbStub.html" title="GdbStub"><code>GdbStub</code></a>.</p>
+</div><div class="item-left module-item"><a class="enum" href="enum.GdbStubError.html" title="gdbstub::GdbStubError enum">GdbStubError</a></div><div class="item-right docblock-short"><p>An error which may occur during a GDB debugging session.</p>
+</div></div><h2 id="traits" class="section-header"><a href="#traits">Traits</a></h2>
+<div class="item-table"><div class="item-left module-item"><a class="trait" href="trait.Connection.html" title="gdbstub::Connection trait">Connection</a></div><div class="item-right docblock-short"><p>A trait to perform in-order, serial, byte-wise I/O.</p>
+</div></div></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../" data-current-crate="gdbstub" data-search-index-js="../search-index.js" data-search-js="../search.js"></div>
+    <script src="../main.js"></script>
+</body></html>

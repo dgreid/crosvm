@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["INDENT",""]],"fn":[["write_description","Write command names and descriptions to an output string."]],"struct":[["CommandInfo","Information about a particular command used for output."]]});

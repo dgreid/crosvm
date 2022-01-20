@@ -1,0 +1,4 @@
+(function() {var implementors = {};
+implementors["gdbstub"] = [];
+implementors["gdbstub_arch"] = [{"text":"impl <a class=\"trait\" href=\"gdbstub/arch/trait.BreakpointKind.html\" title=\"trait gdbstub::arch::BreakpointKind\">BreakpointKind</a> for <a class=\"enum\" href=\"gdbstub_arch/arm/enum.ArmBreakpointKind.html\" title=\"enum gdbstub_arch::arm::ArmBreakpointKind\">ArmBreakpointKind</a>","synthetic":false,"types":["gdbstub_arch::arm::ArmBreakpointKind"]},{"text":"impl <a class=\"trait\" href=\"gdbstub/arch/trait.BreakpointKind.html\" title=\"trait gdbstub::arch::BreakpointKind\">BreakpointKind</a> for <a class=\"enum\" href=\"gdbstub_arch/mips/enum.MipsBreakpointKind.html\" title=\"enum gdbstub_arch::mips::MipsBreakpointKind\">MipsBreakpointKind</a>","synthetic":false,"types":["gdbstub_arch::mips::MipsBreakpointKind"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

@@ -1,0 +1,215 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Abstracts VVU message parsing, sending and receiving."><meta name="keywords" content="rust, rustlang, rust-lang, EndpointExt"><title>EndpointExt in vmm_vhost::connection - Rust</title><link rel="stylesheet" type="text/css" href="../../normalize.css"><link rel="stylesheet" type="text/css" href="../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../ayu.css" disabled ><script id="default-settings" ></script><script src="../../storage.js"></script><script src="../../crates.js"></script><noscript><link rel="stylesheet" href="../../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../../favicon.svg"><style type="text/css">#crate-search{background-image:url("../../down-arrow.svg");}</style></head><body class="rustdoc trait"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../vmm_vhost/index.html'><div class='logo-container rust-logo'><img src='../../rust-logo.png' alt='logo'></div></a><h2 class="location">Trait EndpointExt</h2><div class="sidebar-elems"><div class="block items"><h3 class="sidebar-title"><a href="#provided-methods">Provided Methods</a></h3><div class="sidebar-links"><a href="#method.recv_body">recv_body</a><a href="#method.recv_data">recv_data</a><a href="#method.recv_header">recv_header</a><a href="#method.recv_into_bufs_all">recv_into_bufs_all</a><a href="#method.recv_payload_into_buf">recv_payload_into_buf</a><a href="#method.send_header">send_header</a><a href="#method.send_iovec_all">send_iovec_all</a><a href="#method.send_message">send_message</a><a href="#method.send_message_with_payload">send_message_with_payload</a></div><h3 class="sidebar-title"><a href="#implementors">Implementors</a></h3></div><h2 class="location">Other items in<br><a href="../index.html">vmm_vhost</a>::<wbr><a href="index.html">connection</a></h2><div id="sidebar-vars" data-name="EndpointExt" data-ty="trait" data-relpath=""></div><script defer src="sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu" title="themes"><img width="18" height="18" alt="Pick another theme!" src="../../brush.svg"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" id="help-button" title="help">?</button><a id="settings-menu" href="../../settings.html" title="settings"><img width="18" height="18" alt="Change settings" src="../../wheel.svg"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Trait <a href="../index.html">vmm_vhost</a>::<wbr><a href="index.html">connection</a>::<wbr><a class="trait" href="#">EndpointExt</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../../clipboard.svg" width="19" height="18" alt="Copy item path"></button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#108-415" title="goto source code">[src]</a></span></h1><div class="docblock type-decl"><pre class="rust trait"><code>pub trait EndpointExt&lt;R:&nbsp;<a class="trait" href="../message/trait.Req.html" title="trait vmm_vhost::message::Req">Req</a>&gt;: <a class="trait" href="trait.Endpoint.html" title="trait vmm_vhost::connection::Endpoint">Endpoint</a>&lt;R&gt; {
+    fn <a href="#method.send_iovec_all" class="fnname">send_iovec_all</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iovs: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.send_header" class="fnname">send_header</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hdr: &amp;<a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.unit.html">()</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.send_message" class="fnname">send_message</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hdr: &amp;<a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;body: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.reference.html">&amp;</a>T, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.unit.html">()</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.send_message_with_payload" class="fnname">send_message_with_payload</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hdr: &amp;<a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;body: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.reference.html">&amp;</a>T, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;payload: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.unit.html">()</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.recv_data" class="fnname">recv_data</a>(&amp;mut self, len: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a>&gt;&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.recv_into_bufs_all" class="fnname">recv_into_bufs_all</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bufs: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.recv_header" class="fnname">recv_header</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self<br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.recv_body" class="fnname">recv_body</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a> + <a class="trait" href="https://doc.rust-lang.org/1.56.1/core/default/trait.Default.html" title="trait core::default::Default">Default</a> + <a class="trait" href="../message/trait.VhostUserMsgValidator.html" title="trait vmm_vhost::message::VhostUserMsgValidator">VhostUserMsgValidator</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self<br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, T, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt; { ... }
+<div class="item-spacer"></div>    fn <a href="#method.recv_payload_into_buf" class="fnname">recv_payload_into_buf</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a> + <a class="trait" href="https://doc.rust-lang.org/1.56.1/core/default/trait.Default.html" title="trait core::default::Default">Default</a> + <a class="trait" href="../message/trait.VhostUserMsgValidator.html" title="trait vmm_vhost::message::VhostUserMsgValidator">VhostUserMsgValidator</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;buf: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><br>&nbsp;&nbsp;&nbsp;&nbsp;) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, T, <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt; { ... }
+}</code></pre></div><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Abstracts VVU message parsing, sending and receiving.</p>
+</div></details><h2 id="provided-methods" class="small-section-header">Provided methods<a href="#provided-methods" class="anchor"></a></h2><div class="methods"><details class="rustdoc-toggle" open><summary><div id="method.send_iovec_all" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#120-147" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.send_iovec_all" class="fnname">send_iovec_all</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;iovs: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>, <br>&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>&gt;</h4></div></summary><div class="docblock"><p>Sends all bytes from scatter-gather vectors with optional attached file descriptors. Will
+loop until all data has been transfered.</p>
+<h1 id="return" class="section-header"><a href="#return">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>number of bytes sent on success</li>
+</ul>
+</li>
+</ul>
+<h1 id="todo" class="section-header"><a href="#todo">TODO</a></h1>
+<p>This function takes a slice of <code>&amp;[u8]</code> instead of <code>IoSlice</code> because the internal
+cursor needs to be moved by <code>advance_slices()</code>.
+Once <code>IoSlice::advance_slices()</code> becomes stable, this should be updated.
+<a href="https://github.com/rust-lang/rust/issues/62726">https://github.com/rust-lang/rust/issues/62726</a>.</p>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.send_header" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#164-171" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.send_header" class="fnname">send_header</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;hdr: &amp;<a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <br>&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.unit.html">()</a>&gt;</h4></div></summary><div class="docblock"><p>Sends a header-only message with optional attached file descriptors.</p>
+<h1 id="return-1" class="section-header"><a href="#return-1">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>number of bytes sent on success</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>PartialMessage: received a partial message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>backend specific errors</li>
+</ul>
+</li>
+</ul>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.send_message" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#181-196" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.send_message" class="fnname">send_message</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;hdr: &amp;<a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <br>&nbsp;&nbsp;&nbsp;&nbsp;body: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.reference.html">&amp;</a>T, <br>&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.unit.html">()</a>&gt;</h4></div></summary><div class="docblock"><p>Send a message with header and body. Optional file descriptors may be attached to
+the message.</p>
+<h1 id="return-2" class="section-header"><a href="#return-2">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>number of bytes sent on success</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>OversizedMsg: message size is too big.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>PartialMessage: received a partial message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>backend specific errors</li>
+</ul>
+</li>
+</ul>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.send_message_with_payload" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#207-234" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.send_message_with_payload" class="fnname">send_message_with_payload</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;hdr: &amp;<a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <br>&nbsp;&nbsp;&nbsp;&nbsp;body: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.reference.html">&amp;</a>T, <br>&nbsp;&nbsp;&nbsp;&nbsp;payload: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>, <br>&nbsp;&nbsp;&nbsp;&nbsp;fds: <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;[</a><a class="type" href="https://doc.rust-lang.org/1.56.1/std/os/fd/raw/type.RawFd.html" title="type std::os::fd::raw::RawFd">RawFd</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a>&gt;<br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.unit.html">()</a>&gt;</h4></div></summary><div class="docblock"><p>Send a message with header, body and payload. Optional file descriptors
+may also be attached to the message.</p>
+<h1 id="return-3" class="section-header"><a href="#return-3">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>number of bytes sent on success</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>OversizedMsg: message size is too big.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>PartialMessage: received a partial message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>IncorrectFds: wrong number of attached fds.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>backend specific errors</li>
+</ul>
+</li>
+</ul>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.recv_data" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#240-246" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.recv_data" class="fnname">recv_data</a>(&amp;mut self, len: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a>&gt;&gt;</h4></div></summary><div class="docblock"><p>Reads <code>len</code> bytes at most.</p>
+<h1 id="return-4" class="section-header"><a href="#return-4">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>(number of bytes received, buf) on success</li>
+</ul>
+</li>
+</ul>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.recv_into_bufs_all" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#261-289" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.recv_into_bufs_all" class="fnname">recv_into_bufs_all</a>(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;bufs: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt;</h4></div></summary><div class="docblock"><p>Reads all bytes into the given scatter/gather vectors with optional attached files. Will
+loop until all data has been transferred.</p>
+<h1 id="return-5" class="section-header"><a href="#return-5">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>(number of bytes received, [received fds]) on success</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>SocketBroken: the underline socket is broken.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>SocketError: other socket related errors.</li>
+</ul>
+</li>
+</ul>
+<h1 id="todo-1" class="section-header"><a href="#todo-1">TODO</a></h1>
+<p>This function takes a slice of <code>&amp;mut [u8]</code> instead of <code>IoSliceMut</code> because the internal
+cursor needs to be moved by <code>advance_slices_mut()</code>.
+Once <code>IoSliceMut::advance_slices()</code> becomes stable, this should be updated.
+<a href="https://github.com/rust-lang/rust/issues/62726">https://github.com/rust-lang/rust/issues/62726</a>.</p>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.recv_header" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#314-328" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.recv_header" class="fnname">recv_header</a>(&amp;mut self) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt;</h4></div></summary><div class="docblock"><p>Receive a header-only message with optional attached files.
+Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be
+accepted and all other file descriptor will be discard silently.</p>
+<h1 id="return-6" class="section-header"><a href="#return-6">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>(message header, [received files]) on success.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>PartialMessage: received a partial message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>InvalidMessage: received a invalid message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>backend specific errors</li>
+</ul>
+</li>
+</ul>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.recv_body" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#339-355" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.recv_body" class="fnname">recv_body</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a> + <a class="trait" href="https://doc.rust-lang.org/1.56.1/core/default/trait.Default.html" title="trait core::default::Default">Default</a> + <a class="trait" href="../message/trait.VhostUserMsgValidator.html" title="trait vmm_vhost::message::VhostUserMsgValidator">VhostUserMsgValidator</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self<br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, T, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt;</h4></div></summary><div class="docblock"><p>Receive a message with optional attached file descriptors.
+Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be
+accepted and all other file descriptor will be discard silently.</p>
+<h1 id="return-7" class="section-header"><a href="#return-7">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>(message header, message body, [received files]) on success.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>PartialMessage: received a partial message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>InvalidMessage: received a invalid message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>backend specific errors</li>
+</ul>
+</li>
+</ul>
+</div></details><details class="rustdoc-toggle" open><summary><div id="method.recv_payload_into_buf" class="method has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#397-414" title="goto source code">[src]</a></div><h4 class="code-header">fn <a href="#method.recv_payload_into_buf" class="fnname">recv_payload_into_buf</a>&lt;T:&nbsp;<a class="trait" href="https://doc.rust-lang.org/1.56.1/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a> + <a class="trait" href="../../data_model/trait.DataInit.html" title="trait data_model::DataInit">DataInit</a> + <a class="trait" href="https://doc.rust-lang.org/1.56.1/core/default/trait.Default.html" title="trait core::default::Default">Default</a> + <a class="trait" href="../message/trait.VhostUserMsgValidator.html" title="trait vmm_vhost::message::VhostUserMsgValidator">VhostUserMsgValidator</a>&gt;(<br>&nbsp;&nbsp;&nbsp;&nbsp;&amp;mut self, <br>&nbsp;&nbsp;&nbsp;&nbsp;buf: <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">&amp;mut [</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.u8.html">u8</a><a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.slice.html">]</a><br>) -&gt; <a class="type" href="../type.Result.html" title="type vmm_vhost::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">(</a><a class="struct" href="../message/struct.VhostUserMsgHeader.html" title="struct vmm_vhost::message::VhostUserMsgHeader">VhostUserMsgHeader</a>&lt;R&gt;, T, <a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.usize.html">usize</a>, <a class="enum" href="https://doc.rust-lang.org/1.56.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.56.1/std/fs/struct.File.html" title="struct std::fs::File">File</a>&gt;&gt;<a class="primitive" href="https://doc.rust-lang.org/1.56.1/std/primitive.tuple.html">)</a>&gt;</h4></div></summary><div class="docblock"><p>Receive a message with optional payload and attached file descriptors.
+Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be
+accepted and all other file descriptor will be discard silently.</p>
+<h1 id="return-8" class="section-header"><a href="#return-8">Return:</a></h1>
+<ul>
+<li>
+<ul>
+<li>(message header, message body, size of payload, [received files]) on success.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>PartialMessage: received a partial message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>InvalidMessage: received a invalid message.</li>
+</ul>
+</li>
+<li>
+<ul>
+<li>backend specific errors</li>
+</ul>
+</li>
+</ul>
+</div></details></div><h2 id="implementors" class="small-section-header">Implementors<a href="#implementors" class="anchor"></a></h2><div class="item-list" id="implementors-list"><div id="impl-EndpointExt%3CR%3E" class="impl has-srclink"><div class="rightside"><a class="srclink" href="../../src/vmm_vhost/connection.rs.html#417" title="goto source code">[src]</a></div><a href="#impl-EndpointExt%3CR%3E" class="anchor"></a><h3 class="code-header in-band">impl&lt;R:&nbsp;<a class="trait" href="../message/trait.Req.html" title="trait vmm_vhost::message::Req">Req</a>, E:&nbsp;<a class="trait" href="trait.Endpoint.html" title="trait vmm_vhost::connection::Endpoint">Endpoint</a>&lt;R&gt;&gt; <a class="trait" href="trait.EndpointExt.html" title="trait vmm_vhost::connection::EndpointExt">EndpointExt</a>&lt;R&gt; for E</h3></div></div><script type="text/javascript" src="../../implementors/vmm_vhost/connection/trait.EndpointExt.js" async></script></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../" data-current-crate="vmm_vhost" data-search-index-js="../../search-index.js" data-search-js="../../search.js"></div>
+    <script src="../../main.js"></script>
+</body></html>

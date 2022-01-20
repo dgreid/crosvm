@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["kvm_sys"] = [{"text":"impl <a class=\"trait\" href=\"data_model/flexible_array/trait.FlexibleArray.html\" title=\"trait data_model::flexible_array::FlexibleArray\">FlexibleArray</a>&lt;<a class=\"struct\" href=\"kvm_sys/x86/bindings/struct.kvm_cpuid_entry2.html\" title=\"struct kvm_sys::x86::bindings::kvm_cpuid_entry2\">kvm_cpuid_entry2</a>&gt; for <a class=\"struct\" href=\"kvm_sys/x86/bindings/struct.kvm_cpuid2.html\" title=\"struct kvm_sys::x86::bindings::kvm_cpuid2\">kvm_cpuid2</a>","synthetic":false,"types":["kvm_sys::x86::bindings::kvm_cpuid2"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

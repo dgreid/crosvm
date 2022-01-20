@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["base"] = [{"text":"impl <a class=\"trait\" href=\"audio_streams/shm_streams/trait.SharedMemory.html\" title=\"trait audio_streams::shm_streams::SharedMemory\">SharedMemory</a> for <a class=\"struct\" href=\"base/struct.SharedMemory.html\" title=\"struct base::SharedMemory\">SharedMemory</a>","synthetic":false,"types":["base::shm::SharedMemory"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

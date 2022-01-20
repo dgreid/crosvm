@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["devices"] = [{"text":"impl <a class=\"trait\" href=\"fuse/filesystem/trait.FileSystem.html\" title=\"trait fuse::filesystem::FileSystem\">FileSystem</a> for <a class=\"struct\" href=\"devices/virtio/fs/passthrough/struct.PassthroughFs.html\" title=\"struct devices::virtio::fs::passthrough::PassthroughFs\">PassthroughFs</a>","synthetic":false,"types":["devices::virtio::fs::passthrough::PassthroughFs"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

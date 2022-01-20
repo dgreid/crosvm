@@ -1,0 +1,4 @@
+(function() {var implementors = {};
+implementors["audio_streams"] = [];
+implementors["devices"] = [{"text":"impl <a class=\"trait\" href=\"audio_streams/shm_streams/trait.ShmStream.html\" title=\"trait audio_streams::shm_streams::ShmStream\">ShmStream</a> for <a class=\"struct\" href=\"devices/virtio/snd/vios_backend/struct.VioSndShmStream.html\" title=\"struct devices::virtio::snd::vios_backend::VioSndShmStream\">VioSndShmStream</a>","synthetic":false,"types":["devices::virtio::snd::vios_backend::shm_streams::VioSndShmStream"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

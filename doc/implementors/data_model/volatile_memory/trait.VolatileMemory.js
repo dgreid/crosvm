@@ -1,0 +1,5 @@
+(function() {var implementors = {};
+implementors["base"] = [{"text":"impl <a class=\"trait\" href=\"data_model/volatile_memory/trait.VolatileMemory.html\" title=\"trait data_model::volatile_memory::VolatileMemory\">VolatileMemory</a> for <a class=\"struct\" href=\"base/struct.MemoryMapping.html\" title=\"struct base::MemoryMapping\">MemoryMapping</a>","synthetic":false,"types":["base::mmap::MemoryMapping"]}];
+implementors["data_model"] = [];
+implementors["sys_util"] = [{"text":"impl <a class=\"trait\" href=\"data_model/volatile_memory/trait.VolatileMemory.html\" title=\"trait data_model::volatile_memory::VolatileMemory\">VolatileMemory</a> for <a class=\"struct\" href=\"sys_util/struct.MemoryMapping.html\" title=\"struct sys_util::MemoryMapping\">MemoryMapping</a>","synthetic":false,"types":["sys_util::mmap::MemoryMapping"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

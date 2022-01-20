@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["ConsoleOutput","Helper struct to send console output to GDB."]],"trait":[["MonitorCmd","Target Extension - Handle custom GDB `monitor` commands."]],"type":[["MonitorCmdOps","See `MonitorCmd`."]]});

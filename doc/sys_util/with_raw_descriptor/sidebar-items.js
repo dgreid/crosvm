@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["deserialize",""],["serialize","Serializes a descriptor for later retrieval in a parent `SerializeDescriptors` struct."]]});

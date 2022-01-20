@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["dirty_log_bitmap_size","Helper function to determine the size in bytes of a dirty log bitmap for the given memory region size."]],"struct":[["Kvm",""],["KvmVcpu","A wrapper around using a KVM Vcpu."],["KvmVm","A wrapper around creating and using a KVM VM."]]});

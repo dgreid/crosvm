@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["log_panic_info",""],["redirect_stderr",""],["restore_stderr",""],["set_panic_hook","The intent of our panic hook is to get panic info and a stacktrace into the syslog, even for jailed subprocesses. It will always abort on panic to ensure a minidump is generated."]]});

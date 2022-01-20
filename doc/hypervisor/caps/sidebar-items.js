@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["HypervisorCap","An enumeration of different hypervisor capabilities."],["VmCap","A capability the `Vm` can possibly expose."]]});

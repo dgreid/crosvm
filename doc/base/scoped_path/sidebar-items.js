@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["get_temp_path","Returns a stable path based on the label, pid, and tid. If the label isn’t provided the current_exe is used instead."]],"struct":[["ScopedPath","Automatically deletes the path it contains when it goes out of scope unless it is a test and drop is called after a panic!."]]});

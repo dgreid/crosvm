@@ -1,0 +1,5 @@
+building protocol: aura-shell
+building protocol: linux-dmabuf-unstable-v1
+building protocol: xdg-shell
+building protocol: viewporter
+building protocol: virtio-gpu-metadata-v1

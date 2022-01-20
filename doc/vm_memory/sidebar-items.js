@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["guest_memory","Track memory regions that are mapped to the guest VM."]],"struct":[["GuestAddress","Represents an Address in the guest’s memory."]]});

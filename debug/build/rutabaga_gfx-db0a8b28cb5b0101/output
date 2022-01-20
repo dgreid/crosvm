@@ -1,0 +1,314 @@
+cargo:rerun-if-env-changed=EPOXY_NO_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=EPOXY_STATIC
+cargo:rerun-if-env-changed=EPOXY_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=SYSROOT
+cargo:rerun-if-env-changed=EPOXY_STATIC
+cargo:rerun-if-env-changed=EPOXY_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu
+cargo:rustc-link-lib=epoxy
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=EPOXY_STATIC
+cargo:rerun-if-env-changed=EPOXY_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=LIBDRM_NO_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=LIBDRM_STATIC
+cargo:rerun-if-env-changed=LIBDRM_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=SYSROOT
+cargo:rerun-if-env-changed=LIBDRM_STATIC
+cargo:rerun-if-env-changed=LIBDRM_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu
+cargo:rustc-link-lib=drm
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=LIBDRM_STATIC
+cargo:rerun-if-env-changed=LIBDRM_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=VIRGLRENDERER_NO_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+cargo:rerun-if-env-changed=PKG_CONFIG
+cargo:rerun-if-env-changed=VIRGLRENDERER_STATIC
+cargo:rerun-if-env-changed=VIRGLRENDERER_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+cd "/home/runner/work/crosvm/crosvm/docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/minigbm/" && make -r -I "/home/runner/work/crosvm/crosvm/third_party/minigbm" -f "/home/runner/work/crosvm/crosvm/third_party/minigbm/Makefile" SRC="/home/runner/work/crosvm/crosvm/third_party/minigbm" OUT="/home/runner/work/crosvm/crosvm/docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/minigbm/" "CC_STATIC_LIBRARY(libminigbm.pie.a)"
+make[1]: Entering directory '/home/runner/work/crosvm/crosvm/docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/minigbm'
+build configuration:
+- OUT=/home/runner/work/crosvm/crosvm/docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/minigbm/
+- SRC=/home/runner/work/crosvm/crosvm/third_party/minigbm
+- MODE=opt
+- SPLITDEBUG=0
+- NOSTRIP=1
+- VALGRIND=0
+- COLOR=1
+- CXXEXCEPTIONS=0
+- ARCH=x86_64
+- QEMU_ARCH=x86_64
+- USE_QEMU=0
+- NEEDS_ROOT=0
+- NEEDS_MOUNTS=0
+- SYSROOT=/
+
+CC		gbm_helpers.c ->  gbm_helpers.pic.o
+CC		gbm_helpers.c ->  gbm_helpers.pie.o
+CC		drv_helpers.c ->  drv_helpers.pic.o
+CC		drv_helpers.c ->  drv_helpers.pie.o
+CC		gbm.c ->  gbm.pic.o
+CC		gbm.c ->  gbm.pie.o
+CC		dri.c ->  dri.pic.o
+CC		dri.c ->  dri.pie.o
+CC		i915.c ->  i915.pic.o
+CC		i915.c ->  i915.pie.o
+CC		virtgpu_virgl.c ->  virtgpu_virgl.pic.o
+CC		virtgpu_virgl.c ->  virtgpu_virgl.pie.o
+CC		drv_array_helpers.c ->  drv_array_helpers.pic.o
+CC		drv_array_helpers.c ->  drv_array_helpers.pie.o
+CC		virtgpu_cross_domain.c ->  virtgpu_cross_domain.pic.o
+CC		virtgpu_cross_domain.c ->  virtgpu_cross_domain.pie.o
+CC		drv.c ->  drv.pic.o
+CC		drv.c ->  drv.pie.o
+CC		msm.c ->  msm.pic.o
+CC		msm.c ->  msm.pie.o
+CC		vc4.c ->  vc4.pic.o
+CC		vc4.c ->  vc4.pie.o
+CC		virtgpu.c ->  virtgpu.pic.o
+CC		virtgpu.c ->  virtgpu.pie.o
+CC		mediatek.c ->  mediatek.pic.o
+CC		mediatek.c ->  mediatek.pie.o
+CC		minigbm_helpers.c ->  minigbm_helpers.pic.o
+CC		minigbm_helpers.c ->  minigbm_helpers.pie.o
+CC		dumb_driver.c ->  dumb_driver.pic.o
+CC		dumb_driver.c ->  dumb_driver.pie.o
+CC		rockchip.c ->  rockchip.pic.o
+CC		rockchip.c ->  rockchip.pie.o
+CC		amdgpu.c ->  amdgpu.pic.o
+CC		amdgpu.c ->  amdgpu.pie.o
+AR		gbm_helpers.pie.o drv_helpers.pie.o gbm.pie.o dri.pie.o i915.pie.o virtgpu_virgl.pie.o drv_array_helpers.pie.o virtgpu_cross_domain.pie.o drv.pie.o msm.pie.o vc4.pie.o virtgpu.pie.o mediatek.pie.o minigbm_helpers.pie.o dumb_driver.pie.o rockchip.pie.o amdgpu.pie.o -> libminigbm.pie.a
+make[1]: Leaving directory '/home/runner/work/crosvm/crosvm/docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/minigbm'
+The Meson build system
+Version: 0.61.1
+Source dir: /home/runner/work/crosvm/crosvm/third_party/virglrenderer
+Build dir: /home/runner/work/crosvm/crosvm/docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/virglrenderer
+Build type: native build
+Project name: virglrenderer
+Project version: 0.9.0
+C compiler for the host machine: cc (gcc 9.3.0 "cc (Ubuntu 9.3.0-17ubuntu1~20.04) 9.3.0")
+C linker for the host machine: cc ld.bfd 2.34
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Compiler for C supports arguments -Werror=implicit-function-declaration: YES 
+Compiler for C supports arguments -Werror=missing-prototypes: YES 
+Compiler for C supports arguments -Wmissing-prototypes: YES 
+Compiler for C supports arguments -Werror=int-to-pointer-cast: YES 
+Compiler for C supports arguments -Wno-overlength-strings: YES 
+Compiler for C supports arguments -fvisibility=hidden: YES 
+Program python3 found: YES (/usr/bin/python3)
+WARNING: Python files installed by Meson might not be found by python interpreter.
+ This warning can be avoided by setting "python.platlibdir" option.
+WARNING: Python files installed by Meson might not be found by python interpreter.
+ This warning can be avoided by setting "python.purelibdir" option.
+Found pkg-config: /usr/bin/pkg-config (0.29.1)
+Run-time dependency libdrm found: YES 2.4.105
+Run-time dependency threads found: YES
+Run-time dependency epoxy found: YES 1.5.4
+Library m found: YES
+Has header "sys/uio.h" : YES 
+Has header "dlfcn.h" : YES 
+Has header "pthread.h" : YES 
+Checking for function "pthread_setaffinity_np" with dependency threads: YES 
+Has header "sys/eventfd.h" : YES 
+Has header "sys/select.h" : YES 
+Checking for function "bswap32" : YES 
+Checking for function "bswap64" : YES 
+Checking for function "clz" : YES 
+Checking for function "clzll" : YES 
+Checking for function "expect" : YES 
+Checking for function "ffs" : YES 
+Checking for function "ffsll" : YES 
+Checking for function "popcount" : YES 
+Checking for function "popcountll" : YES 
+Checking for function "types_compatible_p" : NO 
+Checking for function "unreachable" : YES 
+Compiler for C supports function attribute const: YES 
+Compiler for C supports function attribute flatten: YES 
+Compiler for C supports function attribute format: YES 
+Compiler for C supports function attribute malloc: YES 
+Compiler for C supports function attribute noreturn: YES 
+Compiler for C supports function attribute packed: YES 
+Compiler for C supports function attribute pure: YES 
+Compiler for C supports function attribute returns_nonnull: YES 
+Compiler for C supports function attribute unused: YES 
+Compiler for C supports function attribute warn_unused_result: YES 
+Compiler for C supports function attribute weak: YES 
+Checking for function "strtok_r" : YES 
+Checking for function "timespec_get" : YES 
+Has header "epoxy/egl.h" with dependency epoxy: YES 
+Run-time dependency gbm found: YES 18.0.0
+Has header "epoxy/glx.h" with dependency epoxy: YES 
+Run-time dependency x11 found: YES 1.6.9
+Configuring config.h using configuration
+Configuring virglrenderer.pc using configuration
+Message: 
+
+Configuration summary:
+   
+   prefix:    /usr/local
+   libdir:    lib/x86_64-linux-gnu
+   
+   c_args:    
+   
+   egl:       yes
+   glx:       yes
+   
+   minigbm_alloc: no
+   
+   venus:     no
+   
+   tests:     no
+   fuzzer:    no
+   tracing:   none
+
+Build targets in project: 7
+NOTICE: Future-deprecated features used:
+ * 0.56.0: {'meson.build_root', 'Dependency.get_pkgconfig_variable'}
+
+virglrenderer 0.9.0
+
+  User defined options
+    default_library: static
+
+Found ninja-1.10.0 at /usr/bin/ninja
+[1/44] Compiling C object src/mesa/libmesa.a.p/util_bitscan.c.o
+[2/44] Compiling C object src/mesa/libmesa.a.p/util_os_file.c.o
+[3/44] Compiling C object src/mesa/libmesa.a.p/util_os_misc.c.o
+[4/44] Compiling C object src/mesa/libmesa.a.p/util_hash_table.c.o
+[5/44] Compiling C object src/mesa/libmesa.a.p/util_u_cpu_detect.c.o
+[6/44] Compiling C object src/mesa/libmesa.a.p/util_u_debug.c.o
+[7/44] Compiling C object src/mesa/libmesa.a.p/util_u_math.c.o
+[8/44] Compiling C object src/mesa/libmesa.a.p/util_ralloc.c.o
+[9/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_util_u_debug_describe.c.o
+[10/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_util_u_hash_table.c.o
+[11/44] Generating src/gallium/u_format_table.c with a custom command (wrapped by meson to capture output)
+[12/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_util_u_texture.c.o
+[13/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_util_u_format.c.o
+[14/44] Compiling C object src/gallium/libgallium.a.p/meson-generated_.._u_format_table.c.o
+[15/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_cso_cache_cso_cache.c.o
+[16/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_cso_cache_cso_hash.c.o
+[17/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_scan.c.o
+[18/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_build.c.o
+[19/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_dump.c.o
+[20/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_info.c.o
+[21/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_parse.c.o
+[22/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_iterate.c.o
+[23/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_sanity.c.o
+[24/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_strings.c.o
+[25/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_util.c.o
+[26/44] Compiling C object src/libvirgl.a.p/iov.c.o
+[27/44] Compiling C object src/libvirgl.a.p/virgl_util.c.o
+[28/44] Compiling C object src/libvirgl.a.p/virgl_context.c.o
+[29/44] Compiling C object src/libvirgl.a.p/virgl_resource.c.o
+[30/44] Compiling C object src/libvirgl.a.p/vrend_debug.c.o
+[31/44] Compiling C object src/libvirgl.a.p/vrend_blitter.c.o
+[32/44] Compiling C object src/gallium/libgallium.a.p/auxiliary_tgsi_tgsi_text.c.o
+[33/44] Compiling C object src/libvirgl.a.p/vrend_object.c.o
+[34/44] Compiling C object src/libvirgl.a.p/vrend_formats.c.o
+[35/44] Compiling C object src/libvirgl.a.p/vrend_decode.c.o
+[36/44] Compiling C object src/libvirgl.a.p/vrend_tweaks.c.o
+[37/44] Compiling C object src/libvirgl.a.p/vrend_winsys.c.o
+[38/44] Compiling C object src/libvirgl.a.p/vrend_winsys_gbm.c.o
+[39/44] Compiling C object src/libvirgl.a.p/vrend_winsys_egl.c.o
+[40/44] Compiling C object src/libvirgl.a.p/vrend_winsys_glx.c.o
+[41/44] Compiling C object src/libvirglrenderer.a.p/virglrenderer.c.o
+[42/44] Compiling C object src/libvirgl.a.p/vrend_shader.c.o
+[43/44] Compiling C object src/libvirgl.a.p/vrend_renderer.c.o
+[44/44] Linking static target src/libvirglrenderer.a
+cargo:rustc-link-search=/home/runner/work/crosvm/crosvm/./docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/virglrenderer/src
+cargo:rustc-link-search=/home/runner/work/crosvm/crosvm/./docs/target/debug/build/rutabaga_gfx-db0a8b28cb5b0101/out/minigbm
+cargo:rustc-link-lib=static=virglrenderer
+cargo:rustc-link-lib=static=gbm

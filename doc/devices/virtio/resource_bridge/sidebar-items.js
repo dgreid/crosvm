@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["RESOURE_PLANE_NUM",""]],"enum":[["ResourceBridgeError",""],["ResourceInfo",""],["ResourceRequest",""],["ResourceResponse",""]],"fn":[["get_resource_info",""]],"struct":[["BufferInfo",""],["PlaneInfo",""]]});

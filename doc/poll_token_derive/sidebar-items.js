@@ -1,0 +1,1 @@
+initSidebarItems({"derive":[["PollToken","Implements the PollToken trait for a given `enum`."]]});

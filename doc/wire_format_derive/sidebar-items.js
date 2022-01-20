@@ -1,0 +1,1 @@
+initSidebarItems({"derive":[["P9WireFormat","The function that derives the actual implementation."]]});

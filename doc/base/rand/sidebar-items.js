@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Source","Represents whether or not the random bytes are pulled from the source of /dev/random or /dev/urandom."]],"fn":[["rand_bytes","Fills `output` completely with random bytes from the specified `source`."],["rand_vec","Allocates a vector of length `len` filled with random bytes from the specified `source`."]]});

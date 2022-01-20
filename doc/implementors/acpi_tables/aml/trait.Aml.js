@@ -1,0 +1,4 @@
+(function() {var implementors = {};
+implementors["acpi_tables"] = [];
+implementors["devices"] = [{"text":"impl <a class=\"trait\" href=\"acpi_tables/aml/trait.Aml.html\" title=\"trait acpi_tables::aml::Aml\">Aml</a> for <a class=\"struct\" href=\"devices/acpi/struct.ACPIPMResource.html\" title=\"struct devices::acpi::ACPIPMResource\">ACPIPMResource</a>","synthetic":false,"types":["devices::acpi::ACPIPMResource"]},{"text":"impl <a class=\"trait\" href=\"acpi_tables/aml/trait.Aml.html\" title=\"trait acpi_tables::aml::Aml\">Aml</a> for <a class=\"struct\" href=\"devices/bat/struct.GoldfishBattery.html\" title=\"struct devices::bat::GoldfishBattery\">GoldfishBattery</a>","synthetic":false,"types":["devices::bat::GoldfishBattery"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

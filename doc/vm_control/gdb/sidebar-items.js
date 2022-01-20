@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["VcpuDebug","Messages that can be sent to a vCPU to set/get its state from the debugger."],["VcpuDebugStatus","Messages that can be sent from a vCPU to update the state to the debugger."]],"struct":[["VcpuDebugStatusMessage","Pair of a vCPU ID and messages that can be sent from the vCPU to update the state to the debugger."]]});
