@@ -66,10 +66,22 @@ pub mod stdio {
     pub type va_list = __builtin_va_list;
 }
 
+#[cfg(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "arm",
+    target_arch = "aarch64"
+))]
 pub type virgl_debug_callback_type = ::std::option::Option<
     unsafe extern "C" fn(fmt: *const ::std::os::raw::c_char, ap: stdio::va_list),
 >;
 
+#[cfg(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "arm",
+    target_arch = "aarch64"
+))]
 extern "C" {
     pub fn virgl_set_debug_callback(cb: virgl_debug_callback_type) -> virgl_debug_callback_type;
 }
