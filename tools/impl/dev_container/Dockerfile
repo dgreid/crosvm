@@ -16,7 +16,7 @@ RUN dpkg --add-architecture arm64 \
     && dpkg --add-architecture armhf
 
 # Install dependencies for native builds.
-COPY tools/install-deps /tools/
+COPY tools/install-deps tools/install-docs-deps /tools/
 RUN apt-get update \
     && apt-get install --yes sudo \
     && /tools/install-deps \
