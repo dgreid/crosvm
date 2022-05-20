@@ -2,14 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
-# Builds the base image for test VMs used by ./tools/x86vm and
-# ./tools/aarch64vm.
+# Builds the base image for test VMs used by ./tools/x86vm, ./tools/aarch64vm,
+# and ./tools/riscvvm.
 #
 # To build and upload a new base image, uprev the version in the `version` file
 # and run:
 #
 #   make ARCH=x86_64 upload
 #   make ARCH=aarch64 upload
+#   make ARCH=riscv64 upload
 #
 # You need write access to the crosvm-testvm storage bucket which is part of the
 # crosvm-packages cloud project.
@@ -36,8 +37,13 @@ else ifeq ($(ARCH), aarch64)
 		-cpu cortex-a57 \
 		-M virt \
 		-bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+else ifeq ($(ARCH), riscv64)
+  DEBIAN_ARCH=risc64
+  QEMU_CMD=qemu-system-riscv64 \
+		-machine virt \
+		-bios /usr/share/qemu-efi-riscv64/opensbi-riscv64-generic-fw_dynamic.bin
 else
-  $(error Only x86_64 or aarch64 are supported)
+  $(error Only x86_64, aarch64, and riscv64 are supported)
 endif
 
 GS_PREFIX=gs://crosvm/testvm

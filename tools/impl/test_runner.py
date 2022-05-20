@@ -115,6 +115,8 @@ def get_workspace_excludes(build_triple: Triple):
             yield crate
         elif TestOption.DO_NOT_BUILD_ARMHF in options and arch == "armv7":
             yield crate
+        elif TestOption.DO_NOT_BUILD_RISCV64 in options and arch == "riscv64":
+            yield crate
         elif TestOption.DO_NOT_BUILD_WIN64 in options and sys == "windows":
             yield crate
 

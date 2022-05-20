@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+set -ex
+
+sudo apt-get install --yes --no-install-recommends gcc-riscv64-linux-gnu
+sudo apt-get install --yes --no-install-recommends libc-dev:riscv64 libcap-dev:riscv64 \
+	libssl-dev:riscv64 libc6:riscv64 libgcc-s1:riscv64 libcrypt-dev:riscv64 \
+	libtirpc-dev:riscv64 libtirpc3:riscv64 linux-libc-dev:riscv64 \
+	libcrypt1:riscv64 libgssapi-krb5-2:riscv64 libcom-err2:riscv64 libk5crypto3:riscv64 \
+	libkrb5-3:riscv64 libkrb5support0:riscv64 libkrb5support0:riscv64 libkeyutils1:riscv64
+
+rustup target add riscv64gc-unknown-linux-gnu
+
+# Generate a cross file for meson to compile for riscv64
+sudo mkdir -p -m 0755 /usr/local/share/meson/cross
+sudo tee /usr/local/share/meson/cross/riscv64 >/dev/null <<EOF
+[binaries]
+c = '/usr/bin/riscv64-linux-gnu-gcc'
+cpp = '/usr/bin/riscv64-linux-gnu-g++'
+ar = '/usr/bin/riscv64-linux-gnu-ar'
+strip = '/usr/bin/riscv64-linux-gnu-strip'
+objcopy = '/usr/bin/riscv64-linux-gnu-objcopy'
+ld= '/usr/bin/riscv64-linux-gnu-ld'
+pkgconfig = '/usr/bin/riscv64-linux-gnu-pkg-config'
+
+[properties]
+
+[host_machine]
+system = 'linux'
+cpu_family = 'riscv64'
+cpu = 'riscv64'
+endian = 'little'
+EOF

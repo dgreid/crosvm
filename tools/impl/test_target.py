@@ -46,7 +46,7 @@ TESTVM_DIR = SCRIPT_DIR.parent.joinpath("testvm")
 TARGET_DIR = testvm.cargo_target_dir().joinpath("crosvm_tools")
 ENVRC_PATH = SCRIPT_DIR.parent.parent.joinpath(".envrc")
 
-Arch = Literal["x86_64", "aarch64", "armhf", "win64"]
+Arch = Literal["x86_64", "aarch64", "armhf", "riscv64", "win64"]
 
 # Enviroment variables needed for building with cargo
 BUILD_ENV = {

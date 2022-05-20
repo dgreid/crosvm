@@ -91,6 +91,13 @@ aarch64_wrapper() {
     fi
 }
 
+riscv64_wrapper() {
+    if ! (rustup target list --installed | grep -q riscv64 &&
+        dpkg --print-foreign-architectures | grep -q riscv64); then
+        echo "./tools/dev_container"
+    fi
+}
+
 commands=(
     "./tools/health-check"
 )
@@ -101,12 +108,14 @@ if [ "$ALL" == true ]; then
         "./tools/run_tests --platform=mingw64"
         "$(aarch64_wrapper) ./tools/run_tests --platform=aarch64"
         "$(aarch64_wrapper) ./tools/run_tests --platform=armhf"
+        "$(riscv64_wrapper) ./tools/run_tests --target=vm:riscv64"
         "cargo build --verbose --no-default-features"
     )
 elif [ "$QUICK" != true ]; then
     commands+=(
         "./tools/run_tests"
         "$(aarch64_wrapper) ./tools/run_tests --platform=aarch64 --unit-tests"
+        "$(riscv64_wrapper) ./tools/run_tests --target=vm:riscv64"
         "./tools/run_tests --platform=mingw64 --unit-tests"
     )
 else

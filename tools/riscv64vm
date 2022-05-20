@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+from impl.testvm import main
+import sys
+
+if __name__ == "__main__":
+    main("riscv64", sys.argv[1:])
