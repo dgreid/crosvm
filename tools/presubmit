@@ -91,6 +91,13 @@ aarch64_wrapper() {
     fi
 }
 
+riscv64_wrapper() {
+    if ! (rustup target list --installed | grep -q riscv64 &&
+        dpkg --print-foreign-architectures | grep -q riscv64); then
+        echo "./tools/dev_container"
+    fi
+}
+
 commands=(
     "./tools/health-check"
     "./tools/run_tests --target=host"
@@ -100,6 +107,7 @@ if [ "$ALL" == true ]; then
     commands+=(
         "$(aarch64_wrapper) ./tools/run_tests --target=vm:aarch64"
         "$(aarch64_wrapper) ./tools/run_tests --target=vm:aarch64 --arch=armhf"
+        "$(riscv64_wrapper) ./tools/run_tests --target=vm:riscv64"
         "./tools/run_tests --target=host --arch=win64 --build-only"
         "cargo build --verbose --no-default-features"
     )
@@ -107,6 +115,7 @@ elif [ "$QUICK" != true ]; then
     commands+=(
         # Test via user-space emulation for faster, but less complete results.
         "$(aarch64_wrapper) ./tools/run_tests --target=host --arch=aarch64"
+        "$(riscv64_wrapper) ./tools/run_tests --target=host --arch=riscv64"
         "./tools/run_tests --target=host --arch=win64 --build-only"
     )
 fi

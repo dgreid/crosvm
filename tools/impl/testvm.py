@@ -56,7 +56,7 @@ Commands:
 
 KVM_SUPPORT = os.access("/dev/kvm", os.W_OK)
 
-Arch = Literal["x86_64", "aarch64"]
+Arch = Literal["x86_64", "aarch64", "riscv64"]
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SRC_DIR = SCRIPT_DIR.joinpath("testvm")
@@ -111,6 +111,7 @@ def rootfs_img_path(arch: Arch):
 SSH_PORTS: dict[Arch, int] = {
     "x86_64": 9000,
     "aarch64": 9001,
+    "riscv64": 9002,
 }
 
 # QEMU arguments shared by all architectures
@@ -143,6 +144,18 @@ ARCH_TO_QEMU: dict[Arch, tuple[str, list[Iterable[str]]]] = {
             (
                 "-netdev",
                 f"user,id=net0,hostfwd=tcp::{SSH_PORTS['aarch64']}-:22",
+            ),
+            *SHARED_ARGS,
+        ],
+    ),
+    "riscv64": (
+        "qemu-system-riscv64",
+        [
+            ("-machine", "virt,aia=aplic-imsic,aia-guests=4"),
+            ("-bios", "/usr/share/qemu-efi-riscv64/opensbi-riscv64-generic-fw_dynamic.bin"),
+            (
+                "-netdev",
+                f"user,id=net0,hostfwd=tcp::{SSH_PORTS['riscv64']}-:22",
             ),
             *SHARED_ARGS,
         ],

@@ -10,6 +10,7 @@ class TestOption(enum.Enum):
     DO_NOT_BUILD = "do_not_build"
     DO_NOT_BUILD_AARCH64 = "do_not_build_aarch64"
     DO_NOT_BUILD_ARMHF = "do_not_build_armhf"
+    DO_NOT_BUILD_RISCV64 = "do_not_build_riscv64"
     DO_NOT_BUILD_X86_64 = "do_not_build_x86_64"
     DO_NOT_BUILD_WIN64 = "do_not_build_win64"
 
@@ -17,6 +18,7 @@ class TestOption(enum.Enum):
     DO_NOT_RUN = "do_not_run"
     DO_NOT_RUN_ARMHF = "do_not_run_armhf"
     DO_NOT_RUN_AARCH64 = "do_not_run_aarch64"
+    DO_NOT_RUN_RISCV64 = "do_not_run_riscv64"
     DO_NOT_RUN_X86_64 = "do_not_run_x86_64"
 
     # Do not run on foreign architecture kernel (e.g. running armhf on aarch64
@@ -79,6 +81,7 @@ WIN64_DISABLED_CRATES = [
     "protos",
     "qcow_utils",
     "resources",
+    "riscv64",
     "rutabaga_gfx",
     "rutabaga_gralloc",
     "sync",
@@ -147,5 +150,6 @@ BUILD_FEATURES: dict[str, str] = {
     "x86_64": "linux-x86_64",
     "aarch64": "linux-aarch64",
     "armhf": "linux-armhf",
+    "riscv64": "linux-riscv64",
     "win64": "win64",
 }

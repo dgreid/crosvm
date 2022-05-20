@@ -104,6 +104,8 @@ def get_workspace_excludes(target_arch: Arch):
             yield crate
         elif TestOption.DO_NOT_BUILD_ARMHF in options and target_arch == "armhf":
             yield crate
+        elif TestOption.DO_NOT_BUILD_RISCV64 in options and target_arch == "riscv64":
+            yield crate
         elif TestOption.DO_NOT_BUILD_WIN64 in options and target_arch == "win64":
             yield crate
 
@@ -117,6 +119,8 @@ def should_run_executable(executable: Executable, target_arch: Arch):
     if TestOption.DO_NOT_RUN_AARCH64 in options and target_arch == "aarch64":
         return False
     if TestOption.DO_NOT_RUN_ARMHF in options and target_arch == "armhf":
+        return False
+    if TestOption.DO_NOT_RUN_RISCV64 in options and target_arch == "riscv64":
         return False
     if TestOption.DO_NOT_RUN_ON_FOREIGN_KERNEL in options and target_arch != executable.arch:
         return False
@@ -254,10 +258,10 @@ def build_all_binaries(target: TestTarget, build_arch: Arch):
 
 def is_emulated(target: TestTarget, executable: Executable) -> bool:
     if target.is_host:
-        # User-space emulation can run foreing-arch executables on the host.
+        # User-space emulation can run foreign-arch executables on the host.
         return executable.arch != target.arch
     elif target.vm:
-        return target.vm == "aarch64"
+        return target.vm == "aarch64" || target.vm == "riscv64"
     return False
 
 

@@ -43,13 +43,15 @@ TESTVM_DIR = SCRIPT_DIR.parent.joinpath("testvm")
 TARGET_DIR = testvm.cargo_target_dir().joinpath("crosvm_tools")
 ENVRC_PATH = SCRIPT_DIR.parent.parent.joinpath(".envrc")
 
-Arch = Literal["x86_64", "aarch64", "armhf", "win64"]
+Arch = Literal["x86_64", "aarch64", "armhf", "riscv64", "win64"]
 
 # Enviroment variables needed for building with cargo
 BUILD_ENV = {
     "PKG_CONFIG_aarch64_unknown_linux_gnu": "aarch64-linux-gnu-pkg-config",
     "PKG_CONFIG_armv7_unknown_linux_gnueabihf": "arm-linux-gnueabihf-pkg-config",
+    "PKG_CONFIG_riscv64_unknown_linux_gnu": "riscv64-linux-gnu-pkg-config",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "aarch64-linux-gnu-gcc",
+    "CARGO_TARGET_RISCV64_UNKNOWN_LINUX_GNU_LINKER": "riscv64-linux-gnu-gcc",
 }
 
 
