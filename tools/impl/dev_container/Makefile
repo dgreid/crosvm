@@ -28,6 +28,7 @@ upload: all
 
 crosvm_dev:
 	$(DOCKER) build \
+		--security-opt seccomp=unconfined \
 		--build-arg RUST_VERSION=$(RUST_VERSION) \
 		-t $(TAG_BASE)/$@:$(VERSION) \
 		-f Dockerfile \

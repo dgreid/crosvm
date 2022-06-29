@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 ARG RUST_VERSION
-FROM docker.io/rust:${RUST_VERSION}-slim-bullseye
+FROM ubuntu:22.04
 
 # Use a dedicated target directory so we do not write into the source directory.
 RUN mkdir -p /scratch/cargo_target
@@ -10,7 +10,6 @@ ENV CARGO_TARGET_DIR=/scratch/cargo_target
 
 # Prevent the container from writing root-owned __pycache__ files into the src.
 ENV PYTHONDONTWRITEBYTECODE=1
-
 
 # Install dependencies for native builds.
 COPY tools/install-deps tools/install-docs-deps /tools/
@@ -32,6 +31,8 @@ COPY tools/install-aarch64-deps tools/install-armhf-deps tools/install-riscv64-d
 
 # Add foreign architectures for cross-compilation.
 COPY tools/riscv64.list /etc/apt/sources.list.d/
+COPY tools/arm64.list /etc/apt/sources.list.d/
+COPY tools/armhf.list /etc/apt/sources.list.d/
 RUN dpkg --add-architecture arm64 \
     && dpkg --add-architecture armhf \
     && dpkg --add-architecture riscv64
