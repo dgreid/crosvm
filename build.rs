@@ -86,6 +86,7 @@ fn main() {
     // check policies exist for target architecuture
     let seccomp_arch_name = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "armv7" => "arm".to_owned(),
+        "riscv64" => "arm".to_owned(),
         x => x.to_owned(),
     };
     let seccomp_policy_path = src_dir.join("seccomp").join(&seccomp_arch_name);
