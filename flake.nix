@@ -14,6 +14,7 @@
   in
     lib.eachSystem [
       lib.system.aarch64-linux
+      lib.system.riscv64-linux
       lib.system.x86_64-linux
     ] (
       system: let
@@ -22,9 +23,10 @@
         packages = lib.flattenTree rec {
           crosvm = pkgs.callPackage ./package.nix {inherit src version;};
           crosvm-aarch64 = pkgs.pkgsCross.aarch64-multiplatform.callPackage ./package.nix {inherit src version;};
+          crosvm-riscv64 = pkgs.pkgsCross.riscv64.callPackage ./package.nix {inherit src version;};
           default = crosvm;
         };
-        checks = (nixpkgs.lib.mapAttrs (name: pkg: pkg.override { doCheck = true; }) (builtins.removeAttrs packages [ "default" ]));
+        checks = nixpkgs.lib.mapAttrs (name: pkg: pkg.override {doCheck = true;}) (builtins.removeAttrs packages ["default"]);
         formatter = pkgs.alejandra;
       }
     );
