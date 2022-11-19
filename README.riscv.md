@@ -1,5 +1,13 @@
 # Building for risc-v
 
+# Nix
+
+```sh
+nix build '.?submodules=1#crosvm-riscv64'
+```
+
+## Debian/Ubuntu
+
 Install pre-requisites:
 
 ```
