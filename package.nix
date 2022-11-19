@@ -32,21 +32,27 @@ rustPlatform.buildRustPackage rec {
     lockFile = ./Cargo.lock;
   };
 
-  nativeBuildInputs = [clang pkg-config protobuf python3 wayland-scanner];
+  nativeBuildInputs =
+    [clang pkg-config protobuf python3]
+    ++ lib.optionals (!stdenv.hostPlatform.isRiscV) [wayland-scanner];
 
-  buildInputs = [
-    libcap
-    libdrm
-    libepoxy
-    minijail
-    virglrenderer
-    wayland
-    wayland-protocols
-  ];
+  buildInputs =
+    [
+      libcap
+      minijail
+    ]
+    ++ lib.optionals (!stdenv.hostPlatform.isRiscv) [
+      libdrm
+      libepoxy
+      virglrenderer
+      wayland
+      wayland-protocols
+    ];
 
   preConfigure = ''
     patchShebangs third_party/minijail/tools/*.py
-    substituteInPlace build.rs --replace '"clang"' '"${stdenv.cc.targetPrefix}clang"'
+    # uncomment once rebased on main
+    # substituteInPlace build.rs --replace '"clang"' '"${stdenv.cc.targetPrefix}clang"'
   '';
 
   "CARGO_TARGET_${lib.toUpper (builtins.replaceStrings ["-"] ["_"] (rust.toRustTarget stdenv.hostPlatform))}_LINKER" = "${stdenv.cc.targetPrefix}cc";
@@ -56,7 +62,7 @@ rustPlatform.buildRustPackage rec {
   # subdirectory.
   PKG_CONFIG_WAYLAND_PROTOCOLS_PKGDATADIR = "${wayland-protocols}/share/wayland-protocols/stable";
 
-  buildFeatures = ["default" "virgl_renderer" "virgl_renderer_next"];
+  buildFeatures = lib.optionals (!stdenv.hostPlatform.isRiscV) ["default" "virgl_renderer" "virgl_renderer_next"];
 
   meta = with lib; {
     description = "A secure virtual machine monitor for KVM";
