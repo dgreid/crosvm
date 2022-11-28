@@ -41,7 +41,7 @@ rustPlatform.buildRustPackage rec {
       libcap
       minijail
     ]
-    ++ lib.optionals (!stdenv.hostPlatform.isRiscv) [
+    ++ lib.optionals (!stdenv.hostPlatform.isRiscV) [
       libdrm
       libepoxy
       virglrenderer
@@ -62,6 +62,7 @@ rustPlatform.buildRustPackage rec {
   # subdirectory.
   PKG_CONFIG_WAYLAND_PROTOCOLS_PKGDATADIR = "${wayland-protocols}/share/wayland-protocols/stable";
 
+  buildNoDefaultFeatures = true;
   buildFeatures = lib.optionals (!stdenv.hostPlatform.isRiscV) ["default" "virgl_renderer" "virgl_renderer_next"];
 
   meta = with lib; {
