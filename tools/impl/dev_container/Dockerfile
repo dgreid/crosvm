@@ -41,7 +41,6 @@ RUN apt-get update \
 # Install dependencies (APT and cargo packages are cached between image builds for faster iterative builds).
 COPY tools/install-deps tools/install-aarch64-deps tools/install-armhf-deps tools/install-riscv64-deps tools/install-docs-deps rust-toolchain /tools/
 # Add foreign architectures for cross-compilation.
-COPY tools/riscv64.list /etc/apt/sources.list.d/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     --mount=type=cache,target=/scratch/cargo_target,sharing=locked \
@@ -54,7 +53,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && ./install-armhf-deps \
     && ./install-docs-deps
 
-RUN ./install-riscv64-deps
+COPY tools/riscv64.list /etc/apt/sources.list.d/
+RUN apt-get update
+RUN cd /tools && ./install-riscv64-deps
 
 # Prepare wine64
 RUN sudo ln -sf /usr/bin/wine64-stable /usr/bin/wine64 \
