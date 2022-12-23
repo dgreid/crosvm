@@ -225,7 +225,8 @@ impl KvmKernelIrqChip {
             return Err(BaseError::new(libc::ENOTSUP));
         }
 
-        const NUM_SOURCES: u32 = 6; // TODO(dgreid) - made up a number
+        // Don't need any wired interrupts, riscv can run PCI/MSI(X) only.
+        const NUM_SOURCES: u32 = 0;
         aia.set_num_sources(NUM_SOURCES)?;
 
         let num_ids = aia.get_num_ids()?;
