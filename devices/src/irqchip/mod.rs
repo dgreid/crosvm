@@ -51,24 +51,18 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_arch = "riscv64")] {
         mod riscv64;
         pub use riscv64::*;
+pub use self::kvm::aia_addr_imsic;
+pub use self::kvm::aia_aplic_addr;
+pub use self::kvm::aia_imsic_addr;
+pub use self::kvm::aia_imsic_size;
+pub use self::kvm::AIA_APLIC_SIZE;
+pub use self::kvm::AIA_IMSIC_BASE;
+pub use self::kvm::IMSIC_MAX_INT_IDS;
     }
 
 }
 
 pub type IrqEventIndex = usize;
-
-#[cfg(target_arch = "riscv64")]
-pub use self::kvm::aia_addr_imsic;
-#[cfg(target_arch = "riscv64")]
-pub use self::kvm::aia_aplic_addr;
-#[cfg(target_arch = "riscv64")]
-pub use self::kvm::aia_imsic_addr;
-#[cfg(target_arch = "riscv64")]
-pub use self::kvm::aia_imsic_size;
-#[cfg(target_arch = "riscv64")]
-pub use self::kvm::AIA_APLIC_SIZE;
-#[cfg(target_arch = "riscv64")]
-pub use self::kvm::AIA_IMSIC_BASE;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 struct IrqEvent {
