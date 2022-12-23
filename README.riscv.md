@@ -61,5 +61,5 @@ qemu example command to start a riscv machine sharing local sources with `-virtf
 Then from inside the riscv machine, start a VM with crosvm.
 
 ```
-./crosvm/target/riscv64gc-unknown-linux-gnu/debug/crosvm run -c 1 --disable-sandbox --root ./buildroot/output/images/rootfs.ext2 ./guest.Image
+crosvm run -c 1 --disable-sandbox --root=/opt/guest/rootfs.ext2 -p "init=/bin/sh" --serial type=stdout,hardware=virtio-console,console /opt/guest/Image
 ```

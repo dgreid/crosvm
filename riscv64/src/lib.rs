@@ -65,22 +65,13 @@ const RISCV64_MMIO_BASE: u64 = 0x0300_0000;
 // Size of the whole MMIO region.
 const RISCV64_MMIO_SIZE: u64 = 0x10_0000;
 
-// Serial IRQ info, needed for FDT.
-const RISCV64_SERIAL_IRQ: u32 = 21;
-// Serial device requires 8 bytes of registers;
-const RISCV64_SERIAL_SIZE: u64 = 0x8;
-// This was the speed kvmtool used, not sure if it matters.
-const RISCV64_SERIAL_SPEED: u32 = 1843200;
-
 const RISCV64_FDT_MAX_SIZE: u64 = 0x1_0000;
 
 fn get_kernel_addr() -> GuestAddress {
     GuestAddress(RISCV64_PHYS_MEM_START + RISCV64_KERNEL_OFFSET)
 }
 
-// Virtio devices start at ?? TODO - what should this value be for riscv? does it depend on the irq
-// chip?
-const RISCV64_IRQ_BASE: u32 = RISCV64_SERIAL_IRQ + 1;
+const RISCV64_IRQ_BASE: u32 = 1;
 
 #[sorted]
 #[derive(Error, Debug)]

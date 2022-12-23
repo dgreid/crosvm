@@ -5,7 +5,6 @@
 use std::fs::File;
 use std::io::Read;
 
-use arch::SERIAL_ADDR;
 use cros_fdt::Error;
 use cros_fdt::FdtWriter;
 use cros_fdt::Result;
@@ -20,8 +19,6 @@ use vm_memory::GuestMemory;
 
 // This is the start of DRAM in the physical address space.
 use crate::RISCV64_PHYS_MEM_START;
-// serial device config
-use crate::{RISCV64_SERIAL_IRQ, RISCV64_SERIAL_SIZE, RISCV64_SERIAL_SPEED};
 
 // CPUs are assigned phandles starting with this number.
 const PHANDLE_CPU0: u32 = 0x100;
@@ -292,21 +289,6 @@ fn create_pci_nodes(
     Ok(())
 }
 
-fn create_serial_node(fdt: &mut FdtWriter, addr: u64, irq: u32) -> Result<()> {
-    let serial_reg_prop = [addr, RISCV64_SERIAL_SIZE];
-    let irq = [irq];
-
-    let serial_node = fdt.begin_node(&format!("U6_16550A@{:x}", addr))?;
-    fdt.property_string("compatible", "ns16550a")?;
-    fdt.property_array_u64("reg", &serial_reg_prop)?;
-    fdt.property_u32("clock-frequency", RISCV64_SERIAL_SPEED)?;
-    fdt.property_u32("interrupt-parent", PHANDLE_AIA_APLIC)?;
-    fdt.property_array_u32("interrupts", &irq)?;
-    fdt.end_node(serial_node)?;
-
-    Ok(())
-}
-
 /// Creates a flattened device tree containing all of the parameters for the
 /// kernel and loads it into the guest memory at the specified offset.
 ///
@@ -348,7 +330,6 @@ pub fn create_fdt(
     create_cpu_nodes(&mut fdt, num_cpus, timebase_frequency)?;
     create_aia_node(&mut fdt, num_cpus as usize, aia_num_ids, aia_num_sources)?;
     create_pci_nodes(&mut fdt, pci_irqs, pci_cfg, pci_ranges)?;
-    create_serial_node(&mut fdt, SERIAL_ADDR[0], RISCV64_SERIAL_IRQ)?;
 
     // End giant node
     fdt.end_node(root_node)?;
