@@ -221,7 +221,7 @@ impl arch::LinuxArch for Riscv64 {
             Arc::clone(&io_bus),
             system_allocator,
             &mut vm,
-            10, //TODO(dgreid) - should be max pci interrupts on riscv
+            devices::IMSIC_MAX_INT_IDS as usize,
             None,
         )
         .map_err(Error::CreatePciRoot)?;
