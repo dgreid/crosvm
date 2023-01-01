@@ -62,9 +62,12 @@ use hypervisor::VmRiscv64 as VmArch;
 use hypervisor::VmX86_64 as VmArch;
 use libc::c_int;
 #[cfg(target_arch = "riscv64")]
+use riscv64::sbi::handle_sbi_call;
+#[cfg(target_arch = "riscv64")]
 use riscv64::MsrHandlers;
 #[cfg(target_arch = "riscv64")]
 use riscv64::Riscv64 as Arch;
+use sbi_rs::SbiMessage;
 use sync::Condvar;
 use sync::Mutex;
 use vm_control::*;
@@ -591,10 +594,27 @@ where
                     }
                 }
                 Ok(VcpuExit::Sbi {
-                    extension_id: _,
-                    function_id: _,
-                    args: _,
+                    extension_id,
+                    function_id,
+                    args,
                 }) => {
+                    #[cfg(target_arch = "riscv64")]
+                    {
+                        // Create a full set of regs by appending the function and extension to args.
+                        let regs = [
+                            args[0],
+                            args[1],
+                            args[2],
+                            args[3],
+                            args[4],
+                            args[5],
+                            function_id,
+                            extension_id,
+                        ];
+                        let _ret = SbiMessage::from_regs(&regs).map(|msg| handle_sbi_call(msg));
+                        // TODO(dgreid) - set a0/a1 acording to ret.
+                    }
+                    #[cfg(not(target_arch = "riscv64"))]
                     unimplemented!("Sbi exits not yet supported");
                 }
                 Ok(VcpuExit::RiscvCsr {

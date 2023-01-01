@@ -17,6 +17,7 @@ libc = "*"
 minijail = "*"
 remain = "*"
 resources = { path = "../resources" }
+sbi_rs = { path = "../../sbi-rs" }
 sync = { path = "../common/sync" }
 thiserror = "*"
 base = { path = "../base" }

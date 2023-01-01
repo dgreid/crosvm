@@ -47,6 +47,7 @@ use vm_control::BatteryType;
 use vm_memory::GuestAddress;
 
 mod fdt;
+pub mod sbi;
 
 // We place the kernel at offset 8MB
 const RISCV64_KERNEL_OFFSET: u64 = 0x20_0000;

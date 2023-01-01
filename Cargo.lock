@@ -141,6 +141,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47253b98986dafc7a3e1cf3259194f1f47ac61abb57a57f46ec09e48d004ecda"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8da52d66c7071e2e3fa2a1e5c6d088fec47b593032b254f5e980de8ea54454d6"
+
+[[package]]
 name = "async-task"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -568,6 +574,7 @@ dependencies = [
  "riscv64",
  "rutabaga_gfx",
  "sandbox",
+ "sbi_rs",
  "scudo",
  "serde",
  "serde_json",
@@ -871,6 +878,12 @@ dependencies = [
  "pkg-config",
  "thiserror",
 ]
+
+[[package]]
+name = "flagset"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cda653ca797810c02f7ca4b804b40b8b95ae046eb989d356bce17919a8c25499"
 
 [[package]]
 name = "fnv"
@@ -1864,6 +1877,7 @@ dependencies = [
  "minijail",
  "remain",
  "resources",
+ "sbi_rs",
  "sync",
  "thiserror",
  "vm_control",
@@ -1907,6 +1921,15 @@ dependencies = [
  "prebuilts",
  "win_util",
  "winapi",
+]
+
+[[package]]
+name = "sbi_rs"
+version = "0.1.0"
+dependencies = [
+ "arrayvec",
+ "flagset",
+ "static_assertions",
 ]
 
 [[package]]
