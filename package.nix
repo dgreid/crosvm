@@ -33,7 +33,7 @@ rustPlatform.buildRustPackage rec {
   };
 
   nativeBuildInputs =
-    [clang pkg-config protobuf python3]
+    [rustPlatform.bindgenHook pkg-config protobuf python3]
     ++ lib.optionals (!stdenv.hostPlatform.isRiscV) [wayland-scanner];
 
   buildInputs =
