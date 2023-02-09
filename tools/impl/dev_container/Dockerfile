@@ -41,6 +41,12 @@ RUN dpkg --add-architecture arm64 \
 # Allow APT to cache packages between docker image builds
 RUN rm -f /etc/apt/apt.conf.d/docker-clean; echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
 
+# Install nix to enable buildling for riscv until debian stabilizes their riscv toolchains.
+RUN curl -L https://nixos.org/nix/install | sh -s -- --no-daemon --yes
+
+# Prebuild for riscv64 to prime the nix cache.
+RUN nix build --no-link '.?submodules=1#crosvm-riscv64'
+
 # Install dependencies (APT and cargo packages are cached between image builds for faster iterative builds).
 COPY --chmod=555 tools/install-deps tools/install-aarch64-deps tools/install-armhf-deps tools/install-mingw64-deps tools/setup-wine64 rust-toolchain /tools/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
