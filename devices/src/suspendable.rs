@@ -43,10 +43,8 @@ pub trait Suspendable {
     /// Create/Resume all threads related to the device.
     /// Wake should be idempotent.
     fn wake(&mut self) -> anyhow::Result<()> {
-        Err(anyhow!(
-            "Suspendable::wake not implemented for {}",
-            std::any::type_name::<Self>()
-        ))
+        // Wake by default is a success if sleep isn't implemented, it's already awake.
+        Ok(())
     }
 }
 
