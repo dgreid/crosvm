@@ -1,0 +1,5 @@
+#!/bin/bash
+
+set -ex
+
+yay -Syu --needed --noconfirm     black     ca-certificates     clang     cloud-image-utils     curl     dpkg     expect     gcc     git     jq     ffmpeg     libcap     clang     dbus     libdrm     libepoxy     glib2     libguestfs     slirp4netns     openssl     libva     wayland     libxext     lld     make     meson     mypy     nasm     nmap     ninja     openssh     pipx     pkgconf     protobuf     python     python-argh     python-pip     python-rich     qemu-desktop     rsync     screen     strace     tmux     wayland-protocols     wget
