@@ -10,5 +10,6 @@
 
 mod sys;
 pub use sys::VirtioVsockModule;
+#[cfg(not(target_os = "macos"))]
 pub use sys::Vsock;
 pub use sys::VsockConfig;
