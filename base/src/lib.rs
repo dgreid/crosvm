@@ -161,9 +161,6 @@ cfg_if::cfg_if! {
         pub use sys::unix;
 
         pub use unix::IoBuf;
-        pub use unix::net::UnixSeqpacket;
-        pub use unix::net::UnixSeqpacketListener;
-        pub use unix::net::UnlinkUnixSeqpacketListener;
         pub use unix::ScmSocket;
         pub use unix::SCM_SOCKET_MAX_FD_COUNT;
         pub use unix::add_fd_flags;
@@ -171,6 +168,20 @@ cfg_if::cfg_if! {
         pub use unix::number_of_logical_cores;
         pub use unix::pagesize;
         pub use unix::Pid;
+    }
+}
+
+// UnixSeqpacket: use macOS-specific implementation that emulates SEQPACKET over STREAM
+// since macOS doesn't support SOCK_SEQPACKET for AF_UNIX sockets.
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "macos")] {
+        pub use sys::macos::UnixSeqpacket;
+        pub use sys::macos::UnixSeqpacketListener;
+        pub use sys::macos::UnlinkUnixSeqpacketListener;
+    } else if #[cfg(unix)] {
+        pub use unix::net::UnixSeqpacket;
+        pub use unix::net::UnixSeqpacketListener;
+        pub use unix::net::UnlinkUnixSeqpacketListener;
     }
 }
 
