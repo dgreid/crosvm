@@ -19,3 +19,8 @@ pub use crate::helpers::*;
 // compile it out. In the long term, this should go away.
 #[cfg(windows)]
 pub struct FakeMinijailStub {}
+
+// WARNING: No sandboxing is provided on macOS. All device processes run with full privileges.
+// MacOS also uses a stub since sandboxing works differently on macOS.
+#[cfg(target_os = "macos")]
+pub struct FakeMinijailStub {}
