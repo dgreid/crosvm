@@ -9,5 +9,8 @@ cfg_if::cfg_if! {
         pub use metrics_events::sys::windows::*;
     } else if #[cfg(any(target_os = "android", target_os = "linux"))] {
         pub(crate) mod linux;
+    } else if #[cfg(target_os = "macos")] {
+        pub(crate) mod macos;
     }
 }
+
