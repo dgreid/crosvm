@@ -482,7 +482,7 @@ impl arch::LinuxArch for Riscv64 {
     fn register_pci_device(
         _linux: &mut RunnableLinuxVm,
         _device: Box<dyn PciDevice>,
-        _minijail: Option<Minijail>,
+        #[cfg(any(target_os = "android", target_os = "linux"))] _minijail: Option<Minijail>,
         _resources: &mut SystemAllocator,
         _tube: &mpsc::Sender<PciRootCommand>,
         #[cfg(feature = "swap")] _swap_controller: &mut Option<swap::SwapController>,

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -18,12 +19,14 @@ use std::sync::Arc;
 use aarch64_sys_reg::AArch64SysRegId;
 use arch::get_serial_cmdline;
 use arch::CpuSet;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use arch::DevicePowerManagerConfig;
 use arch::DtbOverlay;
 use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
 use arch::MemoryRegionConfig;
 use arch::RunnableLinuxVm;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use arch::VcpuAffinity;
 use arch::VmComponents;
 use arch::VmImage;
@@ -33,13 +36,17 @@ use base::SendTube;
 use base::Tube;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::vmwdt::VMWDT_DEFAULT_CLOCK_HZ;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::vmwdt::VMWDT_DEFAULT_TIMEOUT_SEC;
 use devices::Bus;
 use devices::BusDeviceObj;
 use devices::BusError;
 use devices::BusType;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::DevicePowerManager;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::HvcDevicePowerManager;
 use devices::IrqChip;
 use devices::IrqChipAArch64;
@@ -75,7 +82,7 @@ use hypervisor::VcpuRegAArch64;
 use hypervisor::Vm;
 use hypervisor::VmAArch64;
 use hypervisor::VmCap;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use jail::FakeMinijailStub as Minijail;
 use kernel_loader::LoadedKernel;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -153,6 +160,7 @@ const AARCH64_RTC_SIZE: u64 = 0x1000;
 const AARCH64_RTC_IRQ: u32 = 1;
 
 // The Goldfish battery device gets the 3rd interrupt line
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const AARCH64_BAT_IRQ: u32 = 3;
 
 // Place the virtual watchdog device at page 3
@@ -172,9 +180,13 @@ const AARCH64_PCI_MEM_SIZE_DEFAULT: u64 = 0x2000000;
 const AARCH64_IRQ_BASE: u32 = 4;
 
 // Virtual CPU Frequency Device.
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const AARCH64_VIRTFREQ_BASE: u64 = 0x1040000;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const AARCH64_VIRTFREQ_SIZE: u64 = 0x8;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const AARCH64_VIRTFREQ_MAXSIZE: u64 = 0x10000;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const AARCH64_VIRTFREQ_V2_SIZE: u64 = 0x1000;
 
 // PMU PPI interrupt, same as qemu
@@ -182,6 +194,18 @@ const AARCH64_PMU_IRQ: u32 = 7;
 
 // VCPU stall detector interrupt
 const AARCH64_VMWDT_IRQ: u32 = 15;
+
+// Number of SPIs (Shared Peripheral Interrupts) for the GIC.
+// This constant is defined locally because devices::AARCH64_GIC_NR_SPIS is only
+// exported on Linux/Android (it comes from the KVM irqchip module).
+const AARCH64_GIC_NR_SPIS: u32 = 32;
+
+// Default vmwdt constants for macOS (same values as Linux).
+// On Linux these come from devices::vmwdt, but that module doesn't exist on macOS.
+#[cfg(target_os = "macos")]
+const VMWDT_DEFAULT_CLOCK_HZ: u32 = 2;
+#[cfg(target_os = "macos")]
+const VMWDT_DEFAULT_TIMEOUT_SEC: u32 = 10;
 
 enum PayloadType {
     Bios {
@@ -771,7 +795,7 @@ impl arch::LinuxArch for AArch64 {
                 io_bus.clone(),
                 system_allocator,
                 &*vm,
-                (devices::AARCH64_GIC_NR_SPIS - AARCH64_IRQ_BASE) as usize,
+                (AARCH64_GIC_NR_SPIS - AARCH64_IRQ_BASE) as usize,
                 None,
                 #[cfg(feature = "swap")]
                 swap_controller,
@@ -780,17 +804,22 @@ impl arch::LinuxArch for AArch64 {
 
         let pci_root = Arc::new(Mutex::new(pci));
         let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci_root.clone(), 8)));
-        let (platform_devices, _others): (Vec<_>, Vec<_>) = others
-            .into_iter()
-            .partition(|(dev, _)| dev.as_platform_device().is_some());
 
-        let platform_devices = platform_devices
-            .into_iter()
-            .map(|(dev, jail_orig)| (*(dev.into_platform_device().unwrap()), jail_orig))
-            .collect();
-        // vfio-platform is currently the only backend for PM of platform devices.
-        let mut dev_pm = components.vfio_platform_pm.then(DevicePowerManager::new);
-        let (platform_devices, mut platform_pid_debug_label_map, dev_resources) =
+        // Platform device handling: VFIO platform devices are only supported on Linux/Android.
+        // On macOS, we skip platform device partitioning since as_platform_device() and
+        // into_platform_device() are not available on the BusDeviceObj trait.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let (platform_devices, mut platform_pid_debug_label_map, dev_resources) = {
+            let (platform_devices, _others): (Vec<_>, Vec<_>) = others
+                .into_iter()
+                .partition(|(dev, _)| dev.as_platform_device().is_some());
+
+            let platform_devices = platform_devices
+                .into_iter()
+                .map(|(dev, jail_orig)| (*(dev.into_platform_device().unwrap()), jail_orig))
+                .collect();
+            // vfio-platform is currently the only backend for PM of platform devices.
+            let mut dev_pm = components.vfio_platform_pm.then(DevicePowerManager::new);
             arch::sys::linux::generate_platform_bus(
                 platform_devices,
                 &*irq_chip,
@@ -802,7 +831,18 @@ impl arch::LinuxArch for AArch64 {
                 &mut dev_pm,
                 components.hv_cfg.protection_type,
             )
-            .map_err(Error::CreatePlatformBus)?;
+            .map_err(Error::CreatePlatformBus)?
+        };
+
+        #[cfg(target_os = "macos")]
+        #[allow(unused_variables)]
+        let mut platform_pid_debug_label_map = {
+            // On macOS, VFIO platform devices are not supported.
+            // Consume the `others` iterator to avoid unused variable warning
+            let _ = others;
+            BTreeMap::<u32, String>::new()
+        };
+
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
 
         if components.smccc_trng {
@@ -818,6 +858,7 @@ impl arch::LinuxArch for AArch64 {
             }
         }
 
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         if let Some(config) = components.dev_pm {
             let dev_pm = dev_pm.ok_or(Error::MissingDevicePowerManager)?;
             match config {
@@ -878,6 +919,7 @@ impl arch::LinuxArch for AArch64 {
 
         let (vcpufreq_host_tube, vcpufreq_control_tube) =
             Tube::pair().map_err(Error::CreateTube)?;
+        #[allow(unused_variables)]
         let vcpufreq_shared_tube = Arc::new(Mutex::new(vcpufreq_control_tube));
         #[cfg(any(target_os = "android", target_os = "linux"))]
         if components
@@ -1003,6 +1045,8 @@ impl arch::LinuxArch for AArch64 {
             true, // prefetchable
         );
 
+        // Goldfish battery is only supported on Linux/Android.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         let (bat_control, bat_mmio_base_and_irq) = match bat_type {
             Some(BatteryType::Goldfish) => {
                 let bat_irq = AARCH64_BAT_IRQ;
@@ -1031,6 +1075,14 @@ impl arch::LinuxArch for AArch64 {
             None => (None, None),
         };
 
+        // On macOS, battery emulation is not supported.
+        #[cfg(target_os = "macos")]
+        let (bat_control, bat_mmio_base_and_irq): (Option<BatControl>, Option<(u64, u32)>) = {
+            let _ = bat_type;
+            let _ = bat_jail;
+            (None, None)
+        };
+
         let vmwdt_cfg = fdt::VmWdtConfig {
             base: AARCH64_VMWDT_ADDR,
             size: AARCH64_VMWDT_SIZE,
@@ -1044,7 +1096,10 @@ impl arch::LinuxArch for AArch64 {
             pci_irqs,
             pci_cfg,
             &pci_ranges,
+            #[cfg(any(target_os = "android", target_os = "linux"))]
             dev_resources,
+            #[cfg(target_os = "macos")]
+            Vec::new(),
             vcpu_count as u32,
             &|n| get_vcpu_mpidr_aff(&vcpus, n),
             components.vcpu_clusters,
@@ -1072,6 +1127,7 @@ impl arch::LinuxArch for AArch64 {
             &|writer, phandles| vm.create_fdt(writer, phandles),
             device_tree_overlays,
             &serial_devices,
+            #[cfg(any(target_os = "android", target_os = "linux"))]
             components.virt_cpufreq_v2,
             enable_nested,
         )
@@ -1105,6 +1161,7 @@ impl arch::LinuxArch for AArch64 {
             pm: None,
             resume_notify_devices: Vec::new(),
             root_config: pci_root,
+            #[cfg(any(target_os = "android", target_os = "linux"))]
             platform_devices,
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
@@ -1131,7 +1188,7 @@ impl arch::LinuxArch for AArch64 {
     fn register_pci_device(
         _linux: &mut RunnableLinuxVm,
         _device: Box<dyn PciDevice>,
-        _minijail: Option<Minijail>,
+        #[cfg(any(target_os = "android", target_os = "linux"))] _minijail: Option<Minijail>,
         _resources: &mut SystemAllocator,
         _tube: &mpsc::Sender<PciRootCommand>,
         #[cfg(feature = "swap")] _swap_controller: &mut Option<swap::SwapController>,
@@ -1140,12 +1197,19 @@ impl arch::LinuxArch for AArch64 {
         Err(Error::Unsupported)
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Returns a mapping of online CPUs to their max frequency.
     fn get_host_cpu_max_freq_khz() -> std::result::Result<BTreeMap<usize, u32>, Self::Error> {
         Self::collect_for_online_cpus(base::logical_core_max_freq_khz)
             .map_err(Error::CpuFrequencies)
     }
 
+    #[cfg(target_os = "macos")]
+    fn get_host_cpu_max_freq_khz() -> std::result::Result<BTreeMap<usize, u32>, Self::Error> {
+        Ok(BTreeMap::new())
+    }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Returns a mapping of online CPUs to their supported frequencies.
     fn get_host_cpu_frequencies_khz() -> std::result::Result<BTreeMap<usize, Vec<u32>>, Self::Error>
     {
@@ -1153,17 +1217,36 @@ impl arch::LinuxArch for AArch64 {
             .map_err(Error::CpuFrequencies)
     }
 
+    #[cfg(target_os = "macos")]
+    fn get_host_cpu_frequencies_khz() -> std::result::Result<BTreeMap<usize, Vec<u32>>, Self::Error>
+    {
+        Ok(BTreeMap::new())
+    }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Returns a (cpu_id -> value) map of the DMIPS/MHz capacities of logical cores
     /// in the host system. Map only contains online CPUs.
     fn get_host_cpu_capacity() -> std::result::Result<BTreeMap<usize, u32>, Self::Error> {
         Self::collect_for_online_cpus(base::logical_core_capacity).map_err(Error::CpuTopology)
     }
 
+    #[cfg(target_os = "macos")]
+    fn get_host_cpu_capacity() -> std::result::Result<BTreeMap<usize, u32>, Self::Error> {
+        Ok(BTreeMap::new())
+    }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Creates CPU cluster mask for each online CPU in the host system.
     fn get_host_cpu_clusters() -> std::result::Result<Vec<CpuSet>, Self::Error> {
         let cluster_ids = Self::collect_for_online_cpus(base::logical_core_cluster_id)
             .map_err(Error::CpuTopology)?;
         get_host_cpu_clusters_for_cluster_ids(cluster_ids)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get_host_cpu_clusters() -> std::result::Result<Vec<CpuSet>, Self::Error> {
+        // CPU cluster information is not available on macOS.
+        Ok(Vec::new())
     }
 }
 
@@ -1432,9 +1515,13 @@ impl AArch64 {
     fn add_arch_devs(
         irq_chip: &dyn IrqChip,
         bus: &Bus,
-        vcpu_count: usize,
-        vm_evt_wrtube: &SendTube,
-        vmwdt_request_tube: Tube,
+        #[cfg(any(target_os = "android", target_os = "linux"))] vcpu_count: usize,
+        #[cfg(any(target_os = "android", target_os = "linux"))] vm_evt_wrtube: &SendTube,
+        #[cfg(any(target_os = "android", target_os = "linux"))] vmwdt_request_tube: Tube,
+        // On macOS these parameters are unused
+        #[cfg(target_os = "macos")] _vcpu_count: usize,
+        #[cfg(target_os = "macos")] _vm_evt_wrtube: &SendTube,
+        #[cfg(target_os = "macos")] _vmwdt_request_tube: Tube,
     ) -> Result<()> {
         let rtc_evt = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let rtc = devices::pl030::Pl030::new(rtc_evt.try_clone().map_err(Error::CloneEvent)?);
@@ -1449,28 +1536,33 @@ impl AArch64 {
         )
         .expect("failed to add rtc device");
 
-        let vmwdt_evt = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
-        let vm_wdt = devices::vmwdt::Vmwdt::new(
-            vcpu_count,
-            vm_evt_wrtube.try_clone().unwrap(),
-            vmwdt_evt.try_clone().map_err(Error::CloneEvent)?,
-            vmwdt_request_tube,
-        )
-        .map_err(Error::CreateVmwdtDevice)?;
-        irq_chip
-            .register_edge_irq_event(
-                AARCH64_VMWDT_IRQ,
-                &vmwdt_evt,
-                IrqEventSource::from_device(&vm_wdt),
+        // vmwdt (Virtual Machine Watchdog Timer) is only available on Linux/Android.
+        // The devices::vmwdt module doesn't exist on macOS.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            let vmwdt_evt = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
+            let vm_wdt = devices::vmwdt::Vmwdt::new(
+                vcpu_count,
+                vm_evt_wrtube.try_clone().unwrap(),
+                vmwdt_evt.try_clone().map_err(Error::CloneEvent)?,
+                vmwdt_request_tube,
             )
-            .map_err(Error::RegisterIrqfd)?;
+            .map_err(Error::CreateVmwdtDevice)?;
+            irq_chip
+                .register_edge_irq_event(
+                    AARCH64_VMWDT_IRQ,
+                    &vmwdt_evt,
+                    IrqEventSource::from_device(&vm_wdt),
+                )
+                .map_err(Error::RegisterIrqfd)?;
 
-        bus.insert(
-            Arc::new(Mutex::new(vm_wdt)),
-            AARCH64_VMWDT_ADDR,
-            AARCH64_VMWDT_SIZE,
-        )
-        .expect("failed to add vmwdt device");
+            bus.insert(
+                Arc::new(Mutex::new(vm_wdt)),
+                AARCH64_VMWDT_ADDR,
+                AARCH64_VMWDT_SIZE,
+            )
+            .expect("failed to add vmwdt device");
+        }
 
         Ok(())
     }
@@ -1563,6 +1655,7 @@ impl AArch64 {
         VcpuInitAArch64 { regs }
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Returns a mapping of `cpu_id`s to the output of `map_func` for online CPUs.
     fn collect_for_online_cpus<G, T>(
         map_func: G,

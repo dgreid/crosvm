@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::collections::BTreeMap;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use std::collections::HashSet;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -24,6 +25,7 @@ use cros_fdt::Result;
 // This is a Battery related constant
 use devices::bat::GOLDFISHBAT_MMIO_LEN;
 use devices::pl030::PL030_AMBA_ID;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::IommuDevType;
 use devices::PciAddress;
 use devices::PciInterruptPin;
@@ -50,8 +52,11 @@ use crate::AARCH64_RTC_IRQ;
 use crate::AARCH64_RTC_SIZE;
 // These are serial device related constants.
 use crate::AARCH64_SERIAL_SPEED;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::AARCH64_VIRTFREQ_BASE;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::AARCH64_VIRTFREQ_SIZE;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::AARCH64_VIRTFREQ_V2_SIZE;
 use crate::AARCH64_VMWDT_IRQ;
 
@@ -68,8 +73,10 @@ const PHANDLE_CPU0: u32 = 0x100;
 const PHANDLE_OPP_DOMAIN_BASE: u32 = 0x1000;
 
 // pKVM pvIOMMUs are assigned phandles starting with this number.
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const PHANDLE_PKVM_PVIOMMU: u32 = 0x2000;
 // pKVM power domains are assigned phandles starting with this number.
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const PHANDLE_PKVM_POWER_DOMAINS: u32 = 0x2800;
 
 // These are specified by the Linux GIC bindings
@@ -213,6 +220,7 @@ fn create_timer_node(fdt: &mut Fdt, num_vcpus: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn create_virt_cpufreq_node(fdt: &mut Fdt, num_vcpus: u64) -> Result<()> {
     // TODO: b/320770346: add compatible string
     let vcf_node = fdt.root_mut().subnode_mut("cpufreq")?;
@@ -222,6 +230,7 @@ fn create_virt_cpufreq_node(fdt: &mut Fdt, num_vcpus: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn create_virt_cpufreq_v2_node(fdt: &mut Fdt, num_vcpus: u64) -> Result<()> {
     let compatible = "qemu,virtual-cpufreq";
     let vcf_node = fdt.root_mut().subnode_mut("cpufreq")?;
@@ -367,6 +376,7 @@ fn get_pkvm_pviommu_ids(platform_dev_resources: &Vec<PlatformBusResources>) -> R
     Ok(Vec::from_iter(ids))
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn create_pkvm_pviommu_node(fdt: &mut Fdt, index: usize, id: u32) -> Result<u32> {
     let name = format!("pviommu{index}");
     let phandle = PHANDLE_PKVM_PVIOMMU
@@ -382,6 +392,7 @@ fn create_pkvm_pviommu_node(fdt: &mut Fdt, index: usize, id: u32) -> Result<u32>
     Ok(phandle)
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn create_pkvm_power_domain_node(fdt: &mut Fdt, index: usize) -> Result<u32> {
     let name = format!("dev_pd{index}");
     let phandle = PHANDLE_PKVM_POWER_DOMAINS
@@ -661,11 +672,12 @@ pub fn create_fdt(
     vm_generator: &impl Fn(&mut Fdt, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
     device_tree_overlays: Vec<DtbOverlay>,
     serial_devices: &[SerialDeviceInfo],
-    virt_cpufreq_v2: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))] virt_cpufreq_v2: bool,
     enable_nested: bool,
 ) -> Result<()> {
     let mut fdt = Fdt::new(&[]);
-    let mut phandles_key_cache = Vec::new();
+    #[allow(unused_mut, unused_variables)]
+    let mut phandles_key_cache: Vec<String> = Vec::new();
     let mut phandles = BTreeMap::new();
     let mut reserved_memory_regions = reserved_memory_regions_from_guest_mem(guest_mem);
 
@@ -749,6 +761,7 @@ pub fn create_fdt(
     create_vmwdt_node(&mut fdt, vmwdt_cfg, num_vcpus)?;
     create_kvm_cpufreq_node(&mut fdt)?;
     vm_generator(&mut fdt, &phandles)?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     if vcpu_properties.values().any(|p| !p.frequencies.is_empty()) {
         if virt_cpufreq_v2 {
             create_virt_cpufreq_v2_node(&mut fdt, num_vcpus as u64)?;
@@ -757,30 +770,33 @@ pub fn create_fdt(
         }
     }
 
-    let pviommu_ids = get_pkvm_pviommu_ids(&platform_dev_resources)?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        let pviommu_ids = get_pkvm_pviommu_ids(&platform_dev_resources)?;
 
-    let cache_offset_pviommu = phandles_key_cache.len();
-    // Hack to extend the lifetime of the Strings as keys of phandles (i.e. &str).
-    phandles_key_cache.extend(pviommu_ids.iter().map(|id| format!("pviommu{id}")));
+        let cache_offset_pviommu = phandles_key_cache.len();
+        // Hack to extend the lifetime of the Strings as keys of phandles (i.e. &str).
+        phandles_key_cache.extend(pviommu_ids.iter().map(|id| format!("pviommu{id}")));
 
-    let cache_offset_pdomains = phandles_key_cache.len();
-    let power_domain_count = platform_dev_resources
-        .iter()
-        .filter(|&d| d.requires_power_domain)
-        .count();
-    phandles_key_cache.extend((0..power_domain_count).map(|i| format!("dev_pd{i}")));
+        let cache_offset_pdomains = phandles_key_cache.len();
+        let power_domain_count = platform_dev_resources
+            .iter()
+            .filter(|&d| d.requires_power_domain)
+            .count();
+        phandles_key_cache.extend((0..power_domain_count).map(|i| format!("dev_pd{i}")));
 
-    let pviommu_phandle_keys = &phandles_key_cache[cache_offset_pviommu..cache_offset_pdomains];
-    let pdomains_phandle_keys = &phandles_key_cache[cache_offset_pdomains..];
+        let pviommu_phandle_keys = &phandles_key_cache[cache_offset_pviommu..cache_offset_pdomains];
+        let pdomains_phandle_keys = &phandles_key_cache[cache_offset_pdomains..];
 
-    for (index, (id, key)) in pviommu_ids.iter().zip(pviommu_phandle_keys).enumerate() {
-        let phandle = create_pkvm_pviommu_node(&mut fdt, index, *id)?;
-        phandles.insert(key, phandle);
-    }
+        for (index, (id, key)) in pviommu_ids.iter().zip(pviommu_phandle_keys).enumerate() {
+            let phandle = create_pkvm_pviommu_node(&mut fdt, index, *id)?;
+            phandles.insert(key, phandle);
+        }
 
-    for (index, key) in pdomains_phandle_keys.iter().enumerate() {
-        let phandle = create_pkvm_power_domain_node(&mut fdt, index)?;
-        phandles.insert(key, phandle);
+        for (index, key) in pdomains_phandle_keys.iter().enumerate() {
+            let phandle = create_pkvm_power_domain_node(&mut fdt, index)?;
+            phandles.insert(key, phandle);
+        }
     }
 
     // Done writing base FDT, now apply DT overlays

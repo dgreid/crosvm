@@ -65,7 +65,7 @@ pub use hypervisor::VcpuArch;
 pub use hypervisor::VcpuInitArch;
 use hypervisor::Vm;
 pub use hypervisor::VmArch;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use jail::FakeMinijailStub as Minijail;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use minijail::Minijail;
@@ -83,6 +83,8 @@ pub use serial::GetSerialCmdlineError;
 pub use serial::SERIAL_ADDR;
 use sync::Condvar;
 use sync::Mutex;
+#[cfg(target_os = "macos")]
+pub use sys::macos::PlatformBusResources;
 use thiserror::Error;
 use uuid::Uuid;
 use vm_control::BatControl;
@@ -275,6 +277,7 @@ impl IntoIterator for CpuSet {
 }
 
 /// Selects the interface for guest-controlled power management of assigned devices.
+#[cfg(any(target_os = "android", target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum DevicePowerManagerConfig {
     /// Uses the protected KVM hypercall interface.
@@ -282,6 +285,7 @@ pub enum DevicePowerManagerConfig {
     PkvmHvc,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl FromStr for DevicePowerManagerConfig {
     type Err = String;
 
@@ -501,6 +505,7 @@ pub struct VmComponents {
     pub break_linux_pci_config_io: bool,
 
     pub delay_rt: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub dev_pm: Option<DevicePowerManagerConfig>,
     pub extra_kernel_params: Vec<String>,
     #[cfg(target_arch = "x86_64")]
@@ -843,6 +848,9 @@ pub enum DeviceRegistrationError {
     /// Failed to insert device into PCI root.
     #[error("failed to insert device into PCI root: {0}")]
     PciRootAddDevice(PciDeviceError),
+    /// Feature is not supported on this platform.
+    #[error("platform does not support this feature: {0}")]
+    PlatformNotSupported(&'static str),
     #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Failed to initialize proxy device for jailed device.
     #[error("failed to create proxy device: {0}")]
@@ -951,7 +959,7 @@ pub fn configure_pci_device(
         Arc::new(Mutex::new(device))
     };
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let arced_dev = {
         device.on_sandboxed();
         Arc::new(Mutex::new(device))
@@ -1244,6 +1252,8 @@ pub fn generate_pci_root(
         let (mut device, jail) = dev_value;
         #[cfg(windows)]
         let (mut device, _) = dev_value;
+        #[cfg(target_os = "macos")]
+        let (mut device, _) = dev_value;
         let address = device_addrs[dev_idx];
 
         let mut keep_rds = device.keep_rds();
@@ -1291,7 +1301,7 @@ pub fn generate_pci_root(
             device.on_sandboxed();
             Arc::new(Mutex::new(device))
         };
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let arced_dev = {
             device.on_sandboxed();
             Arc::new(Mutex::new(device))
