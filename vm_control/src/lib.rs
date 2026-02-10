@@ -31,6 +31,8 @@ use base::sys::call_with_extended_max_files;
 use base::MemoryMappingArena;
 #[cfg(windows)]
 use base::MemoryMappingBuilderWindows;
+#[cfg(target_os = "macos")]
+use base::MemoryMappingBuilderUnix;
 use hypervisor::BalloonEvent;
 use hypervisor::MemCacheType;
 use hypervisor::MemRegion;
