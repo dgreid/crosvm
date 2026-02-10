@@ -13,12 +13,12 @@ use libc::c_void;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::super::net::UnixSeqpacket;
 use crate::descriptor::AsRawDescriptor;
 use crate::IntoRawDescriptor;
 use crate::RawDescriptor;
 use crate::ReadNotifier;
 use crate::Result;
+use crate::UnixSeqpacket;
 
 #[derive(Copy, Clone)]
 pub enum FramingMode {
@@ -99,6 +99,24 @@ impl StreamChannel {
             // So the compromise is this:
             // * On Linux: a partial read of a message is an Err and loses data.
             // * On Windows: a partial read of a message is Ok and does not lose data.
+            // * On macOS: we use a STREAM socket with length-prefixed framing, so we use recv().
+            #[cfg(target_os = "macos")]
+            SocketType::Message(sock) => {
+                // On macOS, UnixSeqpacket is emulated over SOCK_STREAM with length-prefixed
+                // messages. We must use the recv method which handles the framing protocol.
+                let receive_len = sock.recv(buf)?;
+
+                if receive_len > buf.len() {
+                    Err(std::io::Error::other(format!(
+                        "packet size {:?} encountered, but buffer was only of size {:?}",
+                        receive_len,
+                        buf.len()
+                    )))
+                } else {
+                    Ok(receive_len)
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             SocketType::Message(sock) => {
                 // SAFETY:
                 // Safe because buf is valid, we pass buf's size to recv to bound the return

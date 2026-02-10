@@ -44,19 +44,41 @@ pub const SCM_MAX_FD: usize = 253;
 // Each of the following functions performs the same function as their C counterparts. They are
 // reimplemented as const fns here because they are used to size statically allocated arrays.
 
+// On macOS, CMSG alignment uses 4-byte boundaries (__DARWIN_ALIGN32).
+// On Linux/other systems, it uses 8-byte boundaries (size_of::<c_long>()).
 #[allow(non_snake_case)]
 const fn CMSG_ALIGN(len: usize) -> usize {
-    (len + size_of::<c_long>() - 1) & !(size_of::<c_long>() - 1)
+    #[cfg(target_os = "macos")]
+    const ALIGN: usize = size_of::<u32>();
+    #[cfg(not(target_os = "macos"))]
+    const ALIGN: usize = size_of::<c_long>();
+    (len + ALIGN - 1) & !(ALIGN - 1)
 }
 
 #[allow(non_snake_case)]
 const fn CMSG_SPACE(len: usize) -> usize {
-    size_of::<cmsghdr>() + CMSG_ALIGN(len)
+    // On macOS, both the header and data lengths are aligned separately
+    #[cfg(target_os = "macos")]
+    {
+        CMSG_ALIGN(size_of::<cmsghdr>()) + CMSG_ALIGN(len)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        size_of::<cmsghdr>() + CMSG_ALIGN(len)
+    }
 }
 
 #[allow(non_snake_case)]
 const fn CMSG_LEN(len: usize) -> usize {
-    size_of::<cmsghdr>() + len
+    // On macOS, the header size is aligned before adding the data length
+    #[cfg(target_os = "macos")]
+    {
+        CMSG_ALIGN(size_of::<cmsghdr>()) + len
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        size_of::<cmsghdr>() + len
+    }
 }
 
 // This function (macro in the C version) is not used in any compile time constant slots, so is just
@@ -65,8 +87,17 @@ const fn CMSG_LEN(len: usize) -> usize {
 #[allow(non_snake_case)]
 #[inline(always)]
 fn CMSG_DATA(cmsg_buffer: *mut cmsghdr) -> *mut RawFd {
-    // Essentially returns a pointer to just past the header.
-    cmsg_buffer.wrapping_offset(1) as *mut RawFd
+    // Returns a pointer to the data area, which starts after an aligned header size
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, the data starts at an aligned offset from the header
+        (cmsg_buffer as *mut u8).wrapping_add(CMSG_ALIGN(size_of::<cmsghdr>())) as *mut RawFd
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // On other systems, the data starts right after the header structure
+        cmsg_buffer.wrapping_offset(1) as *mut RawFd
+    }
 }
 
 // This function is like CMSG_NEXT, but safer because it reads only from references, although it
@@ -138,13 +169,43 @@ fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usiz
     let cmsg_capacity = CMSG_SPACE(size_of_val(out_fds));
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
+    // On macOS with SOCK_STREAM, we need to prepend a length prefix because
+    // there are no message boundaries. Calculate total data length.
+    // NOTE: This framing is independent of UnixSeqpacket::send()/recv() which use
+    // their own 4-byte length prefix. Do not mix raw_sendmsg and UnixSeqpacket
+    // methods on the same socket.
+    #[cfg(target_os = "macos")]
+    let total_data_len: u32 = iovec.iter().map(|v| v.iov_len as u32).sum();
+    #[cfg(target_os = "macos")]
+    let len_prefix = total_data_len.to_le_bytes();
+
+    // Create the iovec array. On macOS, prepend the length prefix.
+    #[cfg(target_os = "macos")]
+    let len_iov = iovec {
+        iov_base: len_prefix.as_ptr() as *mut c_void,
+        iov_len: 4,
+    };
+    #[cfg(target_os = "macos")]
+    let mut full_iovec: Vec<iovec> = std::iter::once(len_iov)
+        .chain(iovec.iter().copied())
+        .collect();
+
     // SAFETY:
     // msghdr on musl has private __pad1 and __pad2 fields that cannot be initialized.
     // Safe because msghdr only contains primitive types for which zero
     // initialization is valid.
     let mut msg: msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-    msg.msg_iov = iovec.as_ptr() as *mut iovec;
-    msg.msg_iovlen = iovec.len().try_into().unwrap();
+
+    #[cfg(target_os = "macos")]
+    {
+        msg.msg_iov = full_iovec.as_mut_ptr();
+        msg.msg_iovlen = full_iovec.len().try_into().unwrap();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        msg.msg_iov = iovec.as_ptr() as *mut iovec;
+        msg.msg_iovlen = iovec.len().try_into().unwrap();
+    }
 
     if !out_fds.is_empty() {
         // SAFETY:
@@ -182,7 +243,15 @@ fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usiz
     if write_count == -1 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(write_count as usize)
+        // On macOS, subtract the length prefix from the reported count
+        #[cfg(target_os = "macos")]
+        {
+            Ok((write_count as usize).saturating_sub(4))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(write_count as usize)
+        }
     }
 }
 
@@ -202,13 +271,38 @@ fn raw_recvmsg(
     let cmsg_capacity = CMSG_SPACE(max_fds * size_of::<RawFd>());
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
+    // On macOS, we need to first read the 4-byte length prefix that was prepended by sendmsg.
+    #[cfg(target_os = "macos")]
+    let mut len_prefix_buf = [0u8; 4];
+    #[cfg(target_os = "macos")]
+    let len_iov = iovec {
+        iov_base: len_prefix_buf.as_mut_ptr() as *mut c_void,
+        iov_len: 4,
+    };
+    #[cfg(target_os = "macos")]
+    let mut full_iovs: Vec<iovec> = std::iter::once(len_iov)
+        .chain(iovs.iter().map(|v| iovec {
+            iov_base: v.iov_base,
+            iov_len: v.iov_len,
+        }))
+        .collect();
+
     // SAFETY:
     // msghdr on musl has private __pad1 and __pad2 fields that cannot be initialized.
     // Safe because msghdr only contains primitive types for which zero
     // initialization is valid.
     let mut msg: msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-    msg.msg_iov = iovs.as_mut_ptr() as *mut iovec;
-    msg.msg_iovlen = iovs.len().try_into().unwrap();
+
+    #[cfg(target_os = "macos")]
+    {
+        msg.msg_iov = full_iovs.as_mut_ptr();
+        msg.msg_iovlen = full_iovs.len().try_into().unwrap();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        msg.msg_iov = iovs.as_mut_ptr() as *mut iovec;
+        msg.msg_iovlen = iovs.len().try_into().unwrap();
+    }
 
     if max_fds > 0 {
         msg.msg_control = cmsg_buffer.as_mut_ptr() as *mut c_void;
@@ -251,7 +345,13 @@ fn raw_recvmsg(
         cmsg_ptr = get_next_cmsg(&msg, &cmsg, cmsg_ptr);
     }
 
-    Ok((total_read as usize, in_fds))
+    // On macOS, subtract the length prefix from the total read
+    #[cfg(target_os = "macos")]
+    let data_read = (total_read as usize).saturating_sub(4);
+    #[cfg(not(target_os = "macos"))]
+    let data_read = total_read as usize;
+
+    Ok((data_read, in_fds))
 }
 
 /// The maximum number of FDs that can be sent in a single send.
