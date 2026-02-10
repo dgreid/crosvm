@@ -272,6 +272,7 @@ impl TestVm {
     /// Stop the VM
     fn stop(&mut self) -> anyhow::Result<std::process::ExitStatus> {
         // Send SIGTERM for graceful shutdown
+        // SAFETY: process.id() returns the PID of a child process we spawned and own.
         unsafe {
             libc::kill(self.process.id() as i32, libc::SIGTERM);
         }
