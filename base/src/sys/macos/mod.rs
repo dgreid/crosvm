@@ -17,12 +17,13 @@ use crate::unix::Pid;
 mod event;
 pub(in crate::sys::macos) mod kqueue;
 mod net;
+mod notifiers;
+mod terminal;
 
 // Re-export net types for use in lib.rs via explicit paths
 pub use net::UnixSeqpacket;
 pub use net::UnixSeqpacketListener;
 pub use net::UnlinkUnixSeqpacketListener;
-mod terminal;
 mod timer;
 
 pub(crate) use event::PlatformEvent;
@@ -30,6 +31,8 @@ pub(in crate::sys) use libc::sendmsg;
 pub(in crate::sys) use net::sockaddr_un;
 pub(in crate::sys) use net::sockaddrv4_to_lib_c;
 pub(in crate::sys) use net::sockaddrv6_to_lib_c;
+pub use terminal::read_raw_stdin;
+pub use terminal::Terminal;
 
 /// Sets the name of the current thread to `name`.
 ///
