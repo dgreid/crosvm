@@ -31,6 +31,8 @@ use base::linux::MemoryMappingBuilderUnix;
 use base::sys::call_with_extended_max_files;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use base::MemoryMappingArena;
+#[cfg(target_os = "macos")]
+use base::MemoryMappingBuilderUnix;
 #[cfg(windows)]
 use base::MemoryMappingBuilderWindows;
 use hypervisor::BalloonEvent;
