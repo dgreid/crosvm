@@ -14,6 +14,10 @@ cfg_if::cfg_if! {
         pub(crate) use windows::run_config;
         #[cfg(feature = "sandbox")]
         pub(crate) use windows::main::sandbox_lower_token;
+    } else if #[cfg(target_os = "macos")] {
+        pub(crate) mod macos;
+        use macos as platform;
+        pub(crate) use crate::crosvm::sys::macos::{run_config, ExitState};
     } else {
         compile_error!("Unsupported platform");
     }

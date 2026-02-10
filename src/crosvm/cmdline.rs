@@ -72,7 +72,7 @@ use vm_memory::FileBackedMappingParameters;
 use super::config::PmemOption;
 #[cfg(feature = "gpu")]
 use super::gpu_config::fixup_gpu_options;
-#[cfg(all(unix, feature = "gpu"))]
+#[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
 use super::sys::GpuRenderServerParameters;
 use crate::crosvm::config::from_key_values;
 use crate::crosvm::config::parse_bus_id_addr;
@@ -1275,7 +1275,7 @@ pub struct RunCommand {
     /// for possible key values of GpuDisplayParameters.
     pub gpu_display: Vec<GpuDisplayParameters>,
 
-    #[cfg(all(unix, feature = "gpu"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
     #[argh(option)]
     /// (EXPERIMENTAL) Comma separated key=value pairs for setting
     /// up a render server for the virtio-gpu device
@@ -1288,7 +1288,7 @@ pub struct RunCommand {
     ///         file for dynamically loading RO caches.
     pub gpu_render_server: Option<GpuRenderServerParameters>,
 
-    #[cfg(all(unix, feature = "gpu"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
     #[argh(option, arg_name = "PATH")]
     /// move all vGPU server threads to this Cgroup (default: nothing moves)
     pub gpu_server_cgroup_path: Option<PathBuf>,
@@ -2875,10 +2875,14 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(all(unix, feature = "net"))]
         {
+            cfg.net = cmd.net;
+        }
+
+        // Linux-only: deprecated vhost-net and tap options
+        #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
+        {
             use devices::virtio::VhostNetParameters;
             use devices::virtio::VHOST_NET_DEFAULT_PATH;
-
-            cfg.net = cmd.net;
 
             if let Some(vhost_net_device) = &cmd.vhost_net_device {
                 let vhost_net_path = vhost_net_device.to_string_lossy();
@@ -2972,7 +2976,10 @@ impl TryFrom<RunCommand> for super::config::Config {
                     mrg_rxbuf: false,
                 });
             }
+        }
 
+        #[cfg(all(unix, feature = "net"))]
+        {
             // The number of vq pairs on a network device shall never exceed the number of vcpu
             // cores. Fix that up if needed.
             for net in &mut cfg.net {

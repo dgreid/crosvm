@@ -8,6 +8,9 @@ pub(crate) mod linux;
 #[cfg(windows)]
 pub(crate) mod windows;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
+
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "android", target_os = "linux"))] {
         use linux as platform;
@@ -18,6 +21,8 @@ cfg_if::cfg_if! {
         use windows as platform;
         #[cfg(feature = "pci-hotplug")]
         compile_error!("pci-hotplug not supported on windows");
+    } else if #[cfg(target_os = "macos")] {
+        use macos as platform;
     } else {
         compile_error!("Unsupported platform");
     }

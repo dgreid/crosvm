@@ -569,6 +569,7 @@ proc_init = { workspace = true }
 cfg-if = { workspace = true }
 crash_report = { workspace = true, optional = true }
 cros_async = { workspace = true }
+cros_fdt = { workspace = true }
 cros_tracing = { workspace = true }
 crosvm_cli = { workspace = true }
 devices = { workspace = true }
@@ -639,6 +640,9 @@ tube_transporter = { workspace = true }
 winapi = "0.3"
 win_audio = { workspace = true }
 win_util = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rand = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

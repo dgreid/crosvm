@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use arch::DevicePowerManagerConfig;
 use arch::FdtPosition;
 #[cfg(all(target_os = "android", target_arch = "aarch64"))]
@@ -626,6 +627,7 @@ pub struct Config {
     #[cfg(feature = "crash-report")]
     pub crash_report_uuid: Option<String>,
     pub delay_rt: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub dev_pm: Option<DevicePowerManagerConfig>,
     pub device_tree_overlay: Vec<DtboOption>,
     pub disable_virtio_intx: bool,
@@ -654,13 +656,13 @@ pub struct Config {
     pub gdb: Option<u32>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_backend_config: Option<GpuBackendConfig>,
-    #[cfg(all(unix, feature = "gpu"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
     pub gpu_cgroup_path: Option<PathBuf>,
     #[cfg(feature = "gpu")]
     pub gpu_parameters: Option<GpuParameters>,
-    #[cfg(all(unix, feature = "gpu"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
     pub gpu_render_server_parameters: Option<GpuRenderServerParameters>,
-    #[cfg(all(unix, feature = "gpu"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
     pub gpu_server_cgroup_path: Option<PathBuf>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_vmm_config: Option<GpuVmmConfig>,
@@ -860,8 +862,9 @@ impl Default for Config {
             ))]
             cpu_ipc_ratio: BTreeMap::new(),
             delay_rt: false,
-            device_tree_overlay: Vec::new(),
+            #[cfg(any(target_os = "android", target_os = "linux"))]
             dev_pm: None,
+            device_tree_overlay: Vec::new(),
             disks: Vec::new(),
             disable_virtio_intx: false,
             display_input_height: None,
@@ -890,11 +893,11 @@ impl Default for Config {
             gpu_backend_config: None,
             #[cfg(feature = "gpu")]
             gpu_parameters: None,
-            #[cfg(all(unix, feature = "gpu"))]
+            #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
             gpu_render_server_parameters: None,
-            #[cfg(all(unix, feature = "gpu"))]
+            #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
             gpu_cgroup_path: None,
-            #[cfg(all(unix, feature = "gpu"))]
+            #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "gpu"))]
             gpu_server_cgroup_path: None,
             #[cfg(all(windows, feature = "gpu"))]
             gpu_vmm_config: None,
