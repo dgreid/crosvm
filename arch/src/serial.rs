@@ -15,7 +15,7 @@ use devices::Serial;
 use hypervisor::ProtectionType;
 #[cfg(feature = "seccomp_trace")]
 use jail::read_jail_addr;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use jail::FakeMinijailStub as Minijail;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use minijail::Minijail;
@@ -115,7 +115,7 @@ pub fn add_serial_devices(
     com_evt_1_3: (u32, &Event),
     com_evt_2_4: (u32, &Event),
     serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
-    #[cfg_attr(windows, allow(unused_variables))] serial_jail: Option<Minijail>,
+    #[cfg_attr(any(windows, target_os = "macos"), allow(unused_variables))] serial_jail: Option<Minijail>,
     #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
 ) -> std::result::Result<Vec<SerialDeviceInfo>, DeviceRegistrationError> {
     let mut devices = Vec::new();
@@ -157,6 +157,8 @@ pub fn add_serial_devices(
             None
         };
         #[cfg(windows)]
+        let serial_jail = None;
+        #[cfg(target_os = "macos")]
         let serial_jail = None;
 
         let com = sys::add_serial_device(
