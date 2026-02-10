@@ -23,7 +23,7 @@ pub(in crate::sys::macos) struct Kqueue {
 // Only accepts the subset of parameters we actually use
 pub(in crate::sys::macos) fn make_kevent(filter: i16, flags: u16, fflags: u32) -> libc::kevent64_s {
     libc::kevent64_s {
-        ident: 0, /* hopefully not global? */
+        ident: 0, /* set to 0; caller sets the actual fd/identifier */
         filter,
         flags,
         fflags,
