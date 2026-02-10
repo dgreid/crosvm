@@ -177,7 +177,7 @@ mod tests {
         input_buffer.lock().push_back(0);
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     fn create_device() -> (ConsoleContext, Console) {
         let input = Box::new(tempfile().unwrap());
         let output = Box::new(tempfile().unwrap());

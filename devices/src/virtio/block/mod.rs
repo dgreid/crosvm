@@ -164,6 +164,8 @@ impl Default for DiskOption {
 mod tests {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     use cros_async::sys::linux::ExecutorKindSys;
+    #[cfg(target_os = "macos")]
+    use cros_async::sys::macos::ExecutorKindSys;
     #[cfg(windows)]
     use cros_async::sys::windows::ExecutorKindSys;
     use serde_keyvalue::*;
@@ -555,6 +557,8 @@ mod tests {
         let (ex_kind, ex_kind_opt) = (ExecutorKindSys::Handle.into(), "handle");
         #[cfg(any(target_os = "android", target_os = "linux"))]
         let (ex_kind, ex_kind_opt) = (ExecutorKindSys::Fd.into(), "epoll");
+        #[cfg(target_os = "macos")]
+        let (ex_kind, ex_kind_opt) = (ExecutorKindSys::Kqueue.into(), "kqueue");
         let params =
             from_block_arg(&format!("/some/path.img,async-executor={ex_kind_opt}")).unwrap();
         assert_eq!(

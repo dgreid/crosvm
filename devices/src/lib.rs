@@ -126,6 +126,7 @@ pub use self::pflash::Pflash;
 pub use self::pflash::PflashParameters;
 pub use self::pl030::Pl030;
 pub use self::pmc_virt::VirtualPmc;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub use self::power::hvc::HvcDevicePowerManager;
 pub use self::power::DevicePowerManager;
 pub use self::serial::Serial;
@@ -180,6 +181,8 @@ cfg_if::cfg_if! {
         pub use self::virtio::vfio_wrapper;
 
     } else if #[cfg(windows)] {
+    } else if #[cfg(target_os = "macos")] {
+        // macOS support is limited - most Linux-only features are not available
     } else {
         compile_error!("Unsupported platform");
     }

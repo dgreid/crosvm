@@ -1,0 +1,233 @@
+// Copyright 2022 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+use std::borrow::Cow;
+use std::fs::OpenOptions;
+use std::io;
+use std::io::ErrorKind;
+use std::io::Write;
+use std::os::unix::net::UnixDatagram;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
+
+use base::error;
+use base::info;
+use base::read_raw_stdin;
+use base::AsRawDescriptor;
+use base::Event;
+use base::FileSync;
+use base::RawDescriptor;
+use base::ReadNotifier;
+use hypervisor::ProtectionType;
+
+use crate::serial_device::Error;
+use crate::serial_device::SerialInput;
+use crate::serial_device::SerialOptions;
+use crate::serial_device::SerialParameters;
+
+pub const SYSTEM_SERIAL_TYPE_NAME: &str = "UnixSocket";
+
+// This wrapper is used in place of the libstd native version because we don't want
+// buffering for stdin.
+pub struct ConsoleInput(std::io::Stdin);
+
+impl ConsoleInput {
+    pub fn new() -> Self {
+        Self(std::io::stdin())
+    }
+}
+
+impl io::Read for ConsoleInput {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        read_raw_stdin(out).map_err(|e| e.into())
+    }
+}
+
+impl ReadNotifier for ConsoleInput {
+    fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
+        &self.0
+    }
+}
+
+impl SerialInput for ConsoleInput {}
+
+/// Abstraction over serial-like devices that can be created given an event and optional input and
+/// output streams.
+pub trait SerialDevice {
+    fn new(
+        protection_type: ProtectionType,
+        interrupt_evt: Event,
+        input: Option<Box<dyn SerialInput>>,
+        output: Option<Box<dyn io::Write + Send>>,
+        sync: Option<Box<dyn FileSync + Send>>,
+        options: SerialOptions,
+        keep_rds: Vec<RawDescriptor>,
+    ) -> Self;
+}
+
+// The maximum length of a path that can be used as the address of a
+// unix socket. Note that this includes the null-terminator.
+// macOS has a limit of 104 bytes for sun_path in sockaddr_un
+pub const MAX_SOCKET_PATH_LENGTH: usize = 104;
+
+struct WriteSocket {
+    sock: UnixDatagram,
+    buf: Vec<u8>,
+}
+
+const BUF_CAPACITY: usize = 1024;
+
+impl WriteSocket {
+    pub fn new(s: UnixDatagram) -> WriteSocket {
+        WriteSocket {
+            sock: s,
+            buf: Vec::with_capacity(BUF_CAPACITY),
+        }
+    }
+
+    pub fn send_buf(&self, buf: &[u8]) -> io::Result<usize> {
+        const SEND_RETRY: usize = 2;
+        let mut sent = 0;
+        for _ in 0..SEND_RETRY {
+            match self.sock.send(buf) {
+                Ok(bytes_sent) => {
+                    sent = bytes_sent;
+                    break;
+                }
+                Err(e) => info!("Send error: {:?}", e),
+            }
+        }
+        Ok(sent)
+    }
+}
+
+impl io::Write for WriteSocket {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let last_newline_idx = match buf.iter().rposition(|&x| x == b'\n') {
+            Some(newline_idx) => Some(self.buf.len() + newline_idx),
+            None => None,
+        };
+        self.buf.extend_from_slice(buf);
+
+        match last_newline_idx {
+            Some(last_newline_idx) => {
+                for line in (self.buf[..last_newline_idx]).split(|&x| x == b'\n') {
+                    // Also drop CR+LF line endings.
+                    let send_line = match line.split_last() {
+                        Some((b'\r', trimmed)) => trimmed,
+                        _ => line,
+                    };
+                    if self.send_buf(send_line).is_err() {
+                        break;
+                    }
+                }
+                self.buf.drain(..=last_newline_idx);
+            }
+            None => {
+                if self.buf.len() >= BUF_CAPACITY {
+                    if let Err(e) = self.send_buf(&self.buf) {
+                        info!("Couldn't send full buffer. {:?}", e);
+                    }
+                    self.buf.clear();
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn create_system_type_serial_device<T: SerialDevice>(
+    param: &SerialParameters,
+    protection_type: ProtectionType,
+    evt: Event,
+    input: Option<Box<dyn SerialInput>>,
+    keep_rds: &mut Vec<RawDescriptor>,
+) -> std::result::Result<T, Error> {
+    match &param.path {
+        Some(path) => {
+            // If the path is longer than the max socket path length,
+            // we can't connect to it directly.
+            let path_cow = Cow::<Path>::Borrowed(path);
+
+            // Check if path is too long for macOS socket
+            if path_cow.as_os_str().len() >= MAX_SOCKET_PATH_LENGTH {
+                return Err(Error::InvalidPath(path_cow.into()));
+            }
+
+            // There's a race condition between
+            // vmlog_forwarder making the logging socket and
+            // crosvm starting up, so we loop here until it's
+            // available.
+            let sock = UnixDatagram::unbound().map_err(Error::SocketCreate)?;
+            loop {
+                match sock.connect(&path_cow) {
+                    Ok(_) => break,
+                    Err(e) => {
+                        match e.kind() {
+                            ErrorKind::NotFound | ErrorKind::ConnectionRefused => {
+                                // logging socket doesn't
+                                // exist yet, sleep for 10 ms
+                                // and try again.
+                                thread::sleep(Duration::from_millis(10))
+                            }
+                            _ => {
+                                error!("Unexpected error connecting to logging socket: {:?}", e);
+                                return Err(Error::SocketConnect(e));
+                            }
+                        }
+                    }
+                };
+            }
+            keep_rds.push(sock.as_raw_descriptor());
+            let output: Option<Box<dyn Write + Send>> = Some(Box::new(WriteSocket::new(sock)));
+            Ok(T::new(
+                protection_type,
+                evt,
+                input,
+                output,
+                None,
+                Default::default(),
+                keep_rds.to_vec(),
+            ))
+        }
+        None => Err(Error::PathRequired),
+    }
+}
+
+/// Creates a serial device that use the given UnixStream path for both input and output.
+pub(crate) fn create_unix_stream_serial_device<T: SerialDevice>(
+    param: &SerialParameters,
+    protection_type: ProtectionType,
+    evt: Event,
+    keep_rds: &mut Vec<RawDescriptor>,
+) -> std::result::Result<T, Error> {
+    let path = param.path.as_ref().ok_or(Error::PathRequired)?;
+    let input = UnixStream::connect(path).map_err(Error::SocketConnect)?;
+    let output = input.try_clone().map_err(Error::CloneUnixStream)?;
+    keep_rds.push(input.as_raw_descriptor());
+    keep_rds.push(output.as_raw_descriptor());
+
+    Ok(T::new(
+        protection_type,
+        evt,
+        Some(Box::new(input)),
+        Some(Box::new(output)),
+        None,
+        SerialOptions {
+            name: param.name.clone(),
+            out_timestamp: param.out_timestamp,
+            console: param.console,
+            pci_address: param.pci_address,
+            max_queue_sizes: param.max_queue_sizes.clone(),
+        },
+        keep_rds.to_vec(),
+    ))
+}
