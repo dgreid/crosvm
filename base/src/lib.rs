@@ -174,6 +174,17 @@ cfg_if::cfg_if! {
     }
 }
 
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "macos")] {
+        pub use sys::macos;
+
+        pub use macos::flock;
+        pub use macos::FlockOperation;
+        pub use macos::pipe;
+        pub use macos::safe_descriptor_from_cmdline_fd;
+    }
+}
+
 pub use descriptor_reflection::deserialize_with_descriptors;
 pub use descriptor_reflection::with_as_descriptor;
 pub use descriptor_reflection::with_raw_descriptor;
