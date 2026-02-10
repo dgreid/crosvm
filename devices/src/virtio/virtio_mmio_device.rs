@@ -171,6 +171,14 @@ impl VirtioMmioDevice {
     }
 
     fn read_mmio(&self, info: BusAccessInfo, data: &mut [u8]) {
+        // Config space can be accessed with different widths (1, 2, or 4 bytes)
+        if info.offset >= VIRTIO_MMIO_CONFIG as u64 {
+            self.device
+                .read_config(info.offset - VIRTIO_MMIO_CONFIG as u64, data);
+            return;
+        }
+
+        // Non-config registers must be accessed as 4 bytes
         if data.len() != std::mem::size_of::<u32>() {
             warn!(
                 "{}: unsupported read length {}, only support 4 bytes read",
@@ -180,15 +188,9 @@ impl VirtioMmioDevice {
             return;
         }
 
-        if info.offset >= VIRTIO_MMIO_CONFIG as u64 {
-            self.device
-                .read_config(info.offset - VIRTIO_MMIO_CONFIG as u64, data);
-            return;
-        }
-
         let val = match info.offset as u32 {
             VIRTIO_MMIO_MAGIC_VALUE => VIRT_MAGIC,
-            VIRTIO_MMIO_VERSION => VIRT_VERSION.into(), // legacy is not supported
+            VIRTIO_MMIO_VERSION => VIRT_VERSION.into(),
             VIRTIO_MMIO_DEVICE_ID => self.device_type(),
             VIRTIO_MMIO_VENDOR_ID => VIRT_VENDOR,
             VIRTIO_MMIO_DEVICE_FEATURES => {
@@ -228,18 +230,20 @@ impl VirtioMmioDevice {
     }
 
     fn write_mmio(&mut self, info: BusAccessInfo, data: &[u8]) {
+        // Config space can be accessed with different widths (1, 2, or 4 bytes)
+        if info.offset >= VIRTIO_MMIO_CONFIG as u64 {
+            self.device
+                .write_config(info.offset - VIRTIO_MMIO_CONFIG as u64, data);
+            return;
+        }
+
+        // Non-config registers must be accessed as 4 bytes
         if data.len() != std::mem::size_of::<u32>() {
             warn!(
                 "{}: unsupported write length {}, only support 4 bytes write",
                 self.debug_label(),
                 data.len()
             );
-            return;
-        }
-
-        if info.offset >= VIRTIO_MMIO_CONFIG as u64 {
-            self.device
-                .write_config(info.offset - VIRTIO_MMIO_CONFIG as u64, data);
             return;
         }
 
@@ -292,7 +296,28 @@ impl VirtioMmioDevice {
                 info.offset,
             ),
             VIRTIO_MMIO_QUEUE_READY => self.with_queue_mut(|q| q.set_ready(val == 1)),
-            VIRTIO_MMIO_QUEUE_NOTIFY => {} // Handled with ioevents.
+            VIRTIO_MMIO_QUEUE_NOTIFY => {
+                // On platforms with ioeventfd (like KVM), this is handled automatically.
+                // On platforms without ioeventfd (like macOS HVF), we need to manually
+                // signal the queue event.
+                let queue_index = val as usize;
+                if let Some(evt) = self.queue_evts.get(queue_index) {
+                    if let Err(e) = evt.signal() {
+                        error!(
+                            "{}: failed to signal queue {} event: {}",
+                            self.debug_label(),
+                            queue_index,
+                            e
+                        );
+                    }
+                } else {
+                    warn!(
+                        "{}: QUEUE_NOTIFY for invalid queue {}",
+                        self.debug_label(),
+                        queue_index
+                    );
+                }
+            }
             VIRTIO_MMIO_INTERRUPT_ACK => {
                 if let Some(interrupt) = &self.interrupt {
                     interrupt.clear_interrupt_status_bits(val as u8)
