@@ -293,10 +293,14 @@ pub(in crate::sys) fn sun_path_offset() -> usize {
     std::mem::offset_of!(libc::sockaddr_un, sun_path)
 }
 
+// On macOS, UnixSeqpacket is provided by sys::macos::net which emulates
+// SEQPACKET semantics over SOCK_STREAM since macOS doesn't support SOCK_SEQPACKET.
+#[cfg(not(target_os = "macos"))]
 /// A Unix `SOCK_SEQPACKET` socket point to given `path`
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnixSeqpacket(SafeDescriptor);
 
+#[cfg(not(target_os = "macos"))]
 impl UnixSeqpacket {
     /// Open a `SOCK_SEQPACKET` connection to socket named by `path`.
     ///
@@ -526,42 +530,49 @@ impl UnixSeqpacket {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl From<UnixSeqpacket> for SafeDescriptor {
     fn from(s: UnixSeqpacket) -> Self {
         s.0
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl From<SafeDescriptor> for UnixSeqpacket {
     fn from(s: SafeDescriptor) -> Self {
         Self(s)
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl FromRawDescriptor for UnixSeqpacket {
     unsafe fn from_raw_descriptor(descriptor: RawDescriptor) -> Self {
         Self(SafeDescriptor::from_raw_descriptor(descriptor))
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl AsRawDescriptor for UnixSeqpacket {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.0.as_raw_descriptor()
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl IntoRawDescriptor for UnixSeqpacket {
     fn into_raw_descriptor(self) -> RawDescriptor {
         self.0.into_raw_descriptor()
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl io::Read for UnixSeqpacket {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.recv(buf)
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl io::Write for UnixSeqpacket {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.send(buf)
@@ -572,12 +583,14 @@ impl io::Write for UnixSeqpacket {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 /// Like a `UnixListener` but for accepting `UnixSeqpacket` type sockets.
 pub struct UnixSeqpacketListener {
     descriptor: SafeDescriptor,
     no_path: bool,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl UnixSeqpacketListener {
     /// Creates a new `UnixSeqpacketListener` bound to the given path.
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -733,33 +746,39 @@ impl UnixSeqpacketListener {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl AsRawDescriptor for UnixSeqpacketListener {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.descriptor.as_raw_descriptor()
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl From<UnixSeqpacketListener> for OwnedFd {
     fn from(val: UnixSeqpacketListener) -> Self {
         val.descriptor.into()
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 /// Used to attempt to clean up a `UnixSeqpacketListener` after it is dropped.
 pub struct UnlinkUnixSeqpacketListener(pub UnixSeqpacketListener);
 
+#[cfg(not(target_os = "macos"))]
 impl AsRawDescriptor for UnlinkUnixSeqpacketListener {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.0.as_raw_descriptor()
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl AsRef<UnixSeqpacketListener> for UnlinkUnixSeqpacketListener {
     fn as_ref(&self) -> &UnixSeqpacketListener {
         &self.0
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Deref for UnlinkUnixSeqpacketListener {
     type Target = UnixSeqpacketListener;
     fn deref(&self) -> &Self::Target {
@@ -767,6 +786,7 @@ impl Deref for UnlinkUnixSeqpacketListener {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Drop for UnlinkUnixSeqpacketListener {
     fn drop(&mut self) {
         if let Ok(path) = self.0.path() {
