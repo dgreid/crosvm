@@ -13,7 +13,6 @@ use crate::descriptor::FromRawDescriptor;
 use crate::sys::unix::RawDescriptor;
 use crate::unix::set_descriptor_cloexec;
 use crate::unix::Pid;
-use crate::MmapError;
 
 mod event;
 pub(in crate::sys::macos) mod kqueue;
@@ -293,49 +292,413 @@ impl<T: EventToken> AsRawDescriptor for EventContext<T> {
     }
 }
 
-pub struct MemoryMappingArena {}
+use std::ptr::null_mut;
 
-#[derive(Debug)]
-pub struct MemoryMapping {}
+use libc::c_int;
+use libc::PROT_READ;
+use libc::PROT_WRITE;
 
-impl MemoryMapping {
-    pub fn size(&self) -> usize {
-        todo!();
-    }
-    pub(crate) fn range_end(&self, _offset: usize, _count: usize) -> Result<usize, MmapError> {
-        todo!();
-    }
-    pub fn msync(&self) -> Result<(), MmapError> {
-        todo!();
-    }
-    pub fn new_protection_fixed(
-        _addr: *mut u8,
-        _size: usize,
-        _prot: crate::Protection,
-    ) -> Result<MemoryMapping, MmapError> {
-        todo!();
-    }
-    /// # Safety
-    ///
-    /// unimplemented, always aborts
-    pub unsafe fn from_descriptor_offset_protection_fixed(
-        _addr: *mut u8,
-        _fd: &dyn crate::AsRawDescriptor,
-        _size: usize,
-        _offset: u64,
-        _prot: crate::Protection,
-    ) -> Result<MemoryMapping, MmapError> {
-        todo!();
+use crate::pagesize;
+use crate::MappedRegion;
+use crate::MmapError as Error;
+use crate::MmapResult as Result;
+use crate::Protection;
+
+impl From<Protection> for c_int {
+    #[inline(always)]
+    fn from(p: Protection) -> Self {
+        let mut value = 0;
+        if p.read {
+            value |= PROT_READ
+        }
+        if p.write {
+            value |= PROT_WRITE;
+        }
+        value
     }
 }
 
-// SAFETY: Unimplemented, always aborts
-unsafe impl crate::MappedRegion for MemoryMapping {
-    fn as_ptr(&self) -> *mut u8 {
-        todo!();
+/// Tracks Fixed Memory Maps within an anonymous memory-mapped fixed-sized arena.
+pub struct MemoryMappingArena {
+    addr: *mut u8,
+    size: usize,
+}
+
+// SAFETY: Send is safe for MemoryMappingArena as the pointer is only
+// accessed through a stateless interface.
+unsafe impl Send for MemoryMappingArena {}
+// SAFETY: Sync is safe for MemoryMappingArena as the pointer is only
+// accessed through a stateless interface.
+unsafe impl Sync for MemoryMappingArena {}
+
+impl MemoryMappingArena {
+    /// Creates an mmap arena of `size` bytes.
+    pub fn new(size: usize) -> Result<MemoryMappingArena> {
+        MemoryMapping::new_protection(size, Protection::read()).map(From::from)
     }
+
+    /// Anonymously maps `size` bytes at `offset` bytes from the start of the arena.
+    pub fn add_anon(&mut self, offset: usize, size: usize) -> Result<()> {
+        self.add_anon_protection(offset, size, Protection::read_write())
+    }
+
+    /// Anonymously maps `size` bytes at `offset` with `prot` protection.
+    pub fn add_anon_protection(
+        &mut self,
+        offset: usize,
+        size: usize,
+        prot: Protection,
+    ) -> Result<()> {
+        self.try_add(offset, size, prot, None)
+    }
+
+    /// Maps `size` bytes from the start of the given `fd` at `offset`.
+    pub fn add_fd(&mut self, offset: usize, size: usize, fd: &dyn AsRawDescriptor) -> Result<()> {
+        self.add_fd_offset(offset, size, fd, 0)
+    }
+
+    /// Maps `size` bytes starting at `fd_offset` from within `fd` at `offset`.
+    pub fn add_fd_offset(
+        &mut self,
+        offset: usize,
+        size: usize,
+        fd: &dyn AsRawDescriptor,
+        fd_offset: u64,
+    ) -> Result<()> {
+        self.add_fd_offset_protection(offset, size, fd, fd_offset, Protection::read_write())
+    }
+
+    /// Maps `size` bytes starting at `fd_offset` from within `fd` at `offset` with `prot`.
+    pub fn add_fd_offset_protection(
+        &mut self,
+        offset: usize,
+        size: usize,
+        fd: &dyn AsRawDescriptor,
+        fd_offset: u64,
+        prot: Protection,
+    ) -> Result<()> {
+        self.try_add(offset, size, prot, Some((fd, fd_offset)))
+    }
+
+    fn try_add(
+        &mut self,
+        offset: usize,
+        size: usize,
+        prot: Protection,
+        fd: Option<(&dyn AsRawDescriptor, u64)>,
+    ) -> Result<()> {
+        if offset % pagesize() != 0 {
+            return Err(Error::NotPageAligned);
+        }
+        let end = offset.checked_add(size).ok_or(Error::InvalidAddress)?;
+        if end > self.size {
+            return Err(Error::InvalidAddress);
+        }
+
+        // SAFETY: self.addr.add(offset) is within the arena bounds (validated above)
+        // and the caller (try_add) ensures no overlapping live MemoryMappings exist.
+        let mmap = unsafe {
+            match fd {
+                Some((fd, fd_offset)) => MemoryMapping::from_descriptor_offset_protection_fixed(
+                    self.addr.add(offset),
+                    fd,
+                    size,
+                    fd_offset,
+                    prot,
+                )?,
+                None => MemoryMapping::new_protection_fixed(self.addr.add(offset), size, prot)?,
+            }
+        };
+
+        // Don't drop the mapping - it will be cleaned up when the arena is dropped.
+        std::mem::forget(mmap);
+        Ok(())
+    }
+
+    /// Removes `size` bytes at `offset` from the arena.
+    pub fn remove(&mut self, offset: usize, size: usize) -> Result<()> {
+        self.try_add(offset, size, Protection::read(), None)
+    }
+}
+
+// SAFETY: The pointer and size point to memory owned by this arena.
+unsafe impl MappedRegion for MemoryMappingArena {
+    fn as_ptr(&self) -> *mut u8 {
+        self.addr
+    }
+
     fn size(&self) -> usize {
-        todo!();
+        self.size
+    }
+}
+
+impl Drop for MemoryMappingArena {
+    fn drop(&mut self) {
+        // SAFETY: self.addr and self.size describe a region we obtained from mmap in
+        // new() and own exclusively. Any sub-mappings were created with MAP_FIXED within
+        // this range and are covered by this munmap.
+        unsafe {
+            libc::munmap(self.addr as *mut libc::c_void, self.size);
+        }
+    }
+}
+
+impl From<MemoryMapping> for MemoryMappingArena {
+    fn from(mmap: MemoryMapping) -> Self {
+        let addr = mmap.addr;
+        let size = mmap.size;
+        std::mem::forget(mmap);
+        MemoryMappingArena { addr, size }
+    }
+}
+
+/// Wraps an anonymous shared memory mapping in the current process.
+#[derive(Debug)]
+pub struct MemoryMapping {
+    addr: *mut u8,
+    size: usize,
+}
+
+// SAFETY: Send and Sync are safe for MemoryMapping as the pointer is only
+// accessed through a stateless interface.
+unsafe impl Send for MemoryMapping {}
+unsafe impl Sync for MemoryMapping {}
+
+impl MemoryMapping {
+    /// Creates an anonymous shared, read/write mapping of `size` bytes.
+    pub fn new(size: usize) -> Result<MemoryMapping> {
+        MemoryMapping::new_protection(size, Protection::read_write())
+    }
+
+    /// Creates an anonymous shared mapping of `size` bytes with `prot` protection.
+    pub fn new_protection(size: usize, prot: Protection) -> Result<MemoryMapping> {
+        // SAFETY: addr is None so the kernel chooses a non-overlapping address.
+        unsafe { MemoryMapping::try_mmap(None, size, prot.into(), None) }
+    }
+
+    /// Maps the first `size` bytes of the given `fd` as read/write.
+    pub fn from_fd(fd: &dyn AsRawDescriptor, size: usize) -> Result<MemoryMapping> {
+        MemoryMapping::from_fd_offset(fd, size, 0)
+    }
+
+    /// Maps `size` bytes starting at `offset` from `fd`.
+    pub fn from_fd_offset(
+        fd: &dyn AsRawDescriptor,
+        size: usize,
+        offset: u64,
+    ) -> Result<MemoryMapping> {
+        MemoryMapping::from_fd_offset_protection(fd, size, offset, Protection::read_write())
+    }
+
+    /// Maps `size` bytes starting at `offset` from `fd` with `prot` protection.
+    pub fn from_fd_offset_protection(
+        fd: &dyn AsRawDescriptor,
+        size: usize,
+        offset: u64,
+        prot: Protection,
+    ) -> Result<MemoryMapping> {
+        // SAFETY: addr is None so the kernel chooses a non-overlapping address.
+        // The fd and offset are caller-provided.
+        unsafe { MemoryMapping::try_mmap(None, size, prot.into(), Some((fd, offset))) }
+    }
+
+    /// Creates an anonymous shared mapping of `size` bytes at the fixed address.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other mappings exist at `addr..addr+size`.
+    pub unsafe fn new_protection_fixed(
+        addr: *mut u8,
+        size: usize,
+        prot: Protection,
+    ) -> Result<MemoryMapping> {
+        MemoryMapping::try_mmap(Some(addr), size, prot.into(), None)
+    }
+
+    /// Maps `size` bytes starting at `offset` from `fd` at the fixed address.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other mappings exist at `addr..addr+size`.
+    pub unsafe fn from_descriptor_offset_protection_fixed(
+        addr: *mut u8,
+        fd: &dyn AsRawDescriptor,
+        size: usize,
+        offset: u64,
+        prot: Protection,
+    ) -> Result<MemoryMapping> {
+        MemoryMapping::try_mmap(Some(addr), size, prot.into(), Some((fd, offset)))
+    }
+
+    /// Creates a memory mapping with the given parameters.
+    ///
+    /// # Safety
+    ///
+    /// If `addr` is `Some`, the caller must ensure that the address range
+    /// `addr..addr+size` does not overlap with any existing mappings, and that
+    /// the address is page-aligned. If `fd` is `Some`, the caller must ensure
+    /// the file descriptor is valid and the offset is within the file bounds.
+    unsafe fn try_mmap(
+        addr: Option<*mut u8>,
+        size: usize,
+        prot: c_int,
+        fd: Option<(&dyn AsRawDescriptor, u64)>,
+    ) -> Result<MemoryMapping> {
+        let mut flags = libc::MAP_SHARED;
+
+        let addr = match addr {
+            Some(addr) => {
+                if (addr as usize) % pagesize() != 0 {
+                    return Err(Error::NotPageAligned);
+                }
+                flags |= libc::MAP_FIXED;
+                addr as *mut libc::c_void
+            }
+            None => null_mut(),
+        };
+
+        let (fd, offset) = match fd {
+            Some((fd, offset)) => {
+                if offset > libc::off_t::MAX as u64 {
+                    return Err(Error::InvalidOffset);
+                }
+                (fd.as_raw_descriptor(), offset as libc::off_t)
+            }
+            None => {
+                flags |= libc::MAP_ANONYMOUS;
+                (-1, 0)
+            }
+        };
+
+        // SAFETY: All pointer args are valid: addr is either null (kernel-chosen) or a
+        // caller-guaranteed non-overlapping page-aligned address. fd is valid or -1
+        // (anonymous). size and offset have been validated above.
+        let addr = libc::mmap(addr, size, prot, flags, fd, offset);
+        if addr == libc::MAP_FAILED {
+            return Err(Error::SystemCallFailed(crate::errno::Error::last()));
+        }
+
+        Ok(MemoryMapping {
+            addr: addr as *mut u8,
+            size,
+        })
+    }
+
+    /// Returns the size of this mapping.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Validates offset+count is within the mapping.
+    pub(crate) fn range_end(&self, offset: usize, count: usize) -> Result<usize> {
+        let mem_end = offset.checked_add(count).ok_or(Error::InvalidAddress)?;
+        if mem_end > self.size {
+            return Err(Error::InvalidAddress);
+        }
+        Ok(mem_end)
+    }
+
+    /// Calls msync with MS_SYNC on the mapping.
+    pub fn msync(&self) -> Result<()> {
+        // SAFETY: self.addr and self.size describe the region we obtained from mmap.
+        let ret = unsafe {
+            libc::msync(
+                self.addr as *mut libc::c_void,
+                self.size,
+                libc::MS_SYNC,
+            )
+        };
+        if ret == -1 {
+            return Err(Error::SystemCallFailed(crate::errno::Error::last()));
+        }
+        Ok(())
+    }
+}
+
+// SAFETY: The pointer and size point to memory owned by this MemoryMapping.
+unsafe impl MappedRegion for MemoryMapping {
+    fn as_ptr(&self) -> *mut u8 {
+        self.addr
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl Drop for MemoryMapping {
+    fn drop(&mut self) {
+        // SAFETY: self.addr and self.size describe a region we obtained from mmap and
+        // own exclusively.
+        unsafe {
+            libc::munmap(self.addr as *mut libc::c_void, self.size);
+        }
+    }
+}
+
+use crate::MemoryMapping as CrateMemoryMapping;
+use crate::MemoryMappingBuilder;
+use crate::MmapError;
+use crate::SafeDescriptor;
+
+/// Trait for Unix-specific (including macOS) MemoryMappingBuilder extensions.
+pub trait MemoryMappingBuilderUnix<'a> {
+    /// Build the memory mapping given the specified descriptor to mapped memory.
+    ///
+    /// Default: Create a new memory mapping.
+    #[allow(clippy::wrong_self_convention)]
+    fn from_descriptor(self, descriptor: &'a dyn AsRawDescriptor) -> MemoryMappingBuilder<'a>;
+}
+
+impl<'a> MemoryMappingBuilderUnix<'a> for MemoryMappingBuilder<'a> {
+    /// Build the memory mapping given the specified descriptor to mapped memory.
+    ///
+    /// Default: Create a new memory mapping.
+    #[allow(clippy::wrong_self_convention)]
+    fn from_descriptor(mut self, descriptor: &'a dyn AsRawDescriptor) -> MemoryMappingBuilder<'a> {
+        self.descriptor = Some(descriptor);
+        self
+    }
+}
+
+impl<'a> MemoryMappingBuilder<'a> {
+    /// Build a MemoryMapping from the provided options.
+    pub fn build(self) -> std::result::Result<CrateMemoryMapping, MmapError> {
+        match self.descriptor {
+            None => MemoryMappingBuilder::wrap(
+                MemoryMapping::new_protection(
+                    self.size,
+                    self.protection.unwrap_or_else(Protection::read_write),
+                )?,
+                None,
+            ),
+            Some(descriptor) => MemoryMappingBuilder::wrap(
+                MemoryMapping::from_fd_offset_protection(
+                    descriptor,
+                    self.size,
+                    self.offset.unwrap_or(0),
+                    self.protection.unwrap_or_else(Protection::read_write),
+                )?,
+                None,
+            ),
+        }
+    }
+
+    pub(crate) fn wrap(
+        mapping: MemoryMapping,
+        file_descriptor: Option<&'a dyn crate::AsRawDescriptor>,
+    ) -> std::result::Result<CrateMemoryMapping, MmapError> {
+        let file_descriptor = match file_descriptor {
+            Some(descriptor) => Some(
+                SafeDescriptor::try_from(descriptor)
+                    .map_err(|_| MmapError::SystemCallFailed(crate::errno::Error::last()))?,
+            ),
+            None => None,
+        };
+        Ok(CrateMemoryMapping {
+            mapping,
+            _file_descriptor: file_descriptor,
+        })
     }
 }
 
