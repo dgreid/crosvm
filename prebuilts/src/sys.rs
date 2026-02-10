@@ -9,5 +9,8 @@ cfg_if::cfg_if! {
     } else if #[cfg(windows)] {
         pub(crate) mod windows;
         pub(crate) use windows::*;
+    } else if #[cfg(target_os = "macos")] {
+        pub(crate) mod macos;
+        pub(crate) use macos::*;
     }
 }
