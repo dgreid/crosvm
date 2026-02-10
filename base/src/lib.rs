@@ -186,6 +186,7 @@ cfg_if::cfg_if! {
         pub use macos::is_cpu_online;
         pub use macos::pipe;
         pub use macos::safe_descriptor_from_cmdline_fd;
+        pub use macos::MemoryMappingBuilderUnix;
     }
 }
 
