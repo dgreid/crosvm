@@ -22,6 +22,7 @@ mod net;
 pub use net::UnixSeqpacket;
 pub use net::UnixSeqpacketListener;
 pub use net::UnlinkUnixSeqpacketListener;
+mod terminal;
 mod timer;
 
 pub(crate) use event::PlatformEvent;
