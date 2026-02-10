@@ -57,6 +57,11 @@ mod tests {
     #[test]
     fn event() {
         let evt = Event::new().unwrap();
+        // On macOS, Event uses a pipe and as_raw_descriptor returns the read end.
+        // On Linux, Event uses eventfd which is read/write.
+        #[cfg(target_os = "macos")]
+        assert_eq!(FileFlags::from_file(&evt).unwrap(), FileFlags::Read);
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(FileFlags::from_file(&evt).unwrap(), FileFlags::ReadWrite);
     }
 }
