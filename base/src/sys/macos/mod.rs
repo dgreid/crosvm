@@ -17,12 +17,13 @@ use crate::unix::Pid;
 mod event;
 pub(in crate::sys::macos) mod kqueue;
 mod net;
+mod notifiers;
+mod terminal;
 
 // Re-export net types for use in lib.rs via explicit paths
 pub use net::UnixSeqpacket;
 pub use net::UnixSeqpacketListener;
 pub use net::UnlinkUnixSeqpacketListener;
-mod terminal;
 mod timer;
 
 pub use terminal::read_raw_stdin;
