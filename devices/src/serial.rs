@@ -166,6 +166,106 @@ impl Serial {
     }
 
     fn spawn_input_thread(&mut self) {
+        // On macOS, kqueue doesn't work properly with stdin (terminal devices).
+        // Use a polling-based approach with a timeout instead.
+        #[cfg(target_os = "macos")]
+        {
+            let mut rx = match self.input.take() {
+                Some(input) => input,
+                None => return,
+            };
+
+            let (send_channel, recv_channel) = channel();
+
+            let interrupt_enable = self.interrupt_enable.clone();
+            let interrupt_evt = match self.interrupt_evt.try_clone() {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("failed to clone interrupt event: {}", e);
+                    return;
+                }
+            };
+
+            self.worker = Some(WorkerThread::start(
+                format!("{} input thread (polling)", self.debug_label()),
+                move |kill_evt| {
+                    use base::AsRawDescriptor;
+                    use std::io::Read;
+                    use std::thread;
+
+                    // Get the file descriptor from the read notifier
+                    let fd = rx.get_read_notifier().as_raw_descriptor();
+
+                    // Set to non-blocking mode
+                    // SAFETY: fd is obtained from get_read_notifier() which returns a valid
+                    // descriptor for the lifetime of the serial device. We only read flags here.
+                    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+                    if flags >= 0 {
+                        // SAFETY: fd is a valid descriptor from get_read_notifier(). Setting
+                        // O_NONBLOCK is safe as we handle EAGAIN in the read loop below.
+                        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+                    }
+
+                    let mut rx_buf = [0u8; 64];
+                    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+                    loop {
+                        // Check if we should exit
+                        if matches!(kill_evt.wait_timeout(Duration::ZERO), Ok(base::EventWaitResult::Signaled)) {
+                            // Restore blocking mode before returning
+                            if flags >= 0 {
+                                // SAFETY: Restoring original flags on valid fd
+                                unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+                            }
+                            return rx;
+                        }
+
+                        // Try to read from input (non-blocking)
+                        match rx.read(&mut rx_buf) {
+                            Ok(0) => {
+                                // EOF - input stream ended
+                                if flags >= 0 {
+                                    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+                                }
+                                return rx;
+                            }
+                            Ok(_n) => {
+                                for &byte in &rx_buf[.._n] {
+                                    if send_channel.send(byte).is_err() {
+                                        // Receiver disconnected
+                                        if flags >= 0 {
+                                            unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+                                        }
+                                        return rx;
+                                    }
+                                }
+                                if (interrupt_enable.load(Ordering::SeqCst) & IER_RECV_BIT) != 0 {
+                                    let _ = interrupt_evt.signal();
+                                }
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                // No data available, sleep and try again
+                            }
+                            Err(e) => {
+                                error!("failed to read from serial input: {}", e);
+                                if flags >= 0 {
+                                    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+                                }
+                                return rx;
+                            }
+                        }
+
+                        // Sleep before polling again
+                        thread::sleep(POLL_INTERVAL);
+                    }
+                },
+            ));
+
+            self.in_channel = Some(recv_channel);
+            return;
+        }
+
+        #[allow(unreachable_code)]
         let mut rx = match self.input.take() {
             Some(input) => input,
             None => return,

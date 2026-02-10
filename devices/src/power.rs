@@ -4,6 +4,7 @@
 
 //! Abstract device power management.
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub(crate) mod hvc;
 
 use std::collections::BTreeMap;
