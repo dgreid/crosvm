@@ -10,6 +10,7 @@ mod balloon;
 mod descriptor_chain;
 mod descriptor_utils;
 pub mod device_constants;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod input;
 mod interrupt;
 mod iommu;
@@ -135,6 +136,8 @@ cfg_if::cfg_if! {
         pub use self::wl::Wl;
     } else if #[cfg(windows)] {
         pub use self::vsock::Vsock;
+    } else if #[cfg(target_os = "macos")] {
+        // macOS has limited virtio support - Linux-specific features not available
     } else {
         compile_error!("Unsupported platform");
     }
