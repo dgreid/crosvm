@@ -120,7 +120,7 @@ pub enum NetError {
     #[error("failed to read control message header: {0}")]
     ReadCtrlHeader(io::Error),
     /// There are no more available descriptors to receive into.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     #[error("no rx descriptors available")]
     RxDescriptorsExhausted,
     /// Failure creating the Slirp loop.
@@ -167,7 +167,7 @@ pub enum NetError {
     #[error("failed to write control message ack: {0}")]
     WriteAck(io::Error),
     /// Writing to a buffer in the guest failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     #[error("failed to write to guest buffer: {0}")]
     WriteBuffer(io::Error),
 }
@@ -895,6 +895,13 @@ impl NetParameters {
         {
             let _ = protection_type;
             anyhow::bail!("net device not supported on Windows");
+        }
+        // macOS builds raw virtio-net MMIO devices directly from `Config::net` rather than
+        // going through the virtio device module path.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = protection_type;
+            anyhow::bail!("net device modules are not supported on macOS");
         }
     }
 }

@@ -1057,6 +1057,7 @@ dependencies = [
  "cros_tracing",
  "crosvm_cli",
  "data_model",
+ "device_virtio_console",
  "devices",
  "disk",
  "futures",

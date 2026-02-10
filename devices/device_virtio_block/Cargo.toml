@@ -36,6 +36,10 @@ zerocopy = { version = "0.8.13", features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = "3"
 
+# Used by tests/macos_virtio_tests.rs to check that block and console devices coexist.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+device_virtio_console = { workspace = true }
+
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 jail = { workspace = true }
 minijail = "*"

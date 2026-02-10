@@ -75,6 +75,13 @@ impl VirtioDeviceModule for VirtioSndModule {
             let _ = args;
             anyhow::bail!("snd device not supported on Windows")
         }
+        // macOS constructs `VirtioSnd` directly from the run path instead of going through the
+        // virtio device module path.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = args;
+            anyhow::bail!("snd device modules are not supported on macOS")
+        }
     }
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
