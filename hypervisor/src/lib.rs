@@ -16,6 +16,8 @@ pub mod gunyah;
 pub mod halla;
 #[cfg(all(windows, feature = "haxm"))]
 pub mod haxm;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod hvf;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod kvm;
 #[cfg(target_arch = "riscv64")]
@@ -100,6 +102,7 @@ pub enum HypervisorKind {
     Geniezone,
     Gunyah,
     Halla,
+    Hvf,
     Kvm,
     Haxm,
     Whpx,
@@ -564,6 +567,26 @@ pub enum VcpuExit {
         new_value: u64,
         write_mask: u64,
         ret_value: u64,
+    },
+    /// AArch64 system register access trap.
+    /// This is returned when a guest tries to access a system register that
+    /// requires emulation (e.g., GICv3 ICC_* registers).
+    #[cfg(target_arch = "aarch64")]
+    SystemRegisterTrap {
+        /// Op0 field (usually 3 for system registers)
+        op0: u8,
+        /// Op1 field
+        op1: u8,
+        /// CRn field
+        crn: u8,
+        /// CRm field
+        crm: u8,
+        /// Op2 field
+        op2: u8,
+        /// Target register (Rt)
+        rt: u8,
+        /// Direction: false = read (MRS), true = write (MSR)
+        is_write: bool,
     },
 }
 
