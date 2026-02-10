@@ -121,52 +121,175 @@ pub fn set_cpu_affinity<I: IntoIterator<Item = usize>>(_cpus: I) -> crate::errno
     Ok(())
 }
 
-pub struct EventContext<T: crate::EventToken> {
-    p: std::marker::PhantomData<T>,
+use smallvec::SmallVec;
+
+use crate::AsRawDescriptor;
+use crate::EventToken;
+use crate::EventType;
+use crate::TriggeredEvent;
+
+use kqueue::Kqueue;
+
+const EVENT_CONTEXT_MAX_EVENTS: usize = 16;
+
+/// Used to poll multiple objects that have file descriptors using kqueue.
+pub struct EventContext<T: EventToken> {
+    kqueue: Kqueue,
+    tokens: std::marker::PhantomData<T>,
 }
 
-impl<T: crate::EventToken> EventContext<T> {
+impl<T: EventToken> EventContext<T> {
+    /// Creates a new `EventContext`.
     pub fn new() -> crate::errno::Result<EventContext<T>> {
-        todo!();
+        Ok(EventContext {
+            kqueue: Kqueue::new()?,
+            tokens: std::marker::PhantomData,
+        })
     }
+
+    /// Creates a new `EventContext` and adds the slice of `fd` and `token` tuples to the new
+    /// context.
     pub fn build_with(
-        _fd_tokens: &[(&dyn crate::AsRawDescriptor, T)],
+        fd_tokens: &[(&dyn AsRawDescriptor, T)],
     ) -> crate::errno::Result<EventContext<T>> {
-        todo!();
+        let ctx = EventContext::new()?;
+        for (fd, token) in fd_tokens {
+            ctx.add_for_event(*fd, EventType::Read, T::from_raw_token(token.as_raw_token()))?;
+        }
+        Ok(ctx)
     }
+
+    /// Adds the given `descriptor` to this context, watching for the specified events.
     pub fn add_for_event(
         &self,
-        _descriptor: &dyn crate::AsRawDescriptor,
-        _event_type: crate::EventType,
-        _token: T,
+        descriptor: &dyn AsRawDescriptor,
+        event_type: EventType,
+        token: T,
     ) -> crate::errno::Result<()> {
-        todo!();
+        let fd = descriptor.as_raw_descriptor();
+        let token_raw = token.as_raw_token();
+        let mut changes = Vec::new();
+
+        if event_type == EventType::Read || event_type == EventType::ReadWrite {
+            changes.push(libc::kevent64_s {
+                ident: fd as u64,
+                filter: libc::EVFILT_READ,
+                flags: libc::EV_ADD | libc::EV_CLEAR,
+                fflags: 0,
+                data: 0,
+                udata: token_raw,
+                ext: [0, 0],
+            });
+        }
+
+        if event_type == EventType::Write || event_type == EventType::ReadWrite {
+            changes.push(libc::kevent64_s {
+                ident: fd as u64,
+                filter: libc::EVFILT_WRITE,
+                flags: libc::EV_ADD | libc::EV_CLEAR,
+                fflags: 0,
+                data: 0,
+                udata: token_raw,
+                ext: [0, 0],
+            });
+        }
+
+        if !changes.is_empty() {
+            self.kqueue.kevent(&changes, &mut [], None)?;
+        }
+
+        Ok(())
     }
+
+    /// Modifies the event type and token for the given `fd`.
     pub fn modify(
         &self,
-        _fd: &dyn crate::AsRawDescriptor,
-        _event_type: crate::EventType,
-        _token: T,
+        fd: &dyn AsRawDescriptor,
+        event_type: EventType,
+        token: T,
     ) -> crate::errno::Result<()> {
-        todo!();
+        // On kqueue, we delete the old registrations and add new ones.
+        self.delete(fd)?;
+        self.add_for_event(fd, event_type, token)
     }
-    pub fn delete(&self, _fd: &dyn crate::AsRawDescriptor) -> crate::errno::Result<()> {
-        todo!();
+
+    /// Deletes the given `fd` from this context.
+    pub fn delete(&self, fd: &dyn AsRawDescriptor) -> crate::errno::Result<()> {
+        let fd_raw = fd.as_raw_descriptor();
+        let changes = [
+            libc::kevent64_s {
+                ident: fd_raw as u64,
+                filter: libc::EVFILT_READ,
+                flags: libc::EV_DELETE,
+                fflags: 0,
+                data: 0,
+                udata: 0,
+                ext: [0, 0],
+            },
+            libc::kevent64_s {
+                ident: fd_raw as u64,
+                filter: libc::EVFILT_WRITE,
+                flags: libc::EV_DELETE,
+                fflags: 0,
+                data: 0,
+                udata: 0,
+                ext: [0, 0],
+            },
+        ];
+
+        // Ignore errors since the fd may not have been registered for both read and write.
+        let _ = self.kqueue.kevent(&changes, &mut [], Some(std::time::Duration::ZERO));
+        Ok(())
     }
-    pub fn wait(&self) -> crate::errno::Result<smallvec::SmallVec<[crate::TriggeredEvent<T>; 16]>> {
-        todo!();
+
+    /// Waits for any events to occur in FDs that were previously added to this context.
+    pub fn wait(&self) -> crate::errno::Result<SmallVec<[TriggeredEvent<T>; 16]>> {
+        self.wait_timeout(std::time::Duration::new(i64::MAX as u64, 0))
     }
+
+    /// Like `wait` except will only block for a maximum of the given `timeout`.
     pub fn wait_timeout(
         &self,
-        _timeout: std::time::Duration,
-    ) -> crate::errno::Result<smallvec::SmallVec<[crate::TriggeredEvent<T>; 16]>> {
-        todo!();
+        timeout: std::time::Duration,
+    ) -> crate::errno::Result<SmallVec<[TriggeredEvent<T>; 16]>> {
+        let mut events: [libc::kevent64_s; EVENT_CONTEXT_MAX_EVENTS] =
+            [libc::kevent64_s {
+                ident: 0,
+                filter: 0,
+                flags: 0,
+                fflags: 0,
+                data: 0,
+                udata: 0,
+                ext: [0, 0],
+            }; EVENT_CONTEXT_MAX_EVENTS];
+
+        let timeout_opt = if timeout.as_secs() == i64::MAX as u64 {
+            None // Infinite wait
+        } else {
+            Some(timeout)
+        };
+
+        let returned_events = self.kqueue.kevent(&[], &mut events, timeout_opt)?;
+
+        let triggered: SmallVec<[TriggeredEvent<T>; 16]> = returned_events
+            .iter()
+            .map(|e| {
+                TriggeredEvent {
+                    token: T::from_raw_token(e.udata),
+                    is_readable: e.filter == libc::EVFILT_READ,
+                    is_writable: e.filter == libc::EVFILT_WRITE,
+                    is_hungup: (e.flags & libc::EV_EOF) != 0,
+                }
+            })
+            .collect();
+
+        Ok(triggered)
     }
 }
 
-impl<T: crate::EventToken> crate::AsRawDescriptor for EventContext<T> {
+impl<T: EventToken> AsRawDescriptor for EventContext<T> {
     fn as_raw_descriptor(&self) -> RawDescriptor {
-        todo!();
+        self.kqueue.as_raw_descriptor()
     }
 }
 
@@ -513,8 +636,6 @@ pub enum FlockOperation {
     /// Remove an existing lock.
     Unlock,
 }
-
-use crate::AsRawDescriptor;
 
 /// Locks or unlocks a file using flock.
 ///
