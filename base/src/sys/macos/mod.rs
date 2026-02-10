@@ -17,6 +17,11 @@ use crate::unix::Pid;
 mod event;
 pub(in crate::sys::macos) mod kqueue;
 mod net;
+
+// Re-export net types for use in lib.rs via explicit paths
+pub use net::UnixSeqpacket;
+pub use net::UnixSeqpacketListener;
+pub use net::UnlinkUnixSeqpacketListener;
 mod timer;
 
 pub(crate) use event::PlatformEvent;
