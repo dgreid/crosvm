@@ -22,7 +22,11 @@ mod net;
 pub use net::UnixSeqpacket;
 pub use net::UnixSeqpacketListener;
 pub use net::UnlinkUnixSeqpacketListener;
+mod terminal;
 mod timer;
+
+pub use terminal::read_raw_stdin;
+pub use terminal::Terminal;
 
 pub(crate) use event::PlatformEvent;
 pub(in crate::sys) use libc::sendmsg;
