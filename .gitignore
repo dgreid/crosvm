@@ -8,3 +8,4 @@ lcov.info
 .idea
 .vscode/*
 !.vscode/settings.json
+.claude/
