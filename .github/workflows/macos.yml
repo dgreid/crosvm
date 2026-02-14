@@ -1,0 +1,127 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build (macOS ARM64)
+    runs-on: macos-14  # M1 Mac
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release -p crosvm
+
+      - name: Clippy
+        run: cargo clippy -p crosvm -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Create entitlements file
+        run: |
+          cat > crosvm.entitlements << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.hypervisor</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Code sign binary
+        run: codesign --sign - --entitlements crosvm.entitlements --force target/release/crosvm
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosvm-macos-arm64
+          path: target/release/crosvm
+
+  boot-test:
+    name: Boot Test (macOS ARM64)
+    runs-on: macos-14
+    needs: build
+    # Only run if a test kernel is available (can be enabled later)
+    if: ${{ false }}  # Disabled until test kernel is available
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: crosvm-macos-arm64
+          path: ./
+
+      - name: Make executable
+        run: chmod +x crosvm
+
+      - name: Create entitlements file
+        run: |
+          cat > crosvm.entitlements << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.hypervisor</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Code sign
+        run: codesign --sign - --entitlements crosvm.entitlements --force ./crosvm
+
+      - name: Download test kernel
+        run: |
+          # Download a minimal ARM64 Linux kernel for testing
+          # TODO: Set up kernel hosting and update this URL
+          # curl -L -o arm64_Image "https://example.com/arm64_Image"
+          echo "Test kernel download not yet configured"
+          exit 0
+
+      - name: Run boot test
+        run: |
+          if [ ! -f arm64_Image ]; then
+            echo "No test kernel available, skipping boot test"
+            exit 0
+          fi
+
+          timeout 30 ./crosvm run arm64_Image 2>&1 | tee boot.log || true
+
+          # Check for successful boot indicators
+          if grep -q "Booting Linux" boot.log; then
+            echo "Kernel started booting successfully"
+          else
+            echo "Kernel failed to start"
+            cat boot.log
+            exit 1
+          fi
