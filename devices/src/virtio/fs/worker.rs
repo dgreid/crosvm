@@ -2,26 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::fs::File;
 use std::io;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use base::error;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use base::syscall;
 use base::Event;
 use base::EventToken;
 use base::Protection;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use base::SafeDescriptor;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use base::Tube;
 use base::WaitContext;
 use fuse::filesystem::FileSystem;
 use fuse::filesystem::ZeroCopyReader;
 use fuse::filesystem::ZeroCopyWriter;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use sync::Mutex;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use vm_control::FsMappingRequest;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use vm_control::VmResponse;
 
 use crate::virtio::fs::Error;
@@ -60,11 +64,13 @@ impl ZeroCopyWriter for Writer {
     }
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 struct Mapper {
     tube: Arc<Mutex<Tube>>,
     slot: u32,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl Mapper {
     fn new(tube: Arc<Mutex<Tube>>, slot: u32) -> Self {
         Self { tube, slot }
@@ -89,6 +95,7 @@ impl Mapper {
     }
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl fuse::Mapper for Mapper {
     fn map(
         &self,
@@ -137,13 +144,38 @@ impl fuse::Mapper for Mapper {
     }
 }
 
+/// A no-op mapper for platforms without DAX support (e.g., macOS).
+#[cfg(target_os = "macos")]
+struct NoopMapper;
+
+#[cfg(target_os = "macos")]
+impl fuse::Mapper for NoopMapper {
+    fn map(
+        &self,
+        _mem_offset: u64,
+        _size: usize,
+        _fd: &dyn AsRawFd,
+        _file_offset: u64,
+        _prot: Protection,
+    ) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+
+    fn unmap(&self, _offset: u64, _size: u64) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
+
 pub struct Worker<F: FileSystem + Sync> {
     pub(crate) queue: Queue,
     server: Arc<fuse::Server<F>>,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     tube: Arc<Mutex<Tube>>,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     slot: u32,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn process_fs_queue<F: FileSystem + Sync>(
     queue: &mut Queue,
     server: &Arc<fuse::Server<F>>,
@@ -162,7 +194,25 @@ fn process_fs_queue<F: FileSystem + Sync>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn process_fs_queue<F: FileSystem + Sync>(
+    queue: &mut Queue,
+    server: &Arc<fuse::Server<F>>,
+) -> Result<()> {
+    let mapper = NoopMapper;
+    while let Some(mut avail_desc) = queue.pop() {
+        let total =
+            server.handle_message(&mut avail_desc.reader, &mut avail_desc.writer, &mapper)?;
+
+        queue.add_used_with_bytes_written(avail_desc, total as u32);
+        queue.trigger_interrupt();
+    }
+
+    Ok(())
+}
+
 impl<F: FileSystem + Sync> Worker<F> {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub fn new(
         queue: Queue,
         server: Arc<fuse::Server<F>>,
@@ -177,45 +227,51 @@ impl<F: FileSystem + Sync> Worker<F> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn new(queue: Queue, server: Arc<fuse::Server<F>>) -> Worker<F> {
+        Worker { queue, server }
+    }
+
     pub fn run(&mut self, kill_evt: Event) -> Result<()> {
-        let mut ruid: libc::uid_t = 0;
-        let mut euid: libc::uid_t = 0;
-        let mut suid: libc::uid_t = 0;
-        // SAFETY: Safe because this doesn't modify any memory and we check the return value.
-        syscall!(unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) })
-            .map_err(Error::GetResuid)?;
-
-        // Only need to set SECBIT_NO_SETUID_FIXUP for threads which could change uid.
-        if ruid == 0 || ruid != euid || ruid != suid {
-            // We need to set the no setuid fixup secure bit so that we don't drop capabilities when
-            // changing the thread uid/gid. Without this, creating new entries can fail in some
-            // corner cases.
-            const SECBIT_NO_SETUID_FIXUP: i32 = 1 << 2;
-
-            let mut securebits = syscall!(
-                // SAFETY:
-                // Safe because this doesn't modify any memory and we check the return value.
-                unsafe { libc::prctl(libc::PR_GET_SECUREBITS) }
-            )
-            .map_err(Error::GetSecurebits)?;
-
-            securebits |= SECBIT_NO_SETUID_FIXUP;
-
-            syscall!(
-                // SAFETY:
-                // Safe because this doesn't modify any memory and we check the return value.
-                unsafe { libc::prctl(libc::PR_SET_SECUREBITS, securebits) }
-            )
-            .map_err(Error::SetSecurebits)?;
-        }
-
-        // To avoid extra locking, unshare filesystem attributes from parent. This includes the
-        // current working directory and umask.
-        syscall!(
+        // Linux-specific initialization: getresuid, securebits, unshare
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            let mut ruid: libc::uid_t = 0;
+            let mut euid: libc::uid_t = 0;
+            let mut suid: libc::uid_t = 0;
             // SAFETY: Safe because this doesn't modify any memory and we check the return value.
-            unsafe { libc::unshare(libc::CLONE_FS) }
-        )
-        .map_err(Error::UnshareFromParent)?;
+            syscall!(unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) })
+                .map_err(Error::GetResuid)?;
+
+            // Only need to set SECBIT_NO_SETUID_FIXUP for threads which could change uid.
+            if ruid == 0 || ruid != euid || ruid != suid {
+                const SECBIT_NO_SETUID_FIXUP: i32 = 1 << 2;
+
+                let mut securebits = syscall!(
+                    // SAFETY: Safe because this doesn't modify any memory and we check the return
+                    // value.
+                    unsafe { libc::prctl(libc::PR_GET_SECUREBITS) }
+                )
+                .map_err(Error::GetSecurebits)?;
+
+                securebits |= SECBIT_NO_SETUID_FIXUP;
+
+                syscall!(
+                    // SAFETY: Safe because this doesn't modify any memory and we check the return
+                    // value.
+                    unsafe { libc::prctl(libc::PR_SET_SECUREBITS, securebits) }
+                )
+                .map_err(Error::SetSecurebits)?;
+            }
+
+            // To avoid extra locking, unshare filesystem attributes from parent.
+            syscall!(
+                // SAFETY: Safe because this doesn't modify any memory and we check the return
+                // value.
+                unsafe { libc::unshare(libc::CLONE_FS) }
+            )
+            .map_err(Error::UnshareFromParent)?;
+        }
 
         #[derive(EventToken)]
         enum Token {
@@ -237,9 +293,18 @@ impl<F: FileSystem + Sync> Worker<F> {
                 match event.token {
                     Token::QueueReady => {
                         self.queue.event().wait().map_err(Error::ReadQueueEvent)?;
-                        if let Err(e) =
-                            process_fs_queue(&mut self.queue, &self.server, &self.tube, self.slot)
-                        {
+                        #[cfg(any(target_os = "android", target_os = "linux"))]
+                        if let Err(e) = process_fs_queue(
+                            &mut self.queue,
+                            &self.server,
+                            &self.tube,
+                            self.slot,
+                        ) {
+                            error!("virtio-fs transport error: {}", e);
+                            return Err(e);
+                        }
+                        #[cfg(target_os = "macos")]
+                        if let Err(e) = process_fs_queue(&mut self.queue, &self.server) {
                             error!("virtio-fs transport error: {}", e);
                             return Err(e);
                         }

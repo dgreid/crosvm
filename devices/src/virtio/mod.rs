@@ -104,7 +104,7 @@ cfg_if::cfg_if! {
         pub use self::wl::Wl;
     } else if #[cfg(windows)] {
     } else if #[cfg(target_os = "macos")] {
-        // macOS has limited virtio support - Linux-specific features not available
+        pub mod fs;
     } else {
         compile_error!("Unsupported platform");
     }
