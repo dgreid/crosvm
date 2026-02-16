@@ -11,6 +11,8 @@ cfg_if::cfg_if! {
         use crate::crosvm::sys::config::VfioOption;
         use crate::crosvm::sys::config::SharedDir;
         use crate::crosvm::sys::config::PmemExt2Option;
+    } else if #[cfg(target_os = "macos")] {
+        use crate::crosvm::sys::config::SharedDir;
     }
 }
 
@@ -1836,7 +1838,7 @@ pub struct RunCommand {
     /// the service ipc pipe name. (Prefix \\\\.\\pipe\\ not needed.
     pub service_pipe_name: Option<String>,
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     #[argh(
         option,
         arg_name = "PATH:TAG[:type=TYPE:writeback=BOOL:timeout=SECONDS:uidmap=UIDMAP:gidmap=GIDMAP:cache=CACHE:dax=BOOL,posix_acl=BOOL]"
@@ -3023,6 +3025,11 @@ impl TryFrom<RunCommand> for super::config::Config {
                     .get_or_insert_with(Default::default)
                     .pivot_root = p;
             }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            cfg.shared_dirs = cmd.shared_dir;
         }
 
         let protection_flags = [
