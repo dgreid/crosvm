@@ -9,46 +9,70 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use base::error;
 use base::warn;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use base::AsRawDescriptor;
 use base::Error as SysError;
 use base::RawDescriptor;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use base::Tube;
 use base::WorkerThread;
 use data_model::Le32;
 use remain::sorted;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use resources::Alloc;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use sync::Mutex;
 use thiserror::Error;
 use virtio_sys::virtio_fs::virtio_fs_config;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use virtio_sys::virtio_fs::VIRTIO_FS_SHMCAP_ID_CACHE;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use vm_control::FsMappingRequest;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use vm_control::VmResponse;
 use vm_memory::GuestMemory;
 use zerocopy::IntoBytes;
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::pci::PciAddress;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::pci::PciBarConfiguration;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::pci::PciBarPrefetchable;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::pci::PciBarRegionType;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::pci::PciCapability;
 use crate::virtio::copy_config;
 use crate::virtio::device_constants::fs::FS_MAX_TAG_LEN;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::virtio::PciCapabilityType;
 use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::virtio::VirtioPciShmCap;
 
 #[cfg(feature = "arc_quota")]
 mod arc_ioctl;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 mod caps;
-mod config;
+pub(crate) mod config;
 mod expiring_map;
-mod multikey;
-pub mod passthrough;
-mod read_dir;
+pub(crate) mod multikey;
 mod worker;
+
+cfg_if::cfg_if! {
+    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+        pub mod passthrough;
+        mod read_dir;
+    } else if #[cfg(target_os = "macos")] {
+        pub mod passthrough_macos;
+        pub use passthrough_macos as passthrough;
+        pub(crate) mod read_dir_macos;
+    }
+}
 
 pub use config::CachePolicy;
 pub use config::Config;
@@ -58,8 +82,11 @@ pub use worker::Worker;
 
 const QUEUE_SIZE: u16 = 1024;
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const FS_BAR_NUM: u8 = 4;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const FS_BAR_OFFSET: u64 = 0;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 const FS_BAR_SIZE: u64 = 1 << 33;
 
 /// Errors that may occur during the creation or operation of an Fs device.
@@ -122,13 +149,17 @@ pub struct Fs {
     queue_sizes: Box<[u16]>,
     avail_features: u64,
     acked_features: u64,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     use_dax: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pci_bar: Option<Alloc>,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     tube: Option<Tube>,
     workers: Vec<WorkerThread<()>>,
 }
 
 impl Fs {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub fn new(
         base_features: u64,
         tag: &str,
@@ -169,6 +200,44 @@ impl Fs {
             workers: Vec::with_capacity(num_workers + 1),
         })
     }
+
+    /// Create an Fs device without a Tube (for macOS where DAX is not supported).
+    #[cfg(target_os = "macos")]
+    pub fn new_without_tube(
+        base_features: u64,
+        tag: &str,
+        num_workers: usize,
+        fs_cfg: Config,
+        source_dir: &str,
+    ) -> Result<Fs> {
+        if tag.len() > FS_MAX_TAG_LEN {
+            return Err(Error::TagTooLong(tag.len()));
+        }
+
+        let mut cfg_tag = [0u8; FS_MAX_TAG_LEN];
+        cfg_tag[..tag.len()].copy_from_slice(tag.as_bytes());
+
+        let cfg = virtio_fs_config {
+            tag: cfg_tag,
+            num_request_queues: Le32::from(num_workers as u32),
+        };
+
+        let mut fs = PassthroughFs::new(tag, fs_cfg).map_err(Error::CreateFs)?;
+        fs.set_root_dir(source_dir.to_string());
+
+        // There is always a high priority queue in addition to the request queues.
+        let num_queues = num_workers + 1;
+
+        Ok(Fs {
+            cfg,
+            tag: tag.to_string(),
+            fs: Some(fs),
+            queue_sizes: vec![QUEUE_SIZE; num_queues].into_boxed_slice(),
+            avail_features: base_features,
+            acked_features: 0,
+            workers: Vec::with_capacity(num_workers + 1),
+        })
+    }
 }
 
 impl VirtioDevice for Fs {
@@ -178,6 +247,7 @@ impl VirtioDevice for Fs {
             .as_ref()
             .map(PassthroughFs::keep_rds)
             .unwrap_or_default();
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         if let Some(rd) = self.tube.as_ref().map(|s| s.as_raw_descriptor()) {
             fds.push(rd);
         }
@@ -230,33 +300,43 @@ impl VirtioDevice for Fs {
         let fs = self.fs.take().expect("missing file system implementation");
 
         let server = Arc::new(Server::new(fs));
-        let socket = self.tube.take().expect("missing mapping socket");
-        let mut slot = 0;
 
-        // Set up shared memory for DAX.
-        if let Some(pci_bar) = self.pci_bar {
-            // Create the shared memory region now before we start processing requests.
-            let request = FsMappingRequest::AllocateSharedMemoryRegion(pci_bar);
-            socket
-                .send(&request)
-                .expect("failed to send allocation message");
-            slot = match socket.recv() {
-                Ok(VmResponse::RegisterMemory { slot }) => slot,
-                Ok(VmResponse::Err(e)) => panic!("failed to allocate shared memory region: {e}"),
-                r => panic!("unexpected response to allocate shared memory region: {r:?}"),
-            };
-        }
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let (socket, slot) = {
+            let socket = self.tube.take().expect("missing mapping socket");
+            let mut slot = 0;
 
-        let socket = Arc::new(Mutex::new(socket));
+            // Set up shared memory for DAX.
+            if let Some(pci_bar) = self.pci_bar {
+                // Create the shared memory region now before we start processing requests.
+                let request = FsMappingRequest::AllocateSharedMemoryRegion(pci_bar);
+                socket
+                    .send(&request)
+                    .expect("failed to send allocation message");
+                slot = match socket.recv() {
+                    Ok(VmResponse::RegisterMemory { slot }) => slot,
+                    Ok(VmResponse::Err(e)) => {
+                        panic!("failed to allocate shared memory region: {e}")
+                    }
+                    r => panic!("unexpected response to allocate shared memory region: {r:?}"),
+                };
+            }
+
+            (Arc::new(Mutex::new(socket)), slot)
+        };
 
         self.workers = queues
             .into_iter()
             .map(|(idx, queue)| {
                 let server = server.clone();
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 let socket = Arc::clone(&socket);
 
                 WorkerThread::start(format!("v_fs:{}:{}", self.tag, idx), move |kill_evt| {
+                    #[cfg(any(target_os = "android", target_os = "linux"))]
                     let mut worker = Worker::new(queue, server, socket, slot);
+                    #[cfg(target_os = "macos")]
+                    let mut worker = Worker::new(queue, server);
                     if let Err(e) = worker.run(kill_evt) {
                         error!("virtio-fs worker failed: {e:#}");
                     }
@@ -266,6 +346,7 @@ impl VirtioDevice for Fs {
         Ok(())
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     fn get_device_bars(&mut self, address: PciAddress) -> Vec<PciBarConfiguration> {
         if !self.use_dax {
             return vec![];
@@ -286,6 +367,7 @@ impl VirtioDevice for Fs {
         )]
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     fn get_device_caps(&self) -> Vec<Box<dyn PciCapability>> {
         if !self.use_dax {
             return vec![];

@@ -137,7 +137,7 @@ cfg_if::cfg_if! {
     } else if #[cfg(windows)] {
         pub use self::vsock::Vsock;
     } else if #[cfg(target_os = "macos")] {
-        // macOS has limited virtio support - Linux-specific features not available
+        pub mod fs;
     } else {
         compile_error!("Unsupported platform");
     }
