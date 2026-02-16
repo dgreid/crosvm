@@ -73,7 +73,7 @@ use x86_64::CpuIdCall;
 
 use super::any_device_module::AnyVirtioDeviceModule;
 pub(crate) use super::sys::HypervisorKind;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 use crate::crosvm::sys::config::SharedDir;
 
 cfg_if::cfg_if! {
@@ -753,7 +753,7 @@ pub struct Config {
     pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
     #[cfg(windows)]
     pub service_pipe_name: Option<String>,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     #[serde(skip)]
     pub shared_dirs: Vec<SharedDir>,
     #[cfg(feature = "media")]
@@ -986,7 +986,7 @@ impl Default for Config {
             serial_parameters: BTreeMap::new(),
             #[cfg(windows)]
             service_pipe_name: None,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
             shared_dirs: Vec::new(),
             #[cfg(feature = "media")]
             simple_media_device: Default::default(),
