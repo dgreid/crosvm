@@ -513,10 +513,10 @@ impl io::Read for Reader {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl fuse::Reader for Reader {}
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl fuse::filesystem::ZeroCopyReader for Reader {
     fn read_to(&mut self, f: &mut std::fs::File, count: usize, off: u64) -> io::Result<usize> {
         self.read_to_at(f, count, off)
@@ -781,7 +781,7 @@ impl io::Write for Writer {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl fuse::Writer for Writer {
     type ClosureWriter = Self;
 
@@ -797,7 +797,7 @@ impl fuse::Writer for Writer {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl fuse::filesystem::ZeroCopyWriter for Writer {
     fn write_from(&mut self, f: &mut std::fs::File, count: usize, off: u64) -> io::Result<usize> {
         self.write_from_at(f, count, off)
