@@ -523,6 +523,7 @@ pub struct Attr {
     pub padding: u32,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl From<libc::stat64> for Attr {
     fn from(st: libc::stat64) -> Attr {
         Attr {
@@ -537,6 +538,30 @@ impl From<libc::stat64> for Attr {
             ctimensec: st.st_ctime_nsec as u32,
             mode: st.st_mode,
             #[allow(clippy::unnecessary_cast)]
+            nlink: st.st_nlink as u32,
+            uid: st.st_uid,
+            gid: st.st_gid,
+            rdev: st.st_rdev as u32,
+            blksize: st.st_blksize as u32,
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<libc::stat> for Attr {
+    fn from(st: libc::stat) -> Attr {
+        Attr {
+            ino: st.st_ino,
+            size: st.st_size as u64,
+            blocks: st.st_blocks as u64,
+            atime: st.st_atime as u64,
+            mtime: st.st_mtime as u64,
+            ctime: st.st_ctime as u64,
+            atimensec: st.st_atime_nsec as u32,
+            mtimensec: st.st_mtime_nsec as u32,
+            ctimensec: st.st_ctime_nsec as u32,
+            mode: st.st_mode as u32,
             nlink: st.st_nlink as u32,
             uid: st.st_uid,
             gid: st.st_gid,
@@ -562,6 +587,7 @@ pub struct Kstatfs {
     pub spare: [u32; 6],
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl From<libc::statvfs64> for Kstatfs {
     #[allow(clippy::unnecessary_cast)]
     fn from(st: libc::statvfs64) -> Self {
@@ -573,6 +599,24 @@ impl From<libc::statvfs64> for Kstatfs {
             ffree: st.f_ffree,
             bsize: st.f_bsize as u32,
             namelen: st.f_namemax as u32,
+            frsize: st.f_frsize as u32,
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<libc::statvfs> for Kstatfs {
+    #[allow(clippy::unnecessary_cast)]
+    fn from(st: libc::statvfs) -> Self {
+        Kstatfs {
+            blocks: st.f_blocks as u64,
+            bfree: st.f_bfree as u64,
+            bavail: st.f_bavail as u64,
+            files: st.f_files as u64,
+            ffree: st.f_ffree as u64,
+            bsize: st.f_bsize as u32,
+            namelen: 255, // macOS statvfs has f_namemax
             frsize: st.f_frsize as u32,
             ..Default::default()
         }
@@ -769,11 +813,32 @@ pub struct SetattrIn {
     pub unused5: u32,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl From<SetattrIn> for libc::stat64 {
     fn from(s: SetattrIn) -> libc::stat64 {
         // SAFETY: zero-initializing a struct with only POD fields.
         let mut out: libc::stat64 = unsafe { mem::zeroed() };
         out.st_mode = s.mode;
+        out.st_uid = s.uid;
+        out.st_gid = s.gid;
+        out.st_size = s.size as i64;
+        out.st_atime = s.atime as libc::time_t;
+        out.st_mtime = s.mtime as libc::time_t;
+        out.st_ctime = s.ctime as libc::time_t;
+        out.st_atime_nsec = s.atimensec as libc::c_long;
+        out.st_mtime_nsec = s.mtimensec as libc::c_long;
+        out.st_ctime_nsec = s.ctimensec as libc::c_long;
+
+        out
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<SetattrIn> for libc::stat {
+    fn from(s: SetattrIn) -> libc::stat {
+        // SAFETY: zero-initializing a struct with only POD fields.
+        let mut out: libc::stat = unsafe { mem::zeroed() };
+        out.st_mode = s.mode as u16;
         out.st_uid = s.uid;
         out.st_gid = s.gid;
         out.st_size = s.size as i64;
