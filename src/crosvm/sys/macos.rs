@@ -53,6 +53,7 @@ use devices::irqchip::GIC_SPURIOUS_INTID;
 use devices::irqchip::VTIMER_PPI;
 use devices::virtio::base_features;
 use devices::virtio::block::BlockAsync;
+use devices::virtio::fs::Fs;
 use hypervisor::hvf::hv_interrupt_type_t;
 use hypervisor::hvf::hv_result;
 use hypervisor::hvf::hv_vm_map;
@@ -390,7 +391,13 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     // Create a minimal device tree for the kernel
     // Pass the number of disks so virtio-mmio nodes can be added to FDT
-    let mut fdt = create_minimal_fdt(memory_size, vcpu_count, fdt_address, cfg.disks.len(), &cfg.params)?;
+    let mut fdt = create_minimal_fdt(
+        memory_size,
+        vcpu_count,
+        fdt_address,
+        cfg.disks.len() + cfg.shared_dirs.len(),
+        &cfg.params,
+    )?;
     let fdt_data = fdt.finish().context("failed to finish FDT")?;
 
     // Write FDT to guest memory
@@ -521,6 +528,79 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         next_irq += 1;
     }
 
+    // Set up virtiofs shared directory devices (if any)
+    let mut fs_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
+
+    for (i, shared_dir) in cfg.shared_dirs.iter().enumerate() {
+        info!(
+            "Setting up virtiofs device {}: src={:?}, tag={}",
+            i, shared_dir.src, shared_dir.tag
+        );
+
+        let source_dir = shared_dir.src.to_string_lossy();
+        let fs_device = match Fs::new_without_tube(
+            base_features(ProtectionType::Unprotected),
+            &shared_dir.tag,
+            1, // num_workers
+            shared_dir.fs_cfg.clone(),
+            &source_dir,
+        ) {
+            Ok(device) => device,
+            Err(e) => {
+                error!("Failed to create Fs device for {}: {}", shared_dir.tag, e);
+                continue;
+            }
+        };
+
+        // Wrap in VirtioMmioDevice
+        let mut mmio_device = match VirtioMmioDevice::new(
+            guest_mem.clone(),
+            Box::new(fs_device),
+            false,
+        ) {
+            Ok(device) => device,
+            Err(e) => {
+                error!("Failed to create VirtioMmioDevice for virtiofs {}: {}", i, e);
+                continue;
+            }
+        };
+
+        let mmio_addr = next_mmio_addr;
+        let irq = next_irq;
+
+        let irq_evt = match IrqEdgeEvent::new() {
+            Ok(evt) => evt,
+            Err(e) => {
+                error!("Failed to create IrqEdgeEvent for virtiofs {}: {}", i, e);
+                continue;
+            }
+        };
+
+        match irq_evt.try_clone() {
+            Ok(cloned_evt) => {
+                fs_irq_events.push((cloned_evt, irq));
+            }
+            Err(e) => {
+                error!("Failed to clone IrqEdgeEvent for virtiofs {}: {}", i, e);
+                continue;
+            }
+        }
+
+        mmio_device.assign_irq(&irq_evt, irq);
+
+        mmio_bus
+            .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+            .context("failed to insert virtiofs device into MMIO bus")?;
+
+        info!(
+            "virtiofs device {} (tag={}) added at MMIO address {:#x} with IRQ {}",
+            i, shared_dir.tag, mmio_addr, irq
+        );
+
+        next_mmio_addr += VIRTIO_MMIO_SIZE;
+        next_irq += 1;
+    }
+
     info!("Starting VM execution with {} VCPUs", vcpu_count);
 
     // Create VCPU coordinator for multi-VCPU support (must be before IRQ handler)
@@ -544,6 +624,13 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     let mut irq_events_for_handler = block_irq_events.iter()
         .filter_map(|(evt, irq)| evt.try_clone().ok().map(|e| (e, *irq)))
         .collect::<Vec<_>>();
+
+    // Add virtiofs device interrupt events
+    for (evt, irq) in &fs_irq_events {
+        if let Ok(cloned) = evt.try_clone() {
+            irq_events_for_handler.push((cloned, *irq));
+        }
+    }
 
     // Add the serial device's interrupt event so serial input triggers a guest IRQ.
     if let Ok(serial_evt_clone) = serial_evt.try_clone() {
@@ -718,7 +805,7 @@ fn create_minimal_fdt(
     memory_size: u64,
     vcpu_count: usize,
     _fdt_address: GuestAddress,
-    num_disks: usize,
+    num_mmio_devices: usize,
     extra_kernel_params: &[String],
 ) -> Result<Fdt> {
     let mut fdt = Fdt::new(&[]);
@@ -741,9 +828,10 @@ fn create_minimal_fdt(
     let root_node = fdt.root_mut();
     root_node.set_prop("#address-cells", 2u32)?;
     root_node.set_prop("#size-cells", 2u32)?;
-    root_node.set_prop("compatible", "linux,dummy-virt")?;
+    root_node.set_prop("compatible", &["linux,dummy-virt", "simple-bus"])?;
     root_node.set_prop("model", "crosvm")?;
     root_node.set_prop("interrupt-parent", PHANDLE_GIC)?;
+    root_node.set_prop("ranges", ())?;
 
     // Chosen node - kernel command line and stdout
     let chosen_node = root_node.subnode_mut("chosen")?;
@@ -833,9 +921,9 @@ fn create_minimal_fdt(
     uart_node.set_prop("clock-frequency", 1843200u32)?;
     uart_node.set_prop("interrupts", &[GIC_FDT_IRQ_TYPE_SPI, AARCH64_SERIAL_IRQ, IRQ_TYPE_EDGE_RISING])?;
 
-    // Virtio-MMIO block device nodes
+    // Virtio-MMIO device nodes (block devices + virtiofs devices)
     // Each device gets its own SPI, starting after serial IRQ (0)
-    for i in 0..num_disks {
+    for i in 0..num_mmio_devices {
         let mmio_addr = AARCH64_MMIO_BASE + (i as u64 * VIRTIO_MMIO_SIZE);
         let irq = (i + 1) as u32; // SPI starting at 1 (serial uses 0)
 
