@@ -24,6 +24,29 @@ pub use crate::sys::RemoveMappingOne;
 pub use crate::sys::SetattrValid;
 pub use crate::sys::ROOT_ID;
 
+/// Cross-platform type alias for the stat struct.
+/// Linux uses `stat64`; macOS uses `stat` (already 64-bit on aarch64).
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub type LibcStat = libc::stat64;
+/// Cross-platform type alias for the stat struct.
+/// Linux uses `stat64`; macOS uses `stat` (already 64-bit on aarch64).
+#[cfg(target_os = "macos")]
+pub type LibcStat = libc::stat;
+
+/// Cross-platform type alias for the statvfs struct.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub type LibcStatvfs = libc::statvfs64;
+/// Cross-platform type alias for the statvfs struct.
+#[cfg(target_os = "macos")]
+pub type LibcStatvfs = libc::statvfs;
+
+/// Cross-platform type alias for inode number.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub type LibcIno = libc::ino64_t;
+/// Cross-platform type alias for inode number.
+#[cfg(target_os = "macos")]
+pub type LibcIno = libc::ino_t;
+
 const MAX_BUFFER_SIZE: u32 = 1 << 20;
 
 /// Information about a path in the filesystem.
@@ -45,7 +68,7 @@ pub struct Entry {
     /// Inode attributes. Even if `attr_timeout` is zero, `attr` must be correct. For example, for
     /// `open()`, FUSE uses `attr.st_size` from `lookup()` to determine how many bytes to request.
     /// If this value is not correct, incorrect data will be returned.
-    pub attr: libc::stat64,
+    pub attr: LibcStat,
 
     /// How long the values in `attr` should be considered valid. If the attributes of the `Entry`
     /// are only modified by the FUSE client, then this should be set to a very large value.
@@ -84,14 +107,14 @@ impl Entry {
     ///
     /// A new negative entry with provided entry timeout and 0 attr timeout.
     pub fn new_negative(negative_timeout: Duration) -> Entry {
-        let attr = MaybeUninit::<libc::stat64>::zeroed();
+        let attr = MaybeUninit::<LibcStat>::zeroed();
         Entry {
             inode: 0, // Using 0 for negative entry
             entry_timeout: negative_timeout,
             // Zero-fill other fields that won't be used.
             attr_timeout: Duration::from_secs(0),
             generation: 0,
-            // SAFETY: zero-initialized `stat64` is a valid value.
+            // SAFETY: zero-initialized `LibcStat` is a valid value.
             attr: unsafe { attr.assume_init() },
         }
     }
@@ -102,7 +125,7 @@ pub struct DirEntry<'a> {
     /// The inode number for this entry. This does NOT have to be the same as the `Inode` for this
     /// directory entry. However, it must be the same as the `attr.st_ino` field of the `Entry`
     /// that would be returned by a `lookup` request in the parent directory for `name`.
-    pub ino: libc::ino64_t,
+    pub ino: LibcIno,
 
     /// Any non-zero value that the kernel can use to identify the current point in the directory
     /// entry stream. It does not need to be the actual physical position. A value of `0` is
@@ -484,7 +507,7 @@ pub trait FileSystem {
         ctx: Context,
         inode: Self::Inode,
         handle: Option<Self::Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(LibcStat, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -509,10 +532,10 @@ pub trait FileSystem {
         &self,
         ctx: Context,
         inode: Self::Inode,
-        attr: libc::stat64,
+        attr: LibcStat,
         handle: Option<Self::Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(LibcStat, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -904,9 +927,9 @@ pub trait FileSystem {
     }
 
     /// Get information about the file system.
-    fn statfs(&self, ctx: Context, inode: Self::Inode) -> io::Result<libc::statvfs64> {
+    fn statfs(&self, ctx: Context, inode: Self::Inode) -> io::Result<LibcStatvfs> {
         // SAFETY: zero-initializing a struct with only POD fields.
-        let mut st: libc::statvfs64 = unsafe { mem::zeroed() };
+        let mut st: LibcStatvfs = unsafe { mem::zeroed() };
 
         // This matches the behavior of libfuse as it returns these values if the
         // filesystem doesn't implement this method.
