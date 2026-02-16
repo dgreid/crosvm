@@ -4,9 +4,8 @@
 
 //! FUSE (Filesystem in Userspace) server and filesystem mounting support.
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
-
 use std::ffi::FromBytesWithNulError;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use std::fs::File;
 use std::io;
 
@@ -15,13 +14,17 @@ use thiserror::Error as ThisError;
 
 pub mod filesystem;
 pub mod fuzzing;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod mount;
 mod server;
 #[allow(dead_code)]
 pub mod sys;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod worker;
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use filesystem::FileSystem;
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub use mount::mount;
 pub use server::Mapper;
 pub use server::Reader;
@@ -74,6 +77,7 @@ pub enum Error {
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 #[derive(Default)]
 pub struct FuseConfig {
     dev_fuse_file: Option<File>,
@@ -82,6 +86,7 @@ pub struct FuseConfig {
     num_of_threads: Option<usize>,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl FuseConfig {
     pub fn new() -> Self {
         FuseConfig {
