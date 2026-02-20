@@ -67,6 +67,10 @@ use vm_control::client::do_gpu_display_remove;
 use vm_control::client::do_gpu_set_display_mouse_mode;
 use vm_control::client::do_modify_battery;
 #[cfg(feature = "pci-hotplug")]
+use vm_control::client::do_block_add;
+#[cfg(feature = "pci-hotplug")]
+use vm_control::client::do_block_remove;
+#[cfg(feature = "pci-hotplug")]
 use vm_control::client::do_net_add;
 #[cfg(feature = "pci-hotplug")]
 use vm_control::client::do_net_remove;
@@ -337,6 +341,26 @@ fn modify_virtio_net(cmd: cmdline::VirtioNetCommand) -> std::result::Result<(), 
                 error!("Tap device remove failed: {:?}", &e);
             })?;
             info!("Tap device removed from PCI bus {}", &c.bus);
+        }
+    };
+
+    Ok(())
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn modify_virtio_block(cmd: cmdline::VirtioBlockCommand) -> std::result::Result<(), ()> {
+    match cmd.command {
+        cmdline::VirtioBlockSubCommand::Add(c) => {
+            let bus_num = do_block_add(&c.path, c.read_only, c.socket_path).map_err(|e| {
+                error!("{}", &e);
+            })?;
+            info!("Block device {} plugged to PCI bus {}", &c.path, bus_num);
+        }
+        cmdline::VirtioBlockSubCommand::Remove(c) => {
+            do_block_remove(c.bus, &c.socket_path).map_err(|e| {
+                error!("Block device remove failed: {:?}", &e);
+            })?;
+            info!("Block device removed from PCI bus {}", &c.bus);
         }
     };
 
@@ -886,6 +910,11 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                     #[cfg(feature = "pci-hotplug")]
                     CrossPlatformCommands::VirtioNet(cmd) => {
                         modify_virtio_net(cmd).map_err(|_| anyhow!("virtio subcommand failed"))
+                    }
+                    #[cfg(feature = "pci-hotplug")]
+                    CrossPlatformCommands::VirtioBlock(cmd) => {
+                        modify_virtio_block(cmd)
+                            .map_err(|_| anyhow!("virtio-block subcommand failed"))
                     }
                     CrossPlatformCommands::Snapshot(cmd) => {
                         snapshot_vm(cmd).map_err(|_| anyhow!("snapshot subcommand failed"))

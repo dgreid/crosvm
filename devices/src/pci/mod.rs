@@ -66,6 +66,8 @@ pub use self::pci_device::PreferredIrq;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci_hotplug::HotPluggable;
 #[cfg(feature = "pci-hotplug")]
+pub use self::pci_hotplug::BlockResourceCarrier;
+#[cfg(feature = "pci-hotplug")]
 pub use self::pci_hotplug::IntxParameter;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci_hotplug::NetResourceCarrier;

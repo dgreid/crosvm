@@ -248,6 +248,16 @@ pub enum NetControlCommand {
     RemoveTap(u8),
 }
 
+/// Block control commands for adding and removing block devices.
+#[cfg(feature = "pci-hotplug")]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum BlockControlCommand {
+    /// Add a block device by disk image path. read_only controls write permission.
+    AddBlock { path: String, read_only: bool },
+    /// Remove a hotplugged device on the given bus number.
+    RemoveBlock(u8),
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UsbControlCommand {
     AttachDevice {
@@ -1619,6 +1629,9 @@ pub enum VmRequest {
     /// Command to add/remove network tap device as virtio-pci device
     #[cfg(feature = "pci-hotplug")]
     HotPlugNetCommand(NetControlCommand),
+    /// Command to add/remove block device as virtio-pci device
+    #[cfg(feature = "pci-hotplug")]
+    HotPlugBlockCommand(BlockControlCommand),
     /// Command to Snapshot devices
     Snapshot(SnapshotCommand),
     /// Register for event notification
@@ -2344,6 +2357,10 @@ impl VmRequest {
             VmRequest::HotPlugVfioCommand { device: _, add: _ } => VmResponse::Ok,
             #[cfg(feature = "pci-hotplug")]
             VmRequest::HotPlugNetCommand(ref _net_cmd) => {
+                VmResponse::ErrString("hot plug not supported".to_owned())
+            }
+            #[cfg(feature = "pci-hotplug")]
+            VmRequest::HotPlugBlockCommand(ref _block_cmd) => {
                 VmResponse::ErrString("hot plug not supported".to_owned())
             }
             VmRequest::Snapshot(SnapshotCommand::Take {

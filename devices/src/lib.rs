@@ -101,6 +101,8 @@ pub use self::pci::HotPluggable;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci::IntxParameter;
 #[cfg(feature = "pci-hotplug")]
+pub use self::pci::BlockResourceCarrier;
+#[cfg(feature = "pci-hotplug")]
 pub use self::pci::NetResourceCarrier;
 pub use self::pci::PciAddress;
 pub use self::pci::PciAddressError;
