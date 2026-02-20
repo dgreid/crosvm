@@ -1435,4 +1435,202 @@ mod tests {
             Duration::from_millis(500)
         ));
     }
+
+    #[test]
+    fn worker_signal_hot_plug_on_occupied_port() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+        let upstream_addr = PciAddress {
+            bus: 0,
+            dev: 3,
+            func: 0,
+        };
+        let bus = 5;
+        let downstream_addr = PciAddress {
+            bus,
+            dev: 0,
+            func: 0,
+        };
+        let hotplug_key = HotPlugKey::GuestDevice {
+            guest_addr: downstream_addr,
+        };
+        let device = GuestDeviceStub {
+            pci_addr: downstream_addr,
+            key: hotplug_key,
+            device: Arc::new(Mutex::new(MockDevice::new())),
+        };
+        let hotplug_command = SignalHotPlugCommand::new(upstream_addr, [device].to_vec()).unwrap();
+        let port = new_port(bus);
+
+        // Add and ready the port.
+        assert_eq!(
+            WorkerResponse::AddPortOk,
+            client
+                .send_worker_command(WorkerCommand::AddPort(
+                    upstream_addr,
+                    PortWorkerStub::new(port.clone(), bus).unwrap()
+                ))
+                .unwrap()
+        );
+        port.lock().signal_ready();
+        assert!(poll_until_with_timeout(
+            || client
+                .send_worker_command(WorkerCommand::GetPortState(upstream_addr))
+                .unwrap()
+                == WorkerResponse::GetPortStateOk(PortState::Empty(0)),
+            Duration::from_millis(500)
+        ));
+
+        // Plug a device.
+        assert_eq!(
+            WorkerResponse::SignalOk,
+            client
+                .send_worker_command(WorkerCommand::SignalHotPlug(hotplug_command.clone()))
+                .unwrap()
+        );
+
+        // Try to plug again on the same (now occupied) port.
+        let device2 = GuestDeviceStub {
+            pci_addr: PciAddress {
+                bus,
+                dev: 0,
+                func: 1,
+            },
+            key: HotPlugKey::GuestDevice {
+                guest_addr: PciAddress {
+                    bus,
+                    dev: 0,
+                    func: 1,
+                },
+            },
+            device: Arc::new(Mutex::new(MockDevice::new())),
+        };
+        let hotplug_command2 =
+            SignalHotPlugCommand::new(upstream_addr, [device2].to_vec()).unwrap();
+        let response = client
+            .send_worker_command(WorkerCommand::SignalHotPlug(hotplug_command2))
+            .unwrap();
+        assert!(
+            matches!(response, WorkerResponse::InvalidCommand(_)),
+            "Expected InvalidCommand for plug on occupied port, got {:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn worker_signal_hot_unplug_on_empty_port() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+        let upstream_addr = PciAddress {
+            bus: 0,
+            dev: 3,
+            func: 1,
+        };
+        let bus = 6;
+        let port = new_port(bus);
+
+        // Add and ready the port.
+        assert_eq!(
+            WorkerResponse::AddPortOk,
+            client
+                .send_worker_command(WorkerCommand::AddPort(
+                    upstream_addr,
+                    PortWorkerStub::new(port.clone(), bus).unwrap()
+                ))
+                .unwrap()
+        );
+        port.lock().signal_ready();
+        assert!(poll_until_with_timeout(
+            || client
+                .send_worker_command(WorkerCommand::GetPortState(upstream_addr))
+                .unwrap()
+                == WorkerResponse::GetPortStateOk(PortState::Empty(0)),
+            Duration::from_millis(500)
+        ));
+
+        // Try to unplug from an empty port.
+        let response = client
+            .send_worker_command(WorkerCommand::SignalHotUnplug(upstream_addr))
+            .unwrap();
+        assert!(
+            matches!(response, WorkerResponse::InvalidCommand(_)),
+            "Expected InvalidCommand for unplug from empty port, got {:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn worker_add_port_with_conflicting_address() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+        let upstream_addr = PciAddress {
+            bus: 0,
+            dev: 4,
+            func: 0,
+        };
+        let bus = 7;
+        let port1 = new_port(bus);
+        let port2 = new_port(bus + 1);
+
+        // Add first port.
+        assert_eq!(
+            WorkerResponse::AddPortOk,
+            client
+                .send_worker_command(WorkerCommand::AddPort(
+                    upstream_addr,
+                    PortWorkerStub::new(port1, bus).unwrap()
+                ))
+                .unwrap()
+        );
+
+        // Add second port at the same upstream address.
+        let response = client
+            .send_worker_command(WorkerCommand::AddPort(
+                upstream_addr,
+                PortWorkerStub::new(port2, bus + 1).unwrap(),
+            ))
+            .unwrap();
+        assert!(
+            matches!(response, WorkerResponse::InvalidCommand(_)),
+            "Expected InvalidCommand for conflicting address, got {:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn worker_get_port_state_unknown_address() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+        let unknown_addr = PciAddress {
+            bus: 0,
+            dev: 5,
+            func: 0,
+        };
+
+        // Query state of a port that was never added.
+        let response = client
+            .send_worker_command(WorkerCommand::GetPortState(unknown_addr))
+            .unwrap();
+        assert!(
+            matches!(response, WorkerResponse::InvalidCommand(_)),
+            "Expected InvalidCommand for unknown port, got {:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn worker_get_empty_port_no_ports() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+
+        // Query empty port when no ports have been added.
+        let response = client
+            .send_worker_command(WorkerCommand::GetEmptyPort)
+            .unwrap();
+        assert!(
+            matches!(response, WorkerResponse::InvalidCommand(_)),
+            "Expected InvalidCommand when no ports exist, got {:?}",
+            response
+        );
+    }
 }
