@@ -395,6 +395,46 @@ impl PciePort {
     }
 }
 
+#[cfg(test)]
+impl PciePort {
+    /// Test helper: simulate guest enabling the hotplug slot by writing the required
+    /// SLTCTL bits directly to the PcieConfig.
+    pub fn enable_slot_for_test(&mut self) {
+        let mut config = self.pcie_config.lock();
+        let enable_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        config.write_pcie_cap(PCIE_SLTCTL_OFFSET, &enable_value.to_le_bytes());
+    }
+
+    /// Test helper: set the power indicator to ON via SLTCTL.
+    pub fn set_pic_on_for_test(&mut self) {
+        let mut config = self.pcie_config.lock();
+        let value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        config.write_pcie_cap(PCIE_SLTCTL_OFFSET, &value.to_le_bytes());
+    }
+
+    /// Test helper: set the power indicator to BLINK via SLTCTL.
+    pub fn set_pic_blink_for_test(&mut self) {
+        let mut config = self.pcie_config.lock();
+        let value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_BLINK
+            | PCIE_SLTCTL_AIC_OFF;
+        config.write_pcie_cap(PCIE_SLTCTL_OFFSET, &value.to_le_bytes());
+    }
+}
+
 struct HotPlugCompleteSender {
     sender: Event,
     armed: bool,
@@ -736,6 +776,24 @@ impl PciCapConfig for PcieConfig {
 
 /// Helper trait for implementing PcieDevice where most functions
 /// are proxied directly to a PciePort instance.
+#[cfg(test)]
+impl PcieConfig {
+    /// Test helper: get current slot_status.
+    fn get_slot_status(&self) -> u16 {
+        self.slot_status
+    }
+
+    /// Test helper: check if hpc_sender is present.
+    fn has_hpc_sender(&self) -> bool {
+        self.hpc_sender.is_some()
+    }
+
+    /// Test helper: check if hpc_sender is armed.
+    fn is_hpc_armed(&self) -> bool {
+        self.hpc_sender.as_ref().is_some_and(|s| s.armed())
+    }
+}
+
 pub trait PciePortVariant: Send {
     fn get_pcie_port(&self) -> &PciePort;
     fn get_pcie_port_mut(&mut self) -> &mut PciePort;
@@ -808,5 +866,548 @@ impl<T: PciePortVariant> PcieDevice for T {
 
     fn get_bridge_window_size(&self) -> (u64, u64) {
         self.get_pcie_port().get_bridge_window_size()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Creates a PcieConfig for testing with slot_implemented=true and RootPort type.
+    fn new_test_config() -> PcieConfig {
+        let root_cap = Arc::new(Mutex::new(PcieRootCap::new(1, 1)));
+        PcieConfig::new(root_cap, true, PcieDevicePortType::RootPort)
+    }
+
+    /// Creates a PcieConfig for testing with slot_implemented=false.
+    fn new_test_config_no_slot() -> PcieConfig {
+        let root_cap = Arc::new(Mutex::new(PcieRootCap::new(1, 1)));
+        PcieConfig::new(root_cap, false, PcieDevicePortType::RootPort)
+    }
+
+    /// Helper: write a u16 value to SLTCTL offset.
+    fn write_sltctl(config: &mut PcieConfig, value: u16) {
+        config.write_pcie_cap(PCIE_SLTCTL_OFFSET, &value.to_le_bytes());
+    }
+
+    /// Helper: write a u16 value to SLTSTA offset.
+    fn write_sltsta(config: &mut PcieConfig, value: u16) {
+        config.write_pcie_cap(PCIE_SLTSTA_OFFSET, &value.to_le_bytes());
+    }
+
+    #[test]
+    fn sltctl_enable_drains_ready_notifications() {
+        let mut config = new_test_config();
+        // Get a ready notification event before enabling.
+        let notf_event = config.get_ready_notification().unwrap();
+        assert!(!config.is_hotplug_ready());
+
+        // Write SLTCTL with PDCE + ABPE + CCIE + HPIE to enable the slot.
+        let enable_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, enable_value);
+
+        // Notification should be signaled (readable without blocking).
+        assert!(config.enabled);
+        // The event should have been signaled.
+        notf_event
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+
+        // Verify is_hotplug_ready returns true.
+        assert!(config.is_hotplug_ready());
+    }
+
+    #[test]
+    fn sltctl_enable_already_ready_signals_immediately() {
+        let mut config = new_test_config();
+
+        // Enable the slot first.
+        let enable_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, enable_value);
+
+        // Now get a ready notification - should be signaled immediately since already enabled.
+        let notf_event = config.get_ready_notification().unwrap();
+        notf_event
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn power_indicator_off_to_blink_to_on_plug_success() {
+        let mut config = new_test_config();
+
+        // Enable the slot.
+        let enable_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, enable_value);
+
+        // Simulate PDS being set (device present).
+        config.set_slot_status(PCIE_SLTSTA_PDS);
+
+        // Transition PIC OFF -> BLINK (guest starts plug sequence).
+        let blink_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_BLINK
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, blink_value);
+
+        // CC bit should be set since slot control changed.
+        assert!(config.get_slot_status() & PCIE_SLTSTA_CC != 0);
+
+        // Set up HPC sender before the BLINK->ON transition.
+        let hpc_event = Event::new().unwrap();
+        let hpc_recvr = hpc_event.try_clone().unwrap();
+        config.hpc_sender = Some(HotPlugCompleteSender::new(hpc_event));
+
+        // Transition PIC BLINK -> ON (plug success).
+        let on_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, on_value);
+
+        // The hpc_sender should now be armed.
+        assert!(config.is_hpc_armed());
+
+        // Next SLTSTA write should signal the hpc_sender.
+        write_sltsta(&mut config, PCIE_SLTSTA_CC);
+
+        // Sender should be consumed.
+        assert!(!config.has_hpc_sender());
+        // Receiver should be signaled.
+        hpc_recvr
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn power_indicator_off_to_blink_to_off_plug_fail() {
+        let mut config = new_test_config();
+
+        // Enable the slot.
+        let enable_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, enable_value);
+
+        // Simulate PDS being set.
+        config.set_slot_status(PCIE_SLTSTA_PDS);
+
+        // Transition PIC OFF -> BLINK.
+        let blink_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_BLINK
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, blink_value);
+
+        // Set up HPC sender.
+        let hpc_event = Event::new().unwrap();
+        let hpc_recvr = hpc_event.try_clone().unwrap();
+        config.hpc_sender = Some(HotPlugCompleteSender::new(hpc_event));
+
+        // Transition PIC BLINK -> OFF (plug failure).
+        let off_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, off_value);
+
+        // HPC sender should be armed (BLINK -> OFF triggers arming).
+        assert!(config.is_hpc_armed());
+
+        // When PIC goes to OFF and PDS was set, removed_downstream_valid should be set
+        // and PDS should be cleared.
+        assert!(config.removed_downstream_valid);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_PDS, 0);
+
+        // Next SLTSTA write should signal the hpc_sender.
+        write_sltsta(&mut config, PCIE_SLTSTA_CC);
+        assert!(!config.has_hpc_sender());
+        hpc_recvr
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn power_indicator_on_to_blink_to_off_unplug() {
+        let mut config = new_test_config();
+
+        // Enable the slot with PIC_ON.
+        let on_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, on_value);
+
+        // Simulate PDS being set.
+        config.set_slot_status(PCIE_SLTSTA_PDS);
+        config.enabled = true;
+
+        // Transition PIC ON -> BLINK.
+        let blink_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_BLINK
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, blink_value);
+
+        // Set up HPC sender.
+        let hpc_event = Event::new().unwrap();
+        let hpc_recvr = hpc_event.try_clone().unwrap();
+        config.hpc_sender = Some(HotPlugCompleteSender::new(hpc_event));
+
+        // Transition PIC BLINK -> OFF (unplug).
+        let off_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, off_value);
+
+        // HPC sender should be armed.
+        assert!(config.is_hpc_armed());
+
+        // PDS was set and PIC went to OFF, so removed_downstream_valid should be set.
+        assert!(config.removed_downstream_valid);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_PDS, 0);
+
+        // Signal completion via SLTSTA write.
+        write_sltsta(&mut config, PCIE_SLTSTA_CC);
+        assert!(!config.has_hpc_sender());
+        hpc_recvr
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn removed_downstream_valid_set_when_pds_cleared_by_pic_off() {
+        let mut config = new_test_config();
+
+        // Enable with PIC_ON.
+        let on_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, on_value);
+        config.enabled = true;
+
+        // Set PDS.
+        config.set_slot_status(PCIE_SLTSTA_PDS);
+        assert!(!config.removed_downstream_valid);
+
+        // Transition PIC ON -> OFF.
+        let off_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, off_value);
+
+        // removed_downstream_valid should be set.
+        assert!(config.removed_downstream_valid);
+        // PDS should be cleared.
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_PDS, 0);
+    }
+
+    #[test]
+    fn removed_downstream_valid_not_set_when_pds_not_set() {
+        let mut config = new_test_config();
+
+        // Enable with PIC_ON.
+        let on_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, on_value);
+        config.enabled = true;
+
+        // Don't set PDS. Transition PIC ON -> OFF.
+        let off_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, off_value);
+
+        // removed_downstream_valid should NOT be set since PDS was not set.
+        assert!(!config.removed_downstream_valid);
+    }
+
+    #[test]
+    fn sltsta_w1c_behavior() {
+        let mut config = new_test_config();
+
+        // Set various slot status bits.
+        config.set_slot_status(
+            PCIE_SLTSTA_ABP
+                | PCIE_SLTSTA_PFD
+                | PCIE_SLTSTA_PDC
+                | PCIE_SLTSTA_CC
+                | PCIE_SLTSTA_DLLSC,
+        );
+        assert_ne!(config.get_slot_status(), 0);
+
+        // Write 1 to ABP to clear it.
+        write_sltsta(&mut config, PCIE_SLTSTA_ABP);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_ABP, 0);
+        // Others should still be set.
+        assert_ne!(config.get_slot_status() & PCIE_SLTSTA_PFD, 0);
+        assert_ne!(config.get_slot_status() & PCIE_SLTSTA_PDC, 0);
+        assert_ne!(config.get_slot_status() & PCIE_SLTSTA_CC, 0);
+        assert_ne!(config.get_slot_status() & PCIE_SLTSTA_DLLSC, 0);
+
+        // Write 1 to PFD to clear it.
+        write_sltsta(&mut config, PCIE_SLTSTA_PFD);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_PFD, 0);
+
+        // Write 1 to PDC to clear it.
+        write_sltsta(&mut config, PCIE_SLTSTA_PDC);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_PDC, 0);
+
+        // Write 1 to CC to clear it.
+        write_sltsta(&mut config, PCIE_SLTSTA_CC);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_CC, 0);
+
+        // Write 1 to DLLSC to clear it.
+        write_sltsta(&mut config, PCIE_SLTSTA_DLLSC);
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_DLLSC, 0);
+
+        // All should be clear now.
+        assert_eq!(config.get_slot_status(), 0);
+    }
+
+    #[test]
+    fn sltsta_w1c_clears_multiple_bits_at_once() {
+        let mut config = new_test_config();
+
+        // Set all W1C bits.
+        config.set_slot_status(
+            PCIE_SLTSTA_ABP
+                | PCIE_SLTSTA_PFD
+                | PCIE_SLTSTA_PDC
+                | PCIE_SLTSTA_CC
+                | PCIE_SLTSTA_DLLSC,
+        );
+
+        // Clear all at once.
+        write_sltsta(
+            &mut config,
+            PCIE_SLTSTA_ABP
+                | PCIE_SLTSTA_PFD
+                | PCIE_SLTSTA_PDC
+                | PCIE_SLTSTA_CC
+                | PCIE_SLTSTA_DLLSC,
+        );
+        // PDS should remain since it's not W1C via direct SLTSTA write in this path.
+        assert_eq!(
+            config.get_slot_status()
+                & (PCIE_SLTSTA_ABP
+                    | PCIE_SLTSTA_PFD
+                    | PCIE_SLTSTA_PDC
+                    | PCIE_SLTSTA_CC
+                    | PCIE_SLTSTA_DLLSC),
+            0
+        );
+    }
+
+    #[test]
+    fn deferred_hp_interrupt_fires_when_hpie_enabled() {
+        let mut config = new_test_config();
+
+        // Start with HPIE disabled but set hp_interrupt_pending.
+        config.hp_interrupt_pending = true;
+
+        // Write SLTCTL with all enables including HPIE.
+        let enable_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, enable_value);
+
+        // hp_interrupt_pending should be cleared (consumed).
+        assert!(!config.hp_interrupt_pending);
+    }
+
+    #[test]
+    fn no_slot_impl_sltctl_write_is_noop() {
+        let mut config = new_test_config_no_slot();
+
+        // Writing SLTCTL on a port without slot should be a no-op.
+        let value = PCIE_SLTCTL_PDCE | PCIE_SLTCTL_ABPE | PCIE_SLTCTL_CCIE | PCIE_SLTCTL_HPIE;
+        write_sltctl(&mut config, value);
+
+        // Slot control should remain None (get_slot_control returns 0).
+        assert_eq!(config.get_slot_control(), 0);
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn no_slot_impl_sltsta_write_is_noop() {
+        let mut config = new_test_config_no_slot();
+
+        // Writing SLTSTA on a port without slot should be a no-op.
+        write_sltsta(&mut config, PCIE_SLTSTA_ABP);
+        // Nothing should crash, slot_status should remain 0.
+        assert_eq!(config.get_slot_status(), 0);
+    }
+
+    #[test]
+    fn hpc_sender_not_armed_if_pic_not_transitioning_from_blink() {
+        let mut config = new_test_config();
+
+        // Enable with PIC_OFF.
+        let off_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, off_value);
+        config.enabled = true;
+
+        // Set up HPC sender.
+        let hpc_event = Event::new().unwrap();
+        config.hpc_sender = Some(HotPlugCompleteSender::new(hpc_event));
+
+        // Transition PIC OFF -> ON (not from BLINK).
+        let on_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, on_value);
+
+        // HPC sender should NOT be armed (transition was not from BLINK).
+        assert!(!config.is_hpc_armed());
+    }
+
+    #[test]
+    fn sltsta_write_does_not_signal_unarmed_hpc_sender() {
+        let mut config = new_test_config();
+
+        // Set up an unarmed HPC sender.
+        let hpc_event = Event::new().unwrap();
+        config.hpc_sender = Some(HotPlugCompleteSender::new(hpc_event));
+
+        // Write to SLTSTA.
+        write_sltsta(&mut config, PCIE_SLTSTA_CC);
+
+        // HPC sender should still be present (not consumed) since it wasn't armed.
+        assert!(config.has_hpc_sender());
+    }
+
+    #[test]
+    fn read_sltctl_returns_correct_values() {
+        let mut config = new_test_config();
+
+        // Set specific slot control and status.
+        let ctl_value = PCIE_SLTCTL_PDCE | PCIE_SLTCTL_HPIE | PCIE_SLTCTL_PIC_ON;
+        write_sltctl(&mut config, ctl_value);
+
+        config.set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP);
+
+        let mut data = 0u32;
+        config.read_pcie_cap(PCIE_SLTCTL_OFFSET, &mut data);
+
+        // Lower 16 bits should be slot control, upper 16 bits should be slot status.
+        let read_ctl = (data & 0xFFFF) as u16;
+        let read_sta = ((data >> 16) & 0xFFFF) as u16;
+        assert_eq!(read_ctl, ctl_value);
+        assert_eq!(
+            read_sta & (PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP),
+            PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP
+        );
+    }
+
+    #[test]
+    fn removed_downstream_valid_cleared_on_any_write() {
+        let mut config = new_test_config();
+
+        // Enable with PIC_ON and PDS set.
+        let on_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_ON
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, on_value);
+        config.enabled = true;
+        config.set_slot_status(PCIE_SLTSTA_PDS);
+
+        // Transition PIC ON -> OFF to set removed_downstream_valid.
+        let off_value = PCIE_SLTCTL_PDCE
+            | PCIE_SLTCTL_ABPE
+            | PCIE_SLTCTL_CCIE
+            | PCIE_SLTCTL_HPIE
+            | PCIE_SLTCTL_PIC_OFF
+            | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, off_value);
+        assert!(config.removed_downstream_valid);
+
+        // Any subsequent write to pcie_cap should clear removed_downstream_valid.
+        write_sltctl(&mut config, off_value);
+        assert!(!config.removed_downstream_valid);
+    }
+
+    #[test]
+    fn cc_bit_set_on_slot_control_change() {
+        let mut config = new_test_config();
+
+        // Initial slot control is PIC_OFF | AIC_OFF.
+        // Write a different value.
+        let new_value = PCIE_SLTCTL_PDCE | PCIE_SLTCTL_PIC_OFF | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, new_value);
+
+        // CC bit should be set.
+        assert_ne!(config.get_slot_status() & PCIE_SLTSTA_CC, 0);
+    }
+
+    #[test]
+    fn cc_bit_not_set_on_same_slot_control_write() {
+        let mut config = new_test_config();
+
+        // The default slot_control is PIC_OFF | AIC_OFF.
+        let default_value = PCIE_SLTCTL_PIC_OFF | PCIE_SLTCTL_AIC_OFF;
+        write_sltctl(&mut config, default_value);
+
+        // CC bit should NOT be set since value didn't change.
+        assert_eq!(config.get_slot_status() & PCIE_SLTSTA_CC, 0);
     }
 }
