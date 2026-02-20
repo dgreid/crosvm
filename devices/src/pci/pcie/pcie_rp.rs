@@ -102,8 +102,9 @@ impl HotPlugBus for PcieRootPort {
         let hpc_sender = Event::new()?;
         let hpc_recvr = hpc_sender.try_clone()?;
         self.pcie_port.set_hpc_sender(hpc_sender);
+        self.pcie_port.set_dllla(true);
         self.pcie_port
-            .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP);
+            .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP | PCIE_SLTSTA_DLLSC);
         self.pcie_port.trigger_hp_or_pme_interrupt();
         Ok(Some(hpc_recvr))
     }
@@ -132,17 +133,20 @@ impl HotPlugBus for PcieRootPort {
 
         let hpc_sender = Event::new()?;
         let hpc_recvr = hpc_sender.try_clone()?;
+        self.pcie_port.set_dllla(false);
         let slot_control = self.pcie_port.get_slot_control();
         match slot_control & PCIE_SLTCTL_PIC {
             PCIE_SLTCTL_PIC_ON => {
                 self.pcie_port.set_hpc_sender(hpc_sender);
-                self.pcie_port.set_slot_status(PCIE_SLTSTA_ABP);
+                self.pcie_port
+                    .set_slot_status(PCIE_SLTSTA_ABP | PCIE_SLTSTA_DLLSC);
                 self.pcie_port.trigger_hp_or_pme_interrupt();
             }
             PCIE_SLTCTL_PIC_OFF => {
                 // Do not press attention button, as the slot is already off. Likely caused by
                 // previous hot plug failed.
                 self.pcie_port.mask_slot_status(!PCIE_SLTSTA_PDS);
+                self.pcie_port.set_slot_status(PCIE_SLTSTA_DLLSC);
                 hpc_sender.signal()?;
             }
             _ => {

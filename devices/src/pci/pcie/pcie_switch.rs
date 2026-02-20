@@ -157,14 +157,19 @@ pub struct PcieDownstreamPort {
 
 impl PcieDownstreamPort {
     /// Constructs a new PCIE downstream port
-    pub fn new(primary_bus_num: u8, secondary_bus_num: u8, hotplugged: bool) -> Self {
+    pub fn new(
+        primary_bus_num: u8,
+        secondary_bus_num: u8,
+        hotplugged: bool,
+        slot_implemented: bool,
+    ) -> Self {
         PcieDownstreamPort {
             pcie_port: PciePort::new(
                 PCIE_DP_DID,
                 "PcieDownstreamPort".to_string(),
                 primary_bus_num,
                 secondary_bus_num,
-                false,
+                slot_implemented,
                 PcieDevicePortType::DownstreamPort,
             ),
             hotplugged,
@@ -208,7 +213,7 @@ impl PciePortVariant for PcieDownstreamPort {
     }
 
     fn hotplug_implemented_impl(&self) -> bool {
-        false
+        self.pcie_port.hotplug_implemented()
     }
 
     fn hotplugged_impl(&self) -> bool {
@@ -221,21 +226,32 @@ impl HotPlugBus for PcieDownstreamPort {
         if !self.pcie_port.hotplug_implemented() {
             bail!("hotplug not implemented.");
         }
+        if self.pcie_port.is_hpc_pending() {
+            bail!("Hot plug fail: previous slot event is pending.");
+        }
+        if !self.pcie_port.is_hotplug_ready() {
+            bail!("Hot plug fail: slot is not enabled by the guest yet.");
+        }
         if !self.downstream_devices.contains_key(&addr) {
             bail!("no downstream devices.");
         }
-        if !self.pcie_port.is_hotplug_ready() {
-            bail!("Hot unplug fail: slot is not enabled by the guest yet.");
-        }
+
+        let hpc_sender = Event::new()?;
+        let hpc_recvr = hpc_sender.try_clone()?;
+        self.pcie_port.set_hpc_sender(hpc_sender);
+        self.pcie_port.set_dllla(true);
         self.pcie_port
-            .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP);
+            .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP | PCIE_SLTSTA_DLLSC);
         self.pcie_port.trigger_hp_or_pme_interrupt();
-        Ok(None)
+        Ok(Some(hpc_recvr))
     }
 
     fn hot_unplug(&mut self, addr: PciAddress) -> anyhow::Result<Option<Event>> {
         if !self.pcie_port.hotplug_implemented() {
             bail!("hotplug not implemented.");
+        }
+        if self.pcie_port.is_hpc_pending() {
+            bail!("Hot unplug fail: previous slot event is pending.");
         }
         if self.downstream_devices.remove(&addr).is_none() {
             bail!("no downstream devices.");
@@ -243,40 +259,46 @@ impl HotPlugBus for PcieDownstreamPort {
         if !self.pcie_port.is_hotplug_ready() {
             bail!("Hot unplug fail: slot is not enabled by the guest yet.");
         }
+        if self.hotplug_out_begin {
+            bail!("Hot unplug is pending.")
+        }
+        self.hotplug_out_begin = true;
 
-        if !self.hotplug_out_begin {
-            self.removed_downstream.clear();
-            self.removed_downstream.push(addr);
-            // All the remaine devices will be removed also in this hotplug out interrupt
-            for (guest_pci_addr, _) in self.downstream_devices.iter() {
-                self.removed_downstream.push(*guest_pci_addr);
-            }
-            self.pcie_port.set_slot_status(PCIE_SLTSTA_ABP);
-            self.pcie_port.trigger_hp_or_pme_interrupt();
-            let slot_control = self.pcie_port.get_slot_control();
-            match slot_control & PCIE_SLTCTL_PIC {
-                PCIE_SLTCTL_PIC_ON => {
-                    self.pcie_port.set_slot_status(PCIE_SLTSTA_ABP);
-                    self.pcie_port.trigger_hp_or_pme_interrupt();
-                }
-                PCIE_SLTCTL_PIC_OFF => {
-                    // Do not press attention button, as the slot is already off. Likely caused by
-                    // previous hot plug failed.
-                    self.pcie_port.mask_slot_status(!PCIE_SLTSTA_PDS);
-                }
-                _ => {
-                    // Power indicator in blinking state.
-                    bail!("Hot unplug fail: Power indicator is blinking.");
-                }
-            }
+        self.removed_downstream.clear();
+        self.removed_downstream.push(addr);
+        // All the remaining devices will be removed also in this hotplug out interrupt
+        for (guest_pci_addr, _) in self.downstream_devices.iter() {
+            self.removed_downstream.push(*guest_pci_addr);
+        }
 
-            if self.pcie_port.is_host() {
-                self.pcie_port.hot_unplug()
+        let hpc_sender = Event::new()?;
+        let hpc_recvr = hpc_sender.try_clone()?;
+        self.pcie_port.set_dllla(false);
+        let slot_control = self.pcie_port.get_slot_control();
+        match slot_control & PCIE_SLTCTL_PIC {
+            PCIE_SLTCTL_PIC_ON => {
+                self.pcie_port.set_hpc_sender(hpc_sender);
+                self.pcie_port
+                    .set_slot_status(PCIE_SLTSTA_ABP | PCIE_SLTSTA_DLLSC);
+                self.pcie_port.trigger_hp_or_pme_interrupt();
+            }
+            PCIE_SLTCTL_PIC_OFF => {
+                // Do not press attention button, as the slot is already off. Likely caused by
+                // previous hot plug failed.
+                self.pcie_port.mask_slot_status(!PCIE_SLTSTA_PDS);
+                self.pcie_port.set_slot_status(PCIE_SLTSTA_DLLSC);
+                hpc_sender.signal()?;
+            }
+            _ => {
+                // Power indicator in blinking state.
+                bail!("Hot unplug fail: Power indicator is blinking.");
             }
         }
 
-        self.hotplug_out_begin = true;
-        Ok(None)
+        if self.pcie_port.is_host() {
+            self.pcie_port.hot_unplug()
+        }
+        Ok(Some(hpc_recvr))
     }
 
     fn get_ready_notification(&mut self) -> anyhow::Result<Event> {
@@ -296,6 +318,10 @@ impl HotPlugBus for PcieDownstreamPort {
     }
 
     fn add_hotplug_device(&mut self, hotplug_key: HotPlugKey, guest_addr: PciAddress) {
+        if !self.pcie_port.hotplug_implemented() {
+            return;
+        }
+
         if self.hotplug_out_begin {
             self.hotplug_out_begin = false;
             self.downstream_devices.clear();
