@@ -851,11 +851,6 @@ impl PciHotPlugManager {
         let pci_address = port_lock
             .get_address()
             .context("Hotplug bus PCI address missing")?;
-        // Reject hotplug buses not on rootbus, since otherwise the order of enumeration depends on
-        // the topology of PCI.
-        if pci_address.bus != 0 {
-            bail!("hotplug port on non-root bus not supported");
-        }
         let downstream_bus = port_lock
             .get_secondary_bus_number()
             .context("cannot get downstream bus")?;

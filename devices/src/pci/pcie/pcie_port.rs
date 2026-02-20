@@ -386,6 +386,10 @@ impl PciePort {
         self.pcie_config.lock().set_slot_status(flag);
     }
 
+    pub fn set_dllla(&mut self, active: bool) {
+        self.pcie_config.lock().set_dllla(active);
+    }
+
     pub fn should_trigger_pme(&mut self) -> bool {
         self.pm_config.lock().should_trigger_pme()
     }
@@ -479,6 +483,9 @@ pub struct PcieConfig {
     enabled: bool,
     hot_plug_ready_notifications: Vec<Event>,
     cap_mapping: Option<PciCapMapping>,
+
+    // Data Link Layer Link Active — tracks whether a device is present behind this port.
+    dllla: bool,
 }
 
 impl PcieConfig {
@@ -507,11 +514,18 @@ impl PcieConfig {
             enabled: false,
             hot_plug_ready_notifications: Vec::new(),
             cap_mapping: None,
+
+            dllla: false,
         }
     }
 
     fn read_pcie_cap(&self, offset: usize, data: &mut u32) {
-        if offset == PCIE_SLTCTL_OFFSET {
+        if offset == PCIE_LNKCTL_OFFSET {
+            // Dynamically set DLLLA in link status based on device presence.
+            if self.dllla {
+                *data |= (PCIE_LNKSTA_DLLLA as u32) << 16;
+            }
+        } else if offset == PCIE_SLTCTL_OFFSET {
             *data = ((self.slot_status as u32) << 16) | (self.get_slot_control() as u32);
         } else if offset == PCIE_ROOTCTL_OFFSET {
             *data = match self.port_type {
@@ -738,10 +752,15 @@ impl PcieConfig {
             );
         }
     }
+
+    fn set_dllla(&mut self, active: bool) {
+        self.dllla = active;
+    }
 }
 
 const PCIE_CONFIG_READ_MASK: [u32; PCIE_CAP_LEN / 4] = {
     let mut arr: [u32; PCIE_CAP_LEN / 4] = [0; PCIE_CAP_LEN / 4];
+    arr[PCIE_LNKCTL_OFFSET / 4] = 0xffff0000; // Mask for link status (upper 16 bits)
     arr[PCIE_SLTCTL_OFFSET / 4] = 0xffffffff;
     arr[PCIE_ROOTCTL_OFFSET / 4] = 0xffffffff;
     arr[PCIE_ROOTSTA_OFFSET / 4] = 0xffffffff;
@@ -868,6 +887,7 @@ impl<T: PciePortVariant> PcieDevice for T {
         self.get_pcie_port().get_bridge_window_size()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

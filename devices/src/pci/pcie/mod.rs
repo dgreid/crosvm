@@ -40,11 +40,16 @@ const PCIE_DEVCAP_RBER: u32 = 0x0000_8000;
 const PCIE_LINK_X1: u16 = 0x10;
 const PCIE_LINK_2_5GT: u16 = 0x01;
 
+const PCIE_LNKCAP_DLLLARC: u32 = 0x0010_0000; // Data Link Layer Link Active Reporting Capable
+const PCIE_LNKSTA_DLLLA: u16 = 0x2000; // Data Link Layer Link Active
+const PCIE_LNKCTL_OFFSET: usize = 0x10; // Link Control+Status dword offset in PCIe cap
+
 const PCIE_SLTCAP_ABP: u32 = 0x01; // Attention Button Present
 const PCIE_SLTCAP_AIP: u32 = 0x08; // Attention Indicator Present
 const PCIE_SLTCAP_PIP: u32 = 0x10; // Power Indicator Present
 const PCIE_SLTCAP_HPS: u32 = 0x20; // Hot-Plug Surprise
 const PCIE_SLTCAP_HPC: u32 = 0x40; // Hot-Plug Capable
+const PCIE_SLTCAP_PCP: u32 = 0x02; // Power Controller Present
 
 const PCIE_SLTCTL_OFFSET: usize = 0x18;
 const PCIE_SLTCTL_PIC: u16 = 0x300; // Power indicator
@@ -56,6 +61,8 @@ const PCIE_SLTCTL_ABPE: u16 = 0x01;
 const PCIE_SLTCTL_PDCE: u16 = 0x08;
 const PCIE_SLTCTL_CCIE: u16 = 0x10;
 const PCIE_SLTCTL_HPIE: u16 = 0x20;
+#[allow(dead_code)]
+const PCIE_SLTCTL_PCC: u16 = 0x0400; // Power Controller Control (0=on, 1=off)
 
 const PCIE_SLTSTA_OFFSET: usize = 0x1A;
 const PCIE_SLTSTA_ABP: u16 = 0x0001;
