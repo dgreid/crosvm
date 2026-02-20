@@ -705,6 +705,8 @@ pub struct Config {
     pub pci_config: PciConfig,
     #[cfg(feature = "pci-hotplug")]
     pub pci_hotplug_slots: Option<u8>,
+    #[cfg(feature = "pci-hotplug")]
+    pub pcie_switch_hotplug_ports: Option<u8>,
     pub per_vm_core_scheduling: bool,
     pub pflash_parameters: Option<PflashParameters>,
     #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -949,6 +951,8 @@ impl Default for Config {
             pci_config: Default::default(),
             #[cfg(feature = "pci-hotplug")]
             pci_hotplug_slots: None,
+            #[cfg(feature = "pci-hotplug")]
+            pcie_switch_hotplug_ports: None,
             per_vm_core_scheduling: false,
             pflash_parameters: None,
             #[cfg(any(target_os = "android", target_os = "linux"))]

@@ -1284,6 +1284,81 @@ fn create_pure_virtual_pcie_root_port(
     Ok(hp_stub)
 }
 
+/// Creates PCIe switch topologies with hotplug-capable downstream ports.
+///
+/// Each switch consists of an upstream port and a downstream port with a hotplug slot.
+/// The downstream ports are registered as hotplug buses in the returned `HotPlugStub`.
+#[cfg(all(target_arch = "x86_64", feature = "pci-hotplug"))]
+fn create_pcie_switch_hotplug_ports(
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    devices: &mut Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
+    hp_stub: &mut HotPlugStub,
+    port_count: u8,
+) -> Result<()> {
+    let mut available_buses = Vec::new();
+    for i in 1..255u8 {
+        if sys_allocator.pci_bus_empty(i) && !hp_stub.hotplug_buses.contains_key(&i) {
+            available_buses.push(i);
+            if available_buses.len() >= (port_count as usize) * 2 {
+                break;
+            }
+        }
+    }
+    if available_buses.len() < (port_count as usize) * 2 {
+        return Err(anyhow!(
+            "not enough PCI buses for PCIe switch hotplug ports"
+        ));
+    }
+
+    for chunk in available_buses.chunks(2) {
+        let upstream_bus = chunk[0];
+        let downstream_bus = chunk[1];
+
+        // Create upstream port on bus 0, secondary = upstream_bus
+        let upstream_port = Arc::new(Mutex::new(PcieUpstreamPort::new(0, upstream_bus, false)));
+        let (up_msi_host_tube, up_msi_device_tube) =
+            Tube::pair().context("failed to create tube for upstream port")?;
+        add_control_tube(AnyControlTube::IrqTube(up_msi_host_tube));
+        let up_bridge = Box::new(PciBridge::new(upstream_port.clone(), up_msi_device_tube));
+        devices.push((up_bridge, None));
+
+        // Create downstream port on upstream_bus, secondary = downstream_bus, with hotplug slot
+        let downstream_port = Arc::new(Mutex::new(PcieDownstreamPort::new(
+            upstream_bus,
+            downstream_bus,
+            false,
+            true, // slot_implemented
+        )));
+        let (dp_msi_host_tube, dp_msi_device_tube) =
+            Tube::pair().context("failed to create tube for downstream port")?;
+        add_control_tube(AnyControlTube::IrqTube(dp_msi_host_tube));
+        let dp_bridge = Box::new(PciBridge::new(downstream_port.clone(), dp_msi_device_tube));
+
+        hp_stub.iommu_bus_ranges.push(RangeInclusive::new(
+            PciAddress {
+                bus: dp_bridge.get_secondary_num(),
+                dev: 0,
+                func: 0,
+            }
+            .to_u32(),
+            PciAddress {
+                bus: dp_bridge.get_subordinate_num(),
+                dev: 32,
+                func: 8,
+            }
+            .to_u32(),
+        ));
+
+        devices.push((dp_bridge, None));
+        hp_stub.hotplug_buses.insert(
+            downstream_bus,
+            downstream_port as Arc<Mutex<dyn HotPlugBus>>,
+        );
+    }
+    Ok(())
+}
+
 fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
     let initrd_image = if let Some(initrd_path) = &cfg.initrd_path {
         Some(
@@ -2250,12 +2325,26 @@ where
     #[allow(unused_variables)]
     let pci_hotplug_slots: Option<u8> = None;
     #[cfg(target_arch = "x86_64")]
-    let hp_stub = create_pure_virtual_pcie_root_port(
+    #[allow(unused_mut)]
+    let mut hp_stub = create_pure_virtual_pcie_root_port(
         &mut sys_allocator,
         &mut add_control_tube,
         &mut devices,
         pci_hotplug_slots.unwrap_or(1),
     )?;
+
+    #[cfg(all(target_arch = "x86_64", feature = "pci-hotplug"))]
+    if let Some(switch_ports) = cfg.pcie_switch_hotplug_ports {
+        if switch_ports > 0 {
+            create_pcie_switch_hotplug_ports(
+                &mut sys_allocator,
+                &mut add_control_tube,
+                &mut devices,
+                &mut hp_stub,
+                switch_ports,
+            )?;
+        }
+    }
 
     arch::assign_pci_addresses(&mut devices, &mut sys_allocator)?;
 
