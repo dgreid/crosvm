@@ -560,6 +560,28 @@ impl TestVm {
             .map(|_| ())
     }
 
+    /// Hotplug a block device by disk image path.
+    pub fn hotplug_block(&mut self, path: &str, read_only: bool) -> Result<()> {
+        let mut args = vec!["add".to_owned(), path.to_owned()];
+        if read_only {
+            args.push("--read-only".to_owned());
+        }
+        self.sys
+            .crosvm_command("virtio-block", args, self.sudo)
+            .map(|_| ())
+    }
+
+    /// Remove hotplugged block device on bus.
+    pub fn remove_block_device(&mut self, bus_num: u8) -> Result<()> {
+        self.sys
+            .crosvm_command(
+                "virtio-block",
+                vec!["remove".to_owned(), bus_num.to_string()],
+                self.sudo,
+            )
+            .map(|_| ())
+    }
+
     pub fn stop(&mut self) -> Result<()> {
         self.sys
             .crosvm_command("stop", vec![], self.sudo)

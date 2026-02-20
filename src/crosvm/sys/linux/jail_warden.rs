@@ -40,7 +40,9 @@ use swap::SwapDeviceHelper;
 use sync::Mutex;
 use vm_memory::GuestMemory;
 
+use crate::crosvm::sys::linux::pci_hotplug_helpers::build_hotplug_block_device;
 use crate::crosvm::sys::linux::pci_hotplug_helpers::build_hotplug_net_device;
+use crate::crosvm::sys::linux::pci_hotplug_helpers::BlockLocalParameters;
 use crate::crosvm::sys::linux::pci_hotplug_helpers::NetLocalParameters;
 use crate::crosvm::sys::linux::VirtioDeviceBuilder;
 use crate::Config;
@@ -198,6 +200,18 @@ fn jail_worker_process(
                             build_hotplug_net_device(net_resource_carrier, net_local_parameters)?;
                         (pci_device, jail)
                     }
+                    ResourceCarrier::VirtioBlock(block_resource_carrier) => {
+                        let seccomp_policy = VirtioDeviceType::Regular.seccomp_policy_file("block");
+                        let jail = jail::simple_jail(config.jail_config.as_ref(), &seccomp_policy)?
+                            .ok_or(anyhow!("no jail created"))?;
+                        let block_local_parameters =
+                            BlockLocalParameters::new(guest_memory.clone(), config.protection_type);
+                        let pci_device = build_hotplug_block_device(
+                            block_resource_carrier,
+                            block_local_parameters,
+                        )?;
+                        (pci_device, jail)
+                    }
                 };
                 let mut keep_rds = vec![];
                 syslog::push_descriptors(&mut keep_rds);
@@ -252,6 +266,11 @@ impl JailWarden for PermissiveJailWarden {
                 let net_local_parameters =
                     NetLocalParameters::new(self.guest_memory.clone(), self.protection_type);
                 build_hotplug_net_device(net_resource_carrier, net_local_parameters)?
+            }
+            ResourceCarrier::VirtioBlock(block_resource_carrier) => {
+                let block_local_parameters =
+                    BlockLocalParameters::new(self.guest_memory.clone(), self.protection_type);
+                build_hotplug_block_device(block_resource_carrier, block_local_parameters)?
             }
         };
         Ok((Arc::new(Mutex::new(pci_device)), 0))
