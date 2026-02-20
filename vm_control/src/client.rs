@@ -122,6 +122,57 @@ pub fn do_net_remove<T: AsRef<Path> + std::fmt::Debug>(
     anyhow::bail!("Unsupported: pci-hotplug feature disabled");
 }
 
+#[cfg(feature = "pci-hotplug")]
+/// Send a `VmRequest` for block device hotplug that expects `VmResponse::PciHotPlugResponse`
+pub fn do_block_add<T: AsRef<Path> + std::fmt::Debug>(
+    path: &str,
+    read_only: bool,
+    socket_path: T,
+) -> AnyHowResult<u8> {
+    let request = VmRequest::HotPlugBlockCommand(crate::BlockControlCommand::AddBlock {
+        path: path.to_owned(),
+        read_only,
+    });
+    let response = handle_request(&request, socket_path).map_err(|()| anyhow!("socket error: "))?;
+    match response {
+        VmResponse::PciHotPlugResponse { bus } => Ok(bus),
+        e => Err(anyhow!("Unexpected response: {:#}", e)),
+    }
+}
+
+#[cfg(not(feature = "pci-hotplug"))]
+/// Send a `VmRequest` for block device hotplug that expects `VmResponse::PciHotPlugResponse`
+pub fn do_block_add<T: AsRef<Path> + std::fmt::Debug>(
+    _path: &str,
+    _read_only: bool,
+    _socket_path: T,
+) -> AnyHowResult<u8> {
+    anyhow::bail!("Unsupported: pci-hotplug feature disabled");
+}
+
+#[cfg(feature = "pci-hotplug")]
+/// Send a `VmRequest` for removing hotplugged block device that expects `VmResponse::Ok`
+pub fn do_block_remove<T: AsRef<Path> + std::fmt::Debug>(
+    bus_num: u8,
+    socket_path: T,
+) -> AnyHowResult<()> {
+    let request = VmRequest::HotPlugBlockCommand(crate::BlockControlCommand::RemoveBlock(bus_num));
+    let response = handle_request(&request, socket_path).map_err(|()| anyhow!("socket error: "))?;
+    match response {
+        VmResponse::Ok => Ok(()),
+        e => Err(anyhow!("Unexpected response: {:#}", e)),
+    }
+}
+
+#[cfg(not(feature = "pci-hotplug"))]
+/// Send a `VmRequest` for removing hotplugged block device that expects `VmResponse::Ok`
+pub fn do_block_remove<T: AsRef<Path> + std::fmt::Debug>(
+    _bus_num: u8,
+    _socket_path: T,
+) -> AnyHowResult<()> {
+    anyhow::bail!("Unsupported: pci-hotplug feature disabled");
+}
+
 pub fn do_usb_attach<T: AsRef<Path> + std::fmt::Debug>(
     socket_path: T,
     dev_path: &Path,

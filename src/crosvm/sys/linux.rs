@@ -2855,6 +2855,110 @@ fn handle_hotplug_net_remove<V: VmArch, Vcpu: VcpuArch>(
     }
 }
 
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_block_command<V: VmArch, Vcpu: VcpuArch>(
+    block_cmd: vm_control::BlockControlCommand,
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    hotplug_manager: &mut PciHotPlugManager,
+) -> VmResponse {
+    match block_cmd {
+        vm_control::BlockControlCommand::AddBlock { path, read_only } => handle_hotplug_block_add(
+            linux,
+            sys_allocator,
+            add_control_tube,
+            hotplug_manager,
+            &path,
+            read_only,
+        ),
+        vm_control::BlockControlCommand::RemoveBlock(bus) => {
+            handle_hotplug_net_remove(linux, sys_allocator, hotplug_manager, bus)
+        }
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_block_add<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    hotplug_manager: &mut PciHotPlugManager,
+    path: &str,
+    read_only: bool,
+) -> VmResponse {
+    let ret = add_hotplug_block(
+        linux,
+        sys_allocator,
+        add_control_tube,
+        hotplug_manager,
+        path,
+        read_only,
+    );
+
+    match ret {
+        Ok(pci_bus) => VmResponse::PciHotPlugResponse { bus: pci_bus },
+        Err(e) => VmResponse::ErrString(format!("{e:?}")),
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn add_hotplug_block<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    hotplug_manager: &mut PciHotPlugManager,
+    path: &str,
+    read_only: bool,
+) -> Result<u8> {
+    use devices::virtio::block::DiskOption;
+    use devices::BlockResourceCarrier;
+    use std::path::PathBuf;
+
+    let (msi_host_tube, msi_device_tube) = Tube::pair().context("create tube")?;
+    add_control_tube(AnyControlTube::IrqTube(msi_host_tube));
+    let (ioevent_host_tube, ioevent_device_tube) = Tube::pair().context("create tube")?;
+    let ioevent_vm_memory_client = VmMemoryClient::new(ioevent_device_tube);
+    add_control_tube(
+        VmMemoryTube {
+            tube: ioevent_host_tube,
+            expose_with_viommu: false,
+        }
+        .into(),
+    );
+    let (vm_control_host_tube, vm_control_device_tube) = Tube::pair().context("create tube")?;
+    add_control_tube(TaggedControlTube::Vm(vm_control_host_tube).into());
+
+    let disk_option = DiskOption {
+        path: PathBuf::from(path),
+        read_only,
+        root: false,
+        sparse: true,
+        direct: false,
+        lock: true,
+        block_size: 512,
+        id: None,
+        #[cfg(windows)]
+        io_concurrency: std::num::NonZeroU32::new(1).unwrap(),
+        multiple_workers: false,
+        async_executor: None,
+        packed_queue: false,
+        bootindex: None,
+        pci_address: None,
+    };
+    let block_carrier = BlockResourceCarrier::new(
+        disk_option,
+        msi_device_tube,
+        ioevent_vm_memory_client,
+        vm_control_device_tube,
+    );
+    hotplug_manager.hotplug_device(
+        vec![ResourceCarrier::VirtioBlock(block_carrier)],
+        linux,
+        sys_allocator,
+    )
+}
+
 #[cfg(target_arch = "x86_64")]
 fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
     linux: &RunnableLinuxVm<V, Vcpu>,
@@ -3247,6 +3351,20 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             if let Some(hotplug_manager) = state.hotplug_manager.as_mut() {
                 handle_hotplug_net_command(
                     net_cmd,
+                    state.linux,
+                    &mut state.sys_allocator.lock(),
+                    &mut add_control_tube,
+                    hotplug_manager,
+                )
+            } else {
+                VmResponse::ErrString("PCI hotplug is not enabled.".to_owned())
+            }
+        }
+        #[cfg(feature = "pci-hotplug")]
+        VmRequest::HotPlugBlockCommand(block_cmd) => {
+            if let Some(hotplug_manager) = state.hotplug_manager.as_mut() {
+                handle_hotplug_block_command(
+                    block_cmd,
                     state.linux,
                     &mut state.sys_allocator.lock(),
                     &mut add_control_tube,
