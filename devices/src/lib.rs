@@ -95,6 +95,8 @@ pub use self::irq_event::IrqLevelEvent;
 pub use self::irqchip::*;
 pub use self::mock::MockDevice;
 pub use self::pci::BarRange;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci::BlockResourceCarrier;
 pub use self::pci::GpeScope;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci::HotPluggable;
