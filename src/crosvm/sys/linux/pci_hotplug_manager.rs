@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -134,6 +135,8 @@ enum WorkerCommand {
     SignalHotPlug(SignalHotPlugCommand),
     /// Signals hot unplug on port. Changes an occupied port to empty.
     SignalHotUnplug(PciAddress),
+    /// Wait for unplug completion with a timeout. Returns UnplugCompleted or UnplugTimedOut.
+    WaitUnplugComplete(PciAddress, Duration),
 }
 
 #[derive(Clone)]
@@ -249,6 +252,10 @@ enum WorkerResponse {
     SignalOk,
     /// Command fail because it is not valid.
     InvalidCommand(Error),
+    /// Unplug completed: guest acknowledged the removal.
+    UnplugCompleted,
+    /// Unplug timed out: guest did not acknowledge within the timeout.
+    UnplugTimedOut,
 }
 
 impl PartialEq for WorkerResponse {
@@ -257,6 +264,8 @@ impl PartialEq for WorkerResponse {
             (Self::GetEmptyPortOk(l0), Self::GetEmptyPortOk(r0)) => l0 == r0,
             (Self::GetPortStateOk(l0), Self::GetPortStateOk(r0)) => l0 == r0,
             (Self::InvalidCommand(_), Self::InvalidCommand(_)) => true,
+            (Self::UnplugCompleted, Self::UnplugCompleted) => true,
+            (Self::UnplugTimedOut, Self::UnplugTimedOut) => true,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -356,7 +365,8 @@ impl PciHotPlugWorker {
     }
 
     fn handle_manager_command(&mut self) -> Result<()> {
-        let response = match self.command_receiver.recv()? {
+        let command = self.command_receiver.recv()?;
+        let response = match command {
             WorkerCommand::AddPort(pci_address, port) => self.handle_add_port(pci_address, port),
             WorkerCommand::GetPortState(pci_address) => self.handle_get_port_state(pci_address),
             WorkerCommand::GetEmptyPort => self.handle_get_empty_port(),
@@ -364,6 +374,11 @@ impl PciHotPlugWorker {
                 self.handle_plug_request(hotplug_command)
             }
             WorkerCommand::SignalHotUnplug(pci_address) => self.handle_unplug_request(pci_address),
+            WorkerCommand::WaitUnplugComplete(pci_address, timeout) => {
+                // Send response immediately, then wait in a blocking fashion.
+                // We handle WaitUnplugComplete specially: send response after waiting.
+                return self.handle_wait_unplug_complete(pci_address, timeout);
+            }
         }?;
         Ok(self.response_sender.send(response)?)
     }
@@ -601,6 +616,85 @@ impl PciHotPlugWorker {
                 pci_address,
             })
             .context("PciHotPlugWorker is in invalid state")
+    }
+
+    /// Waits for unplug completion by processing events from the WaitContext until the port
+    /// transitions to Empty state or the timeout expires.
+    fn handle_wait_unplug_complete(
+        &mut self,
+        pci_address: PciAddress,
+        timeout: Duration,
+    ) -> Result<()> {
+        use std::time::Instant;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Check if port already transitioned to Empty.
+            match self.get_port_state(pci_address) {
+                Ok(PortState::Empty(0)) => {
+                    return Ok(self.response_sender.send(WorkerResponse::UnplugCompleted)?);
+                }
+                Ok(PortState::Empty(_)) | Ok(PortState::EmptyNotReady) => {
+                    // Port is transitioning, keep waiting.
+                }
+                Ok(PortState::Occupied(_)) | Ok(PortState::OccupiedNotReady) => {
+                    // Still occupied, keep waiting.
+                }
+                Err(_) => {
+                    return Ok(self.response_sender.send(WorkerResponse::UnplugTimedOut)?);
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(self.response_sender.send(WorkerResponse::UnplugTimedOut)?);
+            }
+
+            // Process events with a timeout.
+            let poll_duration = remaining.min(Duration::from_millis(100));
+            if let Ok(events) = self.wait_ctx.wait_timeout(poll_duration) {
+                for triggered_event in events.iter().filter(|e| e.is_readable) {
+                    match triggered_event.token {
+                        Token::ManagerCommand => {
+                            // Don't process other commands while waiting — just drain the event.
+                            self.manager_evt.wait()?;
+                        }
+                        Token::PortReady(descriptor) => {
+                            let (event, addr) = self
+                                .event_map
+                                .remove(&descriptor)
+                                .context("Cannot find event")?;
+                            event.wait()?;
+                            self.wait_ctx.delete(&event)?;
+                            self.handle_port_ready(addr)?;
+                        }
+                        Token::PlugComplete(descriptor) => {
+                            let (event, addr) = self
+                                .event_map
+                                .remove(&descriptor)
+                                .context("Cannot find event")?;
+                            event.wait()?;
+                            self.wait_ctx.delete(&event)?;
+                            self.handle_plug_complete(addr)?;
+                        }
+                        Token::UnplugComplete(descriptor) => {
+                            let (event, addr) = self
+                                .event_map
+                                .remove(&descriptor)
+                                .context("Cannot find event")?;
+                            self.wait_ctx.delete(&event)?;
+                            self.handle_unplug_complete(addr)?;
+                        }
+                        Token::Kill => {
+                            // If killed during wait, still respond.
+                            return Ok(self
+                                .response_sender
+                                .send(WorkerResponse::UnplugTimedOut)?);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -884,6 +978,10 @@ impl PciHotPlugManager {
     }
 
     /// Removes all hotplugged devices on the hotplug bus.
+    ///
+    /// Attempts guest-cooperative removal: signals the guest and waits up to 5 seconds for
+    /// acknowledgment. If the guest doesn't respond within the timeout, proceeds with surprise
+    /// removal as fallback.
     pub fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
         &mut self,
         bus: u8,
@@ -908,8 +1006,7 @@ impl PciHotPlugManager {
             }
             wr => bail!("Unexpected response from worker: {:?}", &wr),
         };
-        // Performs a surprise removal. That is, not waiting for hot removal completion before
-        // deleting the resources.
+        // Signal unplug to the guest.
         match worker_client.send_worker_command(WorkerCommand::SignalHotUnplug(*pci_address))? {
             WorkerResponse::SignalOk => {}
             WorkerResponse::InvalidCommand(e) => {
@@ -917,14 +1014,30 @@ impl PciHotPlugManager {
             }
             wr => bail!("Unexpected response from worker: {:?}", &wr),
         }
-        // Remove all devices on the hotplug bus.
+        // Wait for guest to acknowledge the unplug (cooperative removal with 5s timeout).
+        let unplug_timeout = Duration::from_secs(5);
+        match worker_client.send_worker_command(WorkerCommand::WaitUnplugComplete(
+            *pci_address,
+            unplug_timeout,
+        ))? {
+            WorkerResponse::UnplugCompleted => {
+                log::info!("Guest acknowledged unplug on bus {}", bus);
+            }
+            WorkerResponse::UnplugTimedOut => {
+                log::warn!(
+                    "Guest did not acknowledge unplug on bus {} within timeout, \
+                     proceeding with surprise removal",
+                    bus
+                );
+            }
+            wr => bail!("Unexpected response from worker: {:?}", &wr),
+        }
+        // Release all devices on the hotplug bus.
         let port_stub = self
             .port_stubs
             .get_mut(pci_address)
             .with_context(|| format!("Port {} is not known", &bus))?;
         for (downstream_address, recoverable_resource) in port_stub.devices.drain() {
-            // port_stub.port does not have remove_hotplug_device method, as devices are removed
-            // when hot_unplug is called.
             resources.release_pci(downstream_address);
             linux.irq_chip.unregister_level_irq_event(
                 recoverable_resource.irq_num,
