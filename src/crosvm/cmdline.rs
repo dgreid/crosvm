@@ -1615,6 +1615,12 @@ pub struct RunCommand {
     /// the pci mmio start address below 4G
     pub pci_start: Option<u64>,
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(feature = "pci-hotplug")]
+    #[argh(option, arg_name = "pcie_switch_hotplug_ports")]
+    /// number of PCIe switch downstream ports with hotplug support (default: 0)
+    pub pcie_switch_hotplug_ports: Option<u8>,
+
     #[argh(switch)]
     /// enable per-VM core scheduling intead of the default one (per-vCPU core scheduing) by
     /// making all vCPU threads share same cookie for core scheduling.
@@ -3157,6 +3163,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         #[cfg(feature = "pci-hotplug")]
         {
             cfg.pci_hotplug_slots = cmd.pci_hotplug_slots;
+            cfg.pcie_switch_hotplug_ports = cmd.pcie_switch_hotplug_ports;
         }
 
         cfg.vhost_user = cmd.vhost_user;
