@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use vm_control::api::VmMemoryClient;
 
+use crate::virtio::block::DiskOption;
 use crate::virtio::NetParameters;
 use crate::IrqLevelEvent;
 use crate::PciAddress;
@@ -31,6 +32,8 @@ pub type Result<T> = std::result::Result<T, PciDeviceError>;
 pub enum ResourceCarrier {
     /// virtio-net device.
     VirtioNet(NetResourceCarrier),
+    /// virtio-block device.
+    VirtioBlock(BlockResourceCarrier),
 }
 
 impl ResourceCarrier {
@@ -38,6 +41,7 @@ impl ResourceCarrier {
     pub fn debug_label(&self) -> String {
         match self {
             ResourceCarrier::VirtioNet(c) => c.debug_label(),
+            ResourceCarrier::VirtioBlock(c) => c.debug_label(),
         }
     }
 
@@ -46,6 +50,7 @@ impl ResourceCarrier {
     pub fn keep_rds(&self) -> Vec<RawDescriptor> {
         match self {
             ResourceCarrier::VirtioNet(c) => c.keep_rds(),
+            ResourceCarrier::VirtioBlock(c) => c.keep_rds(),
         }
     }
     /// Allocate the preferred address to the device.
@@ -56,6 +61,7 @@ impl ResourceCarrier {
     ) -> Result<()> {
         match self {
             ResourceCarrier::VirtioNet(c) => c.allocate_address(preferred_address, resources),
+            ResourceCarrier::VirtioBlock(c) => c.allocate_address(preferred_address, resources),
         }
     }
     /// Assign a legacy PCI IRQ to this device.
@@ -64,6 +70,7 @@ impl ResourceCarrier {
     pub fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
         match self {
             ResourceCarrier::VirtioNet(c) => c.assign_irq(irq_evt, pin, irq_num),
+            ResourceCarrier::VirtioBlock(c) => c.assign_irq(irq_evt, pin, irq_num),
         }
     }
 }
@@ -187,4 +194,85 @@ pub struct IntxParameter {
     pub pin: PciInterruptPin,
     /// irq num
     pub irq_num: u32,
+}
+
+/// A BlockResourceCarrier is a ResourceCarrier specialization for virtio-block devices.
+#[derive(Serialize, Deserialize)]
+pub struct BlockResourceCarrier {
+    /// DiskOption for constructing block device
+    pub disk_option: DiskOption,
+    /// msi_device_tube for VirtioPciDevice constructor
+    pub msi_device_tube: Tube,
+    /// ioevent_vm_memory_client for VirtioPciDevice constructor
+    pub ioevent_vm_memory_client: VmMemoryClient,
+    /// pci_address for the hotplugged device
+    pub pci_address: Option<PciAddress>,
+    /// intx_parameter for assign_irq
+    pub intx_parameter: Option<IntxParameter>,
+    /// vm_control_tube for VirtioPciDevice constructor
+    pub vm_control_tube: Tube,
+}
+
+impl BlockResourceCarrier {
+    /// Constructs BlockResourceCarrier.
+    pub fn new(
+        disk_option: DiskOption,
+        msi_device_tube: Tube,
+        ioevent_vm_memory_client: VmMemoryClient,
+        vm_control_tube: Tube,
+    ) -> Self {
+        Self {
+            disk_option,
+            msi_device_tube,
+            ioevent_vm_memory_client,
+            pci_address: None,
+            intx_parameter: None,
+            vm_control_tube,
+        }
+    }
+
+    fn debug_label(&self) -> String {
+        "virtio-block".to_owned()
+    }
+
+    fn keep_rds(&self) -> Vec<RawDescriptor> {
+        let mut keep_rds = vec![
+            self.msi_device_tube.as_raw_descriptor(),
+            self.ioevent_vm_memory_client.as_raw_descriptor(),
+        ];
+        if let Some(intx_parameter) = &self.intx_parameter {
+            keep_rds.extend(intx_parameter.irq_evt.as_raw_descriptors());
+        }
+        keep_rds
+    }
+
+    fn allocate_address(
+        &mut self,
+        preferred_address: PciAddress,
+        resources: &mut resources::SystemAllocator,
+    ) -> Result<()> {
+        match self.pci_address {
+            None => {
+                if resources.reserve_pci(preferred_address, self.debug_label()) {
+                    self.pci_address = Some(preferred_address);
+                } else {
+                    return Err(PciDeviceError::PciAllocationFailed);
+                }
+            }
+            Some(pci_address) => {
+                if pci_address != preferred_address {
+                    return Err(PciDeviceError::PciAllocationFailed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
+        self.intx_parameter = Some(IntxParameter {
+            irq_evt,
+            pin,
+            irq_num,
+        });
+    }
 }

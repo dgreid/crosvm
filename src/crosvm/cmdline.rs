@@ -152,6 +152,8 @@ pub enum CrossPlatformCommands {
     Vfio(VfioCrosvmCommand),
     #[cfg(feature = "pci-hotplug")]
     VirtioNet(VirtioNetCommand),
+    #[cfg(feature = "pci-hotplug")]
+    VirtioBlock(VirtioBlockCommand),
     Snapshot(SnapshotCommand),
 }
 
@@ -547,6 +549,52 @@ pub struct VirtioNetRemoveSubCommand {
 pub struct VirtioNetCommand {
     #[argh(subcommand)]
     pub command: VirtioNetSubCommand,
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum VirtioBlockSubCommand {
+    Add(VirtioBlockAddSubCommand),
+    Remove(VirtioBlockRemoveSubCommand),
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "add")]
+/// Add a block device by disk image path.
+pub struct VirtioBlockAddSubCommand {
+    #[argh(positional)]
+    /// path to the disk image
+    pub path: String,
+    #[argh(switch)]
+    /// make the device read-only
+    pub read_only: bool,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "remove")]
+/// Remove block device by bus number.
+pub struct VirtioBlockRemoveSubCommand {
+    #[argh(positional)]
+    /// bus number for device to remove
+    pub bus: u8,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "virtio-block")]
+/// add block device as virtio into guest.
+pub struct VirtioBlockCommand {
+    #[argh(subcommand)]
+    pub command: VirtioBlockSubCommand,
 }
 
 #[derive(FromArgs)]
