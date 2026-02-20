@@ -277,3 +277,114 @@ fn tap_hotplug_add_remove_rapid_add_impl() {
 fn tap_hotplug_add_remove_rapid_add() {
     call_test_with_sudo("tap_hotplug_add_remove_rapid_add_impl");
 }
+
+/// Implementation for tap_hotplug_exceed_slots
+///
+/// This test will fail by itself due to permission.
+#[ignore = "Only to be called by tap_hotplug_exceed_slots"]
+#[test]
+fn tap_hotplug_exceed_slots_impl() {
+    // Setup VM with only 1 hotplug slot.
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+    let wait_timeout = Duration::from_secs(5);
+
+    // Setup two test tap devices.
+    let tap1_name = "test_tap_e1";
+    setup_tap_device(
+        tap1_name.as_bytes(),
+        "100.115.92.41".parse().unwrap(),
+        "255.255.255.252".parse().unwrap(),
+        "a0:b0:c0:d0:e1:f1".parse().unwrap(),
+    );
+    let tap2_name = "test_tap_e2";
+    setup_tap_device(
+        tap2_name.as_bytes(),
+        "100.115.92.45".parse().unwrap(),
+        "255.255.255.252".parse().unwrap(),
+        "a0:b0:c0:d0:e1:f2".parse().unwrap(),
+    );
+
+    // First hotplug should succeed.
+    vm.hotplug_tap(tap1_name).unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_net_devices(vm) == 1 },
+        wait_timeout
+    ));
+
+    // Second hotplug should fail: no available slots.
+    let result = vm.hotplug_tap(tap2_name);
+    assert!(
+        result.is_err(),
+        "Expected error when exceeding hotplug slots"
+    );
+
+    drop(vm);
+    Command::new("ip")
+        .args(["link", "delete", tap1_name])
+        .status()
+        .unwrap();
+    Command::new("ip")
+        .args(["link", "delete", tap2_name])
+        .status()
+        .unwrap();
+}
+
+/// Checks that hotplugging more devices than available slots returns an error.
+#[test]
+fn tap_hotplug_exceed_slots() {
+    call_test_with_sudo("tap_hotplug_exceed_slots_impl");
+}
+
+/// Implementation for tap_hotplug_remove_empty_slot
+///
+/// This test will fail by itself due to permission.
+#[ignore = "Only to be called by tap_hotplug_remove_empty_slot"]
+#[test]
+fn tap_hotplug_remove_empty_slot_impl() {
+    // Setup VM with 1 hotplug slot but don't plug any device.
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    // Removing from an empty slot should fail.
+    let result = vm.remove_pci_device(1);
+    assert!(
+        result.is_err(),
+        "Expected error when removing from empty slot"
+    );
+
+    drop(vm);
+}
+
+/// Checks that removing from an already-empty slot returns an error.
+#[test]
+fn tap_hotplug_remove_empty_slot() {
+    call_test_with_sudo("tap_hotplug_remove_empty_slot_impl");
+}
+
+/// Implementation for tap_hotplug_remove_nonexistent_bus
+///
+/// This test will fail by itself due to permission.
+#[ignore = "Only to be called by tap_hotplug_remove_nonexistent_bus"]
+#[test]
+fn tap_hotplug_remove_nonexistent_bus_impl() {
+    // Setup VM with 1 hotplug slot.
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    // Removing from a non-existent bus number should fail.
+    let result = vm.remove_pci_device(99);
+    assert!(
+        result.is_err(),
+        "Expected error when removing from non-existent bus"
+    );
+
+    drop(vm);
+}
+
+/// Checks that removing from a non-existent bus returns an error.
+#[test]
+fn tap_hotplug_remove_nonexistent_bus() {
+    call_test_with_sudo("tap_hotplug_remove_nonexistent_bus_impl");
+}
