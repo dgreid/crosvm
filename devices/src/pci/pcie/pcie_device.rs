@@ -123,7 +123,10 @@ impl PcieCap {
         pcie_cap |= irq_num << PCIE_CAP_IRQ_NUM_SHIFT;
 
         let dev_cap = PCIE_DEVCAP_RBER;
-        let link_cap = (PCIE_LINK_X1 | PCIE_LINK_2_5GT) as u32;
+        let mut link_cap = (PCIE_LINK_X1 | PCIE_LINK_2_5GT) as u32;
+        if slot {
+            link_cap |= PCIE_LNKCAP_DLLLARC;
+        }
         let link_status = PCIE_LINK_X1 | PCIE_LINK_2_5GT;
 
         let mut slot_cap: u32 = 0;
@@ -133,7 +136,8 @@ impl PcieCap {
                 | PCIE_SLTCAP_AIP
                 | PCIE_SLTCAP_PIP
                 | PCIE_SLTCAP_HPS
-                | PCIE_SLTCAP_HPC;
+                | PCIE_SLTCAP_HPC
+                | PCIE_SLTCAP_PCP;
             slot_control = PCIE_SLTCTL_PIC_OFF | PCIE_SLTCTL_AIC_OFF;
         }
 
