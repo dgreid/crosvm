@@ -24,6 +24,16 @@ use crate::PciInterruptPin;
 
 pub type Result<T> = std::result::Result<T, PciDeviceError>;
 
+/// Delegates a method call to the inner carrier variant.
+macro_rules! carrier_delegate {
+    ($self:ident, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            ResourceCarrier::VirtioNet(c) => c.$method($($arg),*),
+            ResourceCarrier::VirtioBlock(c) => c.$method($($arg),*),
+        }
+    }
+}
+
 /// A ResourceCarrier moves resources for PCI device across process boundary.
 ///
 /// ResourceCarrier can be sent across processes using De/Serialize. All the variants shall be able
@@ -39,19 +49,13 @@ pub enum ResourceCarrier {
 impl ResourceCarrier {
     /// Returns debug label for the target device.
     pub fn debug_label(&self) -> String {
-        match self {
-            ResourceCarrier::VirtioNet(c) => c.debug_label(),
-            ResourceCarrier::VirtioBlock(c) => c.debug_label(),
-        }
+        carrier_delegate!(self, debug_label)
     }
 
     /// A vector of device-specific file descriptors that must be kept open
     /// after jailing. Must be called before the process is jailed.
     pub fn keep_rds(&self) -> Vec<RawDescriptor> {
-        match self {
-            ResourceCarrier::VirtioNet(c) => c.keep_rds(),
-            ResourceCarrier::VirtioBlock(c) => c.keep_rds(),
-        }
+        carrier_delegate!(self, keep_rds)
     }
     /// Allocate the preferred address to the device.
     pub fn allocate_address(
@@ -59,19 +63,13 @@ impl ResourceCarrier {
         preferred_address: PciAddress,
         resources: &mut resources::SystemAllocator,
     ) -> Result<()> {
-        match self {
-            ResourceCarrier::VirtioNet(c) => c.allocate_address(preferred_address, resources),
-            ResourceCarrier::VirtioBlock(c) => c.allocate_address(preferred_address, resources),
-        }
+        carrier_delegate!(self, allocate_address, preferred_address, resources)
     }
     /// Assign a legacy PCI IRQ to this device.
     /// The device may write to `irq_evt` to trigger an interrupt.
     /// When `irq_resample_evt` is signaled, the device should re-assert `irq_evt` if necessary.
     pub fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
-        match self {
-            ResourceCarrier::VirtioNet(c) => c.assign_irq(irq_evt, pin, irq_num),
-            ResourceCarrier::VirtioBlock(c) => c.assign_irq(irq_evt, pin, irq_num),
-        }
+        carrier_delegate!(self, assign_irq, irq_evt, pin, irq_num)
     }
 }
 
