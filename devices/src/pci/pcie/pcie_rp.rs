@@ -229,3 +229,274 @@ impl PmeNotify for PcieRootPort {
         self.pcie_port.inject_pme(requester_id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::HotPlugBus;
+
+    /// Creates a PcieRootPort with hotplug slot and enables it for testing.
+    /// Uses a unique secondary bus number to avoid global state collisions between tests.
+    fn new_enabled_root_port(bus: u8) -> PcieRootPort {
+        let mut rp = PcieRootPort::new(bus, true);
+        rp.pcie_port.enable_slot_for_test();
+        rp
+    }
+
+    fn test_device_addr(bus: u8) -> PciAddress {
+        PciAddress {
+            bus,
+            dev: 0,
+            func: 0,
+        }
+    }
+
+    fn test_hotplug_key(bus: u8) -> HotPlugKey {
+        HotPlugKey::GuestDevice {
+            guest_addr: test_device_addr(bus),
+        }
+    }
+
+    #[test]
+    fn hot_plug_succeeds_with_registered_device() {
+        let bus = 10;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        // Register the device first.
+        rp.add_hotplug_device(key, addr);
+
+        // hot_plug should succeed and return a completion event.
+        let result = rp.hot_plug(addr);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn hot_plug_fails_when_hpc_pending() {
+        let bus = 11;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key, addr);
+
+        // First hot_plug succeeds and sets HPC sender.
+        let _ = rp.hot_plug(addr).unwrap();
+
+        // Second hot_plug should fail because HPC is pending.
+        let addr2 = PciAddress {
+            bus,
+            dev: 0,
+            func: 1,
+        };
+        let key2 = HotPlugKey::GuestDevice { guest_addr: addr2 };
+        rp.add_hotplug_device(key2, addr2);
+        let result = rp.hot_plug(addr2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hot_plug_fails_when_not_hotplug_ready() {
+        let bus = 12;
+        // Create port without enabling the slot.
+        let mut rp = PcieRootPort::new(bus, true);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key, addr);
+
+        let result = rp.hot_plug(addr);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hot_plug_fails_without_registered_device() {
+        let bus = 13;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        // Don't register a device.
+
+        let result = rp.hot_plug(addr);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hot_unplug_with_pic_on_sets_abp() {
+        let bus = 14;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key, addr);
+
+        // Set PIC to ON to simulate an active device.
+        rp.pcie_port.set_pic_on_for_test();
+
+        let result = rp.hot_unplug(addr);
+        assert!(result.is_ok());
+        let event = result.unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn hot_unplug_with_pic_off_signals_immediately() {
+        let bus = 15;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key, addr);
+        // PIC is OFF (default), so unplug should signal immediately.
+
+        let result = rp.hot_unplug(addr);
+        assert!(result.is_ok());
+        let event = result.unwrap();
+        assert!(event.is_some());
+        // Event should be immediately signaled.
+        event
+            .unwrap()
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn hot_unplug_with_pic_blink_returns_error() {
+        let bus = 16;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key, addr);
+
+        // Set PIC to BLINK.
+        rp.pcie_port.set_pic_blink_for_test();
+
+        let result = rp.hot_unplug(addr);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hot_unplug_fails_when_hotplug_out_begin() {
+        let bus = 17;
+        let mut rp = new_enabled_root_port(bus);
+        let addr1 = test_device_addr(bus);
+        let key1 = test_hotplug_key(bus);
+        let addr2 = PciAddress {
+            bus,
+            dev: 0,
+            func: 1,
+        };
+        let key2 = HotPlugKey::GuestDevice { guest_addr: addr2 };
+
+        rp.add_hotplug_device(key1, addr1);
+        rp.add_hotplug_device(key2, addr2);
+
+        // First unplug succeeds.
+        let _ = rp.hot_unplug(addr1).unwrap();
+
+        // Second unplug should fail because hotplug_out_begin is set.
+        let result = rp.hot_unplug(addr2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hot_unplug_fails_when_not_hotplug_ready() {
+        let bus = 18;
+        let mut rp = PcieRootPort::new(bus, true);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key, addr);
+
+        let result = rp.hot_unplug(addr);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_hotplug_device_clears_hotplug_out_begin() {
+        let bus = 19;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key.clone(), addr);
+
+        // Trigger unplug to set hotplug_out_begin.
+        let _ = rp.hot_unplug(addr).unwrap();
+        assert!(rp.hotplug_out_begin);
+
+        // Adding a new device should clear hotplug_out_begin.
+        let new_addr = PciAddress {
+            bus,
+            dev: 0,
+            func: 1,
+        };
+        let new_key = HotPlugKey::GuestDevice {
+            guest_addr: new_addr,
+        };
+        rp.add_hotplug_device(new_key, new_addr);
+        assert!(!rp.hotplug_out_begin);
+        // Previous downstream devices should be cleared too.
+        assert!(rp.removed_downstream.is_empty());
+    }
+
+    #[test]
+    fn add_hotplug_device_no_op_without_slot() {
+        let bus = 20;
+        let mut rp = PcieRootPort::new(bus, false);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key.clone(), addr);
+        // Without slot implemented, add_hotplug_device should be a no-op.
+        assert!(rp.is_empty());
+    }
+
+    #[test]
+    fn is_empty_reflects_device_state() {
+        let bus = 21;
+        let mut rp = new_enabled_root_port(bus);
+        assert!(rp.is_empty());
+
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+        rp.add_hotplug_device(key, addr);
+        assert!(!rp.is_empty());
+    }
+
+    #[test]
+    fn get_hotplug_device_returns_correct_address() {
+        let bus = 22;
+        let mut rp = new_enabled_root_port(bus);
+        let addr = test_device_addr(bus);
+        let key = test_hotplug_key(bus);
+
+        rp.add_hotplug_device(key.clone(), addr);
+        assert_eq!(rp.get_hotplug_device(key), Some(addr));
+    }
+
+    #[test]
+    fn get_hotplug_device_returns_none_for_unknown_key() {
+        let bus = 23;
+        let rp = new_enabled_root_port(bus);
+        let key = test_hotplug_key(bus);
+
+        assert_eq!(rp.get_hotplug_device(key), None);
+    }
+
+    #[test]
+    fn get_secondary_bus_number() {
+        let bus = 24;
+        let rp = new_enabled_root_port(bus);
+        assert_eq!(rp.get_secondary_bus_number(), Some(bus));
+    }
+
+    #[test]
+    fn get_hotplug_key_returns_none() {
+        let bus = 25;
+        let rp = new_enabled_root_port(bus);
+        assert_eq!(rp.get_hotplug_key(), None);
+    }
+}
