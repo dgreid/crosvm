@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Integration test for hotplug of tap devices as virtio-net.
+//! Integration test for hotplug of tap devices as virtio-net and block devices.
 
 #![cfg(all(unix, target_arch = "x86_64"))]
 
@@ -20,6 +20,7 @@ use net_util::sys::linux::Tap;
 use net_util::sys::linux::TapTLinux;
 use net_util::MacAddress;
 use net_util::TapTCommon;
+use tempfile::NamedTempFile;
 
 /// Count the number of virtio-net devices.
 fn count_virtio_net_devices(vm: &mut TestVm) -> usize {
@@ -315,7 +316,10 @@ fn tap_hotplug_exceed_slots_impl() {
 
     // Second hotplug should fail: no available slots.
     let result = vm.hotplug_tap(tap2_name);
-    assert!(result.is_err(), "Expected error when exceeding hotplug slots");
+    assert!(
+        result.is_err(),
+        "Expected error when exceeding hotplug slots"
+    );
 
     drop(vm);
     Command::new("ip")
@@ -346,7 +350,10 @@ fn tap_hotplug_remove_empty_slot_impl() {
 
     // Removing from an empty slot should fail.
     let result = vm.remove_pci_device(1);
-    assert!(result.is_err(), "Expected error when removing from empty slot");
+    assert!(
+        result.is_err(),
+        "Expected error when removing from empty slot"
+    );
 
     drop(vm);
 }
@@ -381,4 +388,162 @@ fn tap_hotplug_remove_nonexistent_bus_impl() {
 #[test]
 fn tap_hotplug_remove_nonexistent_bus() {
     call_test_with_sudo("tap_hotplug_remove_nonexistent_bus_impl");
+}
+
+/// Create a temporary raw disk image of the given size in bytes.
+fn create_temp_disk(size_bytes: u64) -> NamedTempFile {
+    let disk_file = NamedTempFile::new().unwrap();
+    disk_file.as_file().set_len(size_bytes).unwrap();
+    disk_file
+}
+
+/// Count the number of virtio-block devices via lspci.
+fn count_virtio_block_devices(vm: &mut TestVm) -> usize {
+    let lspci_result = vm.exec_in_guest("lspci -n").unwrap();
+    // Count occurrences for virtio block device: 1af4:1042
+    lspci_result.stdout.matches("1af4:1042").count()
+}
+
+/// Checks hotplug of a single block device: add, verify in guest, remove, verify gone.
+#[ignore = "Only to be called by block_hotplug_add_remove"]
+#[test]
+fn block_hotplug_add_remove_impl() {
+    let wait_timeout = Duration::from_secs(5);
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    let disk = create_temp_disk(1024 * 1024); // 1 MiB
+
+    // Record baseline count (includes root disk).
+    let baseline = count_virtio_block_devices(&mut vm);
+
+    // Hotplug block device.
+    vm.hotplug_block(disk.path().to_str().unwrap(), false)
+        .unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 1 },
+        wait_timeout
+    ));
+
+    // Remove hotplugged block device.
+    vm.remove_block_device(1).unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline },
+        wait_timeout
+    ));
+
+    drop(vm);
+}
+
+/// Checks hotplug of a single block device.
+#[test]
+fn block_hotplug_add_remove() {
+    call_test_with_sudo("block_hotplug_add_remove_impl");
+}
+
+/// Checks hotplug of two block devices.
+#[ignore = "Only to be called by block_hotplug_two"]
+#[test]
+fn block_hotplug_two_impl() {
+    let wait_timeout = Duration::from_secs(5);
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "2".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    let disk1 = create_temp_disk(1024 * 1024);
+    let disk2 = create_temp_disk(1024 * 1024);
+
+    // Record baseline count (includes root disk).
+    let baseline = count_virtio_block_devices(&mut vm);
+
+    // Hotplug first disk.
+    vm.hotplug_block(disk1.path().to_str().unwrap(), false)
+        .unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 1 },
+        wait_timeout
+    ));
+
+    // Hotplug second disk.
+    vm.hotplug_block(disk2.path().to_str().unwrap(), false)
+        .unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 2 },
+        wait_timeout
+    ));
+
+    // Remove both.
+    vm.remove_block_device(1).unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 1 },
+        wait_timeout
+    ));
+    vm.remove_block_device(2).unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline },
+        wait_timeout
+    ));
+
+    drop(vm);
+}
+
+/// Checks hotplug works with two block devices.
+#[test]
+fn block_hotplug_two() {
+    call_test_with_sudo("block_hotplug_two_impl");
+}
+
+/// Checks block hotplug works with add, remove, then add again on the same slot.
+#[ignore = "Only to be called by block_hotplug_add_remove_add"]
+#[test]
+fn block_hotplug_add_remove_add_impl() {
+    let wait_timeout = Duration::from_secs(5);
+    let config = Config::new()
+        .extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    let disk1 = create_temp_disk(1024 * 1024);
+    let disk2 = create_temp_disk(2 * 1024 * 1024);
+
+    // Record baseline count (includes root disk).
+    let baseline = count_virtio_block_devices(&mut vm);
+
+    // Hotplug first disk.
+    vm.hotplug_block(disk1.path().to_str().unwrap(), false)
+        .unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 1 },
+        wait_timeout
+    ));
+
+    // Remove it.
+    vm.remove_block_device(1).unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline },
+        wait_timeout
+    ));
+
+    // Hotplug a different disk on the same slot.
+    vm.hotplug_block(disk2.path().to_str().unwrap(), true)
+        .unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 1 },
+        wait_timeout
+    ));
+
+    drop(vm);
+}
+
+/// Checks block hotplug add-remove-add cycle.
+#[test]
+fn block_hotplug_add_remove_add() {
+    call_test_with_sudo("block_hotplug_add_remove_add_impl");
 }
