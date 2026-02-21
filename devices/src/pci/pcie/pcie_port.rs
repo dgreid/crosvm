@@ -933,7 +933,9 @@ mod tests {
         // Notification should be signaled (readable without blocking).
         assert!(config.enabled);
         // The event should have been signaled.
-        notf_event.wait_timeout(std::time::Duration::from_millis(10)).unwrap();
+        notf_event
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
 
         // Verify is_hotplug_ready returns true.
         assert!(config.is_hotplug_ready());
@@ -954,7 +956,9 @@ mod tests {
 
         // Now get a ready notification - should be signaled immediately since already enabled.
         let notf_event = config.get_ready_notification().unwrap();
-        notf_event.wait_timeout(std::time::Duration::from_millis(10)).unwrap();
+        notf_event
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
     }
 
     #[test]
@@ -1008,7 +1012,9 @@ mod tests {
         // Sender should be consumed.
         assert!(!config.has_hpc_sender());
         // Receiver should be signaled.
-        hpc_recvr.wait_timeout(std::time::Duration::from_millis(10)).unwrap();
+        hpc_recvr
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
     }
 
     #[test]
@@ -1061,7 +1067,9 @@ mod tests {
         // Next SLTSTA write should signal the hpc_sender.
         write_sltsta(&mut config, PCIE_SLTSTA_CC);
         assert!(!config.has_hpc_sender());
-        hpc_recvr.wait_timeout(std::time::Duration::from_millis(10)).unwrap();
+        hpc_recvr
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
     }
 
     #[test]
@@ -1114,7 +1122,9 @@ mod tests {
         // Signal completion via SLTSTA write.
         write_sltsta(&mut config, PCIE_SLTSTA_CC);
         assert!(!config.has_hpc_sender());
-        hpc_recvr.wait_timeout(std::time::Duration::from_millis(10)).unwrap();
+        hpc_recvr
+            .wait_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
     }
 
     #[test]
@@ -1183,7 +1193,10 @@ mod tests {
 
         // Set various slot status bits.
         config.set_slot_status(
-            PCIE_SLTSTA_ABP | PCIE_SLTSTA_PFD | PCIE_SLTSTA_PDC | PCIE_SLTSTA_CC
+            PCIE_SLTSTA_ABP
+                | PCIE_SLTSTA_PFD
+                | PCIE_SLTSTA_PDC
+                | PCIE_SLTSTA_CC
                 | PCIE_SLTSTA_DLLSC,
         );
         assert_ne!(config.get_slot_status(), 0);
@@ -1223,20 +1236,30 @@ mod tests {
 
         // Set all W1C bits.
         config.set_slot_status(
-            PCIE_SLTSTA_ABP | PCIE_SLTSTA_PFD | PCIE_SLTSTA_PDC | PCIE_SLTSTA_CC
+            PCIE_SLTSTA_ABP
+                | PCIE_SLTSTA_PFD
+                | PCIE_SLTSTA_PDC
+                | PCIE_SLTSTA_CC
                 | PCIE_SLTSTA_DLLSC,
         );
 
         // Clear all at once.
         write_sltsta(
             &mut config,
-            PCIE_SLTSTA_ABP | PCIE_SLTSTA_PFD | PCIE_SLTSTA_PDC | PCIE_SLTSTA_CC
+            PCIE_SLTSTA_ABP
+                | PCIE_SLTSTA_PFD
+                | PCIE_SLTSTA_PDC
+                | PCIE_SLTSTA_CC
                 | PCIE_SLTSTA_DLLSC,
         );
         // PDS should remain since it's not W1C via direct SLTSTA write in this path.
         assert_eq!(
-            config.get_slot_status() & (PCIE_SLTSTA_ABP | PCIE_SLTSTA_PFD | PCIE_SLTSTA_PDC
-                | PCIE_SLTSTA_CC | PCIE_SLTSTA_DLLSC),
+            config.get_slot_status()
+                & (PCIE_SLTSTA_ABP
+                    | PCIE_SLTSTA_PFD
+                    | PCIE_SLTSTA_PDC
+                    | PCIE_SLTSTA_CC
+                    | PCIE_SLTSTA_DLLSC),
             0
         );
     }
@@ -1347,8 +1370,10 @@ mod tests {
         let read_ctl = (data & 0xFFFF) as u16;
         let read_sta = ((data >> 16) & 0xFFFF) as u16;
         assert_eq!(read_ctl, ctl_value);
-        assert_eq!(read_sta & (PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP),
-            PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP);
+        assert_eq!(
+            read_sta & (PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP),
+            PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP
+        );
     }
 
     #[test]

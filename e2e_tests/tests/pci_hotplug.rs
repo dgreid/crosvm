@@ -503,8 +503,7 @@ fn block_hotplug_two() {
 #[test]
 fn block_hotplug_add_remove_add_impl() {
     let wait_timeout = Duration::from_secs(5);
-    let config = Config::new()
-        .extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
     let mut vm = TestVm::new(config).unwrap();
 
     let disk1 = create_temp_disk(1024 * 1024);
