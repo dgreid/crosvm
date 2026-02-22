@@ -73,6 +73,8 @@ pub use self::pci_hotplug::IntxParameter;
 pub use self::pci_hotplug::NetResourceCarrier;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci_hotplug::ResourceCarrier;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci_hotplug::VhostUserBlockResourceCarrier;
 pub use self::pci_root::PciConfigIo;
 pub use self::pci_root::PciConfigMmio;
 pub use self::pci_root::PciMmioMapper;
