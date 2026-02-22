@@ -14,6 +14,10 @@ use std::time::Instant;
 
 use base::sys::linux::ioctl_with_val;
 use base::test_utils::call_test_with_sudo;
+use fixture::utils::create_vu_block_config;
+use fixture::utils::prepare_disk_img;
+use fixture::vhost_user::CmdType;
+use fixture::vhost_user::VhostUserBackend;
 use fixture::vm::Config;
 use fixture::vm::TestVm;
 use net_util::sys::linux::Tap;
@@ -522,6 +526,63 @@ fn block_hotplug_add_remove_add() {
         |vm| { count_virtio_block_devices(vm) == baseline + 1 },
         wait_timeout
     ));
+
+    drop(vm);
+}
+
+/// Checks vhost-user-block hotplug: add and remove.
+#[test]
+fn vhost_user_block_hotplug_add_remove() {
+    let wait_timeout = Duration::from_secs(5);
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    // Create a temporary disk and start a vhost-user-block backend.
+    let socket = NamedTempFile::new().unwrap();
+    let disk = prepare_disk_img();
+    let vu_config = create_vu_block_config(CmdType::Device, socket.path(), disk.path());
+    let _vu_device = VhostUserBackend::new(vu_config).unwrap();
+
+    // Record baseline count of virtio-block devices (includes root disk).
+    let baseline = count_virtio_block_devices(&mut vm);
+
+    // Hotplug vhost-user-block device.
+    vm.hotplug_vhost_user_block(socket.path().to_str().unwrap())
+        .unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline + 1 },
+        wait_timeout
+    ));
+
+    // Remove hotplugged device.
+    vm.remove_vhost_user_block(1).unwrap();
+    assert!(poll_until_true(
+        &mut vm,
+        |vm| { count_virtio_block_devices(vm) == baseline },
+        wait_timeout
+    ));
+
+    drop(vm);
+}
+
+/// Checks that hotplugging a vhost-user-block device with an invalid socket path returns an
+/// error without crashing crosvm.
+#[test]
+fn vhost_user_block_hotplug_invalid_socket() {
+    let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
+    let mut vm = TestVm::new(config).unwrap();
+
+    // Attempt to hotplug with a non-existent socket path. This should fail gracefully.
+    let result = vm.hotplug_vhost_user_block("/nonexistent/invalid.sock");
+    assert!(
+        result.is_err(),
+        "Expected error when hotplugging with invalid socket path"
+    );
+
+    // Verify the VM is still alive and responsive.
+    let guest_result = vm.exec_in_guest("echo ok").unwrap();
+    assert!(guest_result.stdout.contains("ok"));
 
     drop(vm);
 }
