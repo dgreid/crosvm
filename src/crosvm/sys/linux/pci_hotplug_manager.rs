@@ -810,62 +810,77 @@ impl PciHotPlugManager {
             WorkerResponse::InvalidCommand(e) => Err(e),
             r => bail!("Unexpected response from worker: {:?}", &r),
         }?;
+        let jail_warden = &self.jail_warden;
         let port_stub = self
             .port_stubs
             .get_mut(&pci_address)
             .context("Cannot find port")?;
         let downstream_bus = port_stub.downstream_bus;
+        let mut allocated_addresses: Vec<PciAddress> = Vec::new();
         let mut devices = Vec::new();
-        for (func_num, mut resource_carrier) in resource_carriers.into_iter().enumerate() {
-            let device_address = PciAddress::new(0, downstream_bus as u32, 0, func_num as u32)?;
-            let hotplug_key = HotPlugKey::GuestDevice {
-                guest_addr: device_address,
-            };
-            resource_carrier.allocate_address(device_address, resources)?;
-            let irq_evt = IrqLevelEvent::new()?;
-            let (pin, irq_num) = match downstream_bus % 4 {
-                0 => (PciInterruptPin::IntA, 0),
-                1 => (PciInterruptPin::IntB, 1),
-                2 => (PciInterruptPin::IntC, 2),
-                _ => (PciInterruptPin::IntD, 3),
-            };
-            resource_carrier.assign_irq(irq_evt.try_clone()?, pin, irq_num);
-            let (proxy_device, pid) = self
-                .jail_warden
-                .make_proxy_device(resource_carrier)
-                .context("make proxy device")?;
-            let device_id = proxy_device.lock().device_id();
-            let device_name = proxy_device.lock().debug_label();
-            linux.irq_chip.as_irq_chip_mut().register_level_irq_event(
-                irq_num,
-                &irq_evt,
-                IrqEventSource {
-                    device_id,
-                    queue_id: 0,
-                    device_name: device_name.clone(),
-                },
-            )?;
-            let pid: u32 = pid.try_into().context("fork fail")?;
-            if pid > 0 {
-                linux.pid_debug_label_map.insert(pid, device_name);
+        let setup_result = (|| -> Result<()> {
+            for (func_num, mut resource_carrier) in resource_carriers.into_iter().enumerate() {
+                let device_address = PciAddress::new(0, downstream_bus as u32, 0, func_num as u32)?;
+                let hotplug_key = HotPlugKey::GuestDevice {
+                    guest_addr: device_address,
+                };
+                resource_carrier.allocate_address(device_address, resources)?;
+                allocated_addresses.push(device_address);
+                let irq_evt = IrqLevelEvent::new()?;
+                let (pin, irq_num) = match downstream_bus % 4 {
+                    0 => (PciInterruptPin::IntA, 0),
+                    1 => (PciInterruptPin::IntB, 1),
+                    2 => (PciInterruptPin::IntC, 2),
+                    _ => (PciInterruptPin::IntD, 3),
+                };
+                resource_carrier.assign_irq(irq_evt.try_clone()?, pin, irq_num);
+                let (proxy_device, pid) = jail_warden
+                    .make_proxy_device(resource_carrier)
+                    .context("make proxy device")?;
+                let device_id = proxy_device.lock().device_id();
+                let device_name = proxy_device.lock().debug_label();
+                linux.irq_chip.as_irq_chip_mut().register_level_irq_event(
+                    irq_num,
+                    &irq_evt,
+                    IrqEventSource {
+                        device_id,
+                        queue_id: 0,
+                        device_name: device_name.clone(),
+                    },
+                )?;
+                port_stub
+                    .devices
+                    .insert(device_address, RecoverableResource { irq_num, irq_evt });
+                let pid: u32 = pid.try_into().context("fork fail")?;
+                if pid > 0 {
+                    linux.pid_debug_label_map.insert(pid, device_name);
+                }
+                devices.push(GuestDeviceStub {
+                    pci_addr: device_address,
+                    key: hotplug_key,
+                    device: proxy_device,
+                });
             }
-            devices.push(GuestDeviceStub {
-                pci_addr: device_address,
-                key: hotplug_key,
-                device: proxy_device,
-            });
-            port_stub
-                .devices
-                .insert(device_address, RecoverableResource { irq_num, irq_evt });
+            Ok(())
+        })();
+        if let Err(e) = setup_result {
+            cleanup_hotplug_resources(&allocated_addresses, port_stub, resources, linux);
+            return Err(e);
         }
         // Ask worker to schedule hotplug signal.
-        match worker_client.send_worker_command(WorkerCommand::SignalHotPlug(
-            SignalHotPlugCommand::new(pci_address, devices)?,
-        ))? {
-            WorkerResponse::SignalOk => Ok(downstream_bus),
-            WorkerResponse::InvalidCommand(e) => Err(e),
-            r => bail!("Unexpected response from worker: {:?}", &r),
+        let signal_result = (|| -> Result<u8> {
+            match worker_client.send_worker_command(WorkerCommand::SignalHotPlug(
+                SignalHotPlugCommand::new(pci_address, devices)?,
+            ))? {
+                WorkerResponse::SignalOk => Ok(downstream_bus),
+                WorkerResponse::InvalidCommand(e) => Err(e),
+                r => bail!("Unexpected response from worker: {:?}", &r),
+            }
+        })();
+        if signal_result.is_err() {
+            cleanup_hotplug_resources(&allocated_addresses, port_stub, resources, linux);
         }
+        signal_result
     }
 
     /// Removes all hotplugged devices on the hotplug bus.
@@ -917,6 +932,27 @@ impl PciHotPlugManager {
             )?;
         }
         Ok(())
+    }
+}
+
+/// Releases PCI addresses and unregisters IRQ events that were set up during a failed hotplug
+/// attempt. This is a free function to avoid borrow conflicts with `PciHotPlugManager` fields.
+fn cleanup_hotplug_resources<V: VmArch, Vcpu: VcpuArch>(
+    allocated_addresses: &[PciAddress],
+    port_stub: &mut PortManagerStub,
+    resources: &mut SystemAllocator,
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+) {
+    for addr in allocated_addresses {
+        resources.release_pci(*addr);
+        if let Some(recoverable) = port_stub.devices.remove(addr) {
+            if let Err(e) = linux
+                .irq_chip
+                .unregister_level_irq_event(recoverable.irq_num, &recoverable.irq_evt)
+            {
+                error!("Failed to unregister IRQ during hotplug cleanup: {:#}", e);
+            }
+        }
     }
 }
 
