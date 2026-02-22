@@ -3048,6 +3048,101 @@ fn add_hotplug_block<V: VmArch, Vcpu: VcpuArch>(
     )
 }
 
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_vhost_user_block_command<V: VmArch, Vcpu: VcpuArch>(
+    cmd: vm_control::VhostUserBlockControlCommand,
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    hotplug_manager: &mut PciHotPlugManager,
+    vm_evt_wrtube: &SendTube,
+) -> VmResponse {
+    match cmd {
+        vm_control::VhostUserBlockControlCommand::AddVhostUserBlock { socket_path } => {
+            handle_hotplug_vhost_user_block_add(
+                linux,
+                sys_allocator,
+                add_control_tube,
+                hotplug_manager,
+                &socket_path,
+                vm_evt_wrtube,
+            )
+        }
+        vm_control::VhostUserBlockControlCommand::RemoveVhostUserBlock(bus) => {
+            handle_hotplug_net_remove(linux, sys_allocator, hotplug_manager, bus)
+        }
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_vhost_user_block_add<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    hotplug_manager: &mut PciHotPlugManager,
+    socket_path: &str,
+    vm_evt_wrtube: &SendTube,
+) -> VmResponse {
+    let ret = add_hotplug_vhost_user_block(
+        linux,
+        sys_allocator,
+        add_control_tube,
+        hotplug_manager,
+        socket_path,
+        vm_evt_wrtube,
+    );
+
+    match ret {
+        Ok(pci_bus) => VmResponse::PciHotPlugResponse { bus: pci_bus },
+        Err(e) => VmResponse::ErrString(format!("{e:?}")),
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn add_hotplug_vhost_user_block<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    add_control_tube: &mut impl FnMut(AnyControlTube),
+    hotplug_manager: &mut PciHotPlugManager,
+    socket_path: &str,
+    vm_evt_wrtube: &SendTube,
+) -> Result<u8> {
+    use devices::VhostUserBlockResourceCarrier;
+    use std::path::PathBuf;
+
+    let (msi_host_tube, msi_device_tube) = Tube::pair().context("create tube")?;
+    add_control_tube(AnyControlTube::IrqTube(msi_host_tube));
+    let (ioevent_host_tube, ioevent_device_tube) = Tube::pair().context("create tube")?;
+    let ioevent_vm_memory_client = VmMemoryClient::new(ioevent_device_tube);
+    add_control_tube(
+        VmMemoryTube {
+            tube: ioevent_host_tube,
+            expose_with_viommu: false,
+        }
+        .into(),
+    );
+    let (vm_control_host_tube, vm_control_device_tube) = Tube::pair().context("create tube")?;
+    add_control_tube(TaggedControlTube::Vm(vm_control_host_tube).into());
+
+    let vm_evt_wrtube_clone = vm_evt_wrtube
+        .try_clone()
+        .context("failed to clone vm event tube")?;
+
+    let carrier = VhostUserBlockResourceCarrier::new(
+        PathBuf::from(socket_path),
+        None, // max_queue_size
+        msi_device_tube,
+        ioevent_vm_memory_client,
+        vm_control_device_tube,
+        vm_evt_wrtube_clone,
+    );
+    hotplug_manager.hotplug_device(
+        vec![ResourceCarrier::VhostUserBlock(carrier)],
+        linux,
+        sys_allocator,
+    )
+}
+
 #[cfg(target_arch = "x86_64")]
 fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
     linux: &RunnableLinuxVm<V, Vcpu>,
@@ -3349,6 +3444,8 @@ struct ControlLoopState<'a, V: VmArch, Vcpu: VcpuArch> {
     guest_suspended_cvar: &'a Option<Arc<(Mutex<bool>, Condvar)>>,
     #[cfg(feature = "pci-hotplug")]
     hotplug_manager: &'a mut Option<PciHotPlugManager>,
+    #[cfg(feature = "pci-hotplug")]
+    vm_evt_wrtube: &'a SendTube,
     #[cfg(feature = "swap")]
     swap_controller: &'a mut Option<SwapController>,
     vcpu_handles: &'a [(JoinHandle<()>, mpsc::Sender<vm_control::VcpuControl>)],
@@ -3458,6 +3555,21 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     &mut state.sys_allocator.lock(),
                     &mut add_control_tube,
                     hotplug_manager,
+                )
+            } else {
+                VmResponse::ErrString("PCI hotplug is not enabled.".to_owned())
+            }
+        }
+        #[cfg(feature = "pci-hotplug")]
+        VmRequest::HotPlugVhostUserBlockCommand(vhost_user_block_cmd) => {
+            if let Some(hotplug_manager) = state.hotplug_manager.as_mut() {
+                handle_hotplug_vhost_user_block_command(
+                    vhost_user_block_cmd,
+                    state.linux,
+                    &mut state.sys_allocator.lock(),
+                    &mut add_control_tube,
+                    hotplug_manager,
+                    state.vm_evt_wrtube,
                 )
             } else {
                 VmResponse::ErrString("PCI hotplug is not enabled.".to_owned())
@@ -4574,6 +4686,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             guest_suspended_cvar: &guest_suspended_cvar,
                             #[cfg(feature = "pci-hotplug")]
                             hotplug_manager: &mut hotplug_manager,
+                            #[cfg(feature = "pci-hotplug")]
+                            vm_evt_wrtube: &vm_evt_wrtube,
                             #[cfg(feature = "swap")]
                             swap_controller: &mut swap_controller,
                             vcpu_handles: &vcpu_handles,

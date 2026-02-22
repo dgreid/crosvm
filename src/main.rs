@@ -81,6 +81,10 @@ use vm_control::client::do_swap_status;
 use vm_control::client::do_usb_attach;
 use vm_control::client::do_usb_detach;
 use vm_control::client::do_usb_list;
+#[cfg(feature = "pci-hotplug")]
+use vm_control::client::do_vhost_user_block_add;
+#[cfg(feature = "pci-hotplug")]
+use vm_control::client::do_vhost_user_block_remove;
 #[cfg(feature = "balloon")]
 use vm_control::client::handle_request;
 use vm_control::client::vms_request;
@@ -361,6 +365,30 @@ fn modify_virtio_block(cmd: cmdline::VirtioBlockCommand) -> std::result::Result<
                 error!("Block device remove failed: {:?}", &e);
             })?;
             info!("Block device removed from PCI bus {}", &c.bus);
+        }
+    };
+
+    Ok(())
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn modify_vhost_user_block(cmd: cmdline::VhostUserBlockCommand) -> std::result::Result<(), ()> {
+    match cmd.command {
+        cmdline::VhostUserBlockSubCommand::Add(c) => {
+            let bus_num =
+                do_vhost_user_block_add(&c.socket_path, c.vm_socket_path).map_err(|e| {
+                    error!("{}", &e);
+                })?;
+            info!(
+                "Vhost-user-block device {} plugged to PCI bus {}",
+                &c.socket_path, bus_num
+            );
+        }
+        cmdline::VhostUserBlockSubCommand::Remove(c) => {
+            do_vhost_user_block_remove(c.bus, &c.vm_socket_path).map_err(|e| {
+                error!("Vhost-user-block device remove failed: {:?}", &e);
+            })?;
+            info!("Vhost-user-block device removed from PCI bus {}", &c.bus);
         }
     };
 
@@ -914,6 +942,9 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                     #[cfg(feature = "pci-hotplug")]
                     CrossPlatformCommands::VirtioBlock(cmd) => modify_virtio_block(cmd)
                         .map_err(|_| anyhow!("virtio-block subcommand failed")),
+                    #[cfg(feature = "pci-hotplug")]
+                    CrossPlatformCommands::VhostUserBlock(cmd) => modify_vhost_user_block(cmd)
+                        .map_err(|_| anyhow!("vhost-user-block subcommand failed")),
                     CrossPlatformCommands::Snapshot(cmd) => {
                         snapshot_vm(cmd).map_err(|_| anyhow!("snapshot subcommand failed"))
                     }

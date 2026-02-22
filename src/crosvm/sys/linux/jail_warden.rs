@@ -16,7 +16,6 @@ use base::error;
 use base::info;
 use base::syslog;
 use base::AsRawDescriptor;
-#[cfg(feature = "swap")]
 use base::AsRawDescriptors;
 use base::Pid;
 use base::Tube;
@@ -95,6 +94,9 @@ impl JailWardenImpl {
         metrics::push_descriptors(&mut keep_rds);
         let (main_tube, worker_tube) = Tube::pair()?;
         keep_rds.push(worker_tube.as_raw_descriptor());
+        // Guest memory fds must be kept so that devices forked from the jail warden
+        // can pass them to vhost-user backends via SET_MEM_TABLE.
+        keep_rds.append(&mut guest_memory.as_raw_descriptors());
         #[cfg(feature = "swap")]
         if let Some(swap_device_helper) = &swap_device_helper {
             keep_rds.extend(swap_device_helper.as_raw_descriptors());
@@ -257,6 +259,7 @@ fn jail_worker_process(
                         cros_tracing::push_descriptors!(&mut keep_rds);
                         metrics::push_descriptors(&mut keep_rds);
                         keep_rds.extend(pci_device.keep_rds());
+                        keep_rds.append(&mut guest_memory.as_raw_descriptors());
                         let proxy_device_primitive = ChildProcIntf::new(
                             pci_device,
                             jail,
