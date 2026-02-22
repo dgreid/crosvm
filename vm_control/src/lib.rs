@@ -258,6 +258,19 @@ pub enum BlockControlCommand {
     RemoveBlock(u8),
 }
 
+/// Vhost-user-block control commands for adding and removing vhost-user-block devices.
+#[cfg(feature = "pci-hotplug")]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum VhostUserBlockControlCommand {
+    /// Add a vhost-user-block device by socket path.
+    AddVhostUserBlock {
+        /// Path to the vhost-user backend socket.
+        socket_path: String,
+    },
+    /// Remove a hotplugged vhost-user-block device on the given bus number.
+    RemoveVhostUserBlock(u8),
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UsbControlCommand {
     AttachDevice {
@@ -1632,6 +1645,9 @@ pub enum VmRequest {
     /// Command to add/remove block device as virtio-pci device
     #[cfg(feature = "pci-hotplug")]
     HotPlugBlockCommand(BlockControlCommand),
+    /// Command to add/remove vhost-user-block device as virtio-pci device
+    #[cfg(feature = "pci-hotplug")]
+    HotPlugVhostUserBlockCommand(VhostUserBlockControlCommand),
     /// Command to Snapshot devices
     Snapshot(SnapshotCommand),
     /// Register for event notification
@@ -2361,6 +2377,10 @@ impl VmRequest {
             }
             #[cfg(feature = "pci-hotplug")]
             VmRequest::HotPlugBlockCommand(ref _block_cmd) => {
+                VmResponse::ErrString("hot plug not supported".to_owned())
+            }
+            #[cfg(feature = "pci-hotplug")]
+            VmRequest::HotPlugVhostUserBlockCommand(ref _cmd) => {
                 VmResponse::ErrString("hot plug not supported".to_owned())
             }
             VmRequest::Snapshot(SnapshotCommand::Take {
