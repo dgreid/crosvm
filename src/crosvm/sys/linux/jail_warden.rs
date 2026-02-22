@@ -42,8 +42,10 @@ use vm_memory::GuestMemory;
 
 use crate::crosvm::sys::linux::pci_hotplug_helpers::build_hotplug_block_device;
 use crate::crosvm::sys::linux::pci_hotplug_helpers::build_hotplug_net_device;
+use crate::crosvm::sys::linux::pci_hotplug_helpers::build_hotplug_vhost_user_block_device;
 use crate::crosvm::sys::linux::pci_hotplug_helpers::BlockLocalParameters;
 use crate::crosvm::sys::linux::pci_hotplug_helpers::NetLocalParameters;
+use crate::crosvm::sys::linux::pci_hotplug_helpers::VhostUserBlockLocalParameters;
 use crate::crosvm::sys::linux::VirtioDeviceBuilder;
 use crate::Config;
 
@@ -188,46 +190,91 @@ fn jail_worker_process(
                 break 'worker_loop;
             }
             JailCommand::ForkDevice(hot_plug_device_builder) => {
-                let (pci_device, jail) = match hot_plug_device_builder {
-                    ResourceCarrier::VirtioNet(net_resource_carrier) => {
-                        let net_param = &net_resource_carrier.net_param;
-                        let jail = net_param
-                            .create_jail(config.jail_config.as_ref(), VirtioDeviceType::Regular)?
-                            .ok_or(anyhow!("no jail created"))?;
-                        let net_local_parameters =
-                            NetLocalParameters::new(guest_memory.clone(), config.protection_type);
-                        let pci_device =
-                            build_hotplug_net_device(net_resource_carrier, net_local_parameters)?;
-                        (pci_device, jail)
-                    }
-                    ResourceCarrier::VirtioBlock(block_resource_carrier) => {
-                        let seccomp_policy = VirtioDeviceType::Regular.seccomp_policy_file("block");
-                        let jail = jail::simple_jail(config.jail_config.as_ref(), &seccomp_policy)?
-                            .ok_or(anyhow!("no jail created"))?;
-                        let block_local_parameters =
-                            BlockLocalParameters::new(guest_memory.clone(), config.protection_type);
-                        let pci_device = build_hotplug_block_device(
-                            block_resource_carrier,
-                            block_local_parameters,
+                let result = (|| -> Result<_> {
+                        let (pci_device, jail) = match hot_plug_device_builder {
+                            ResourceCarrier::VirtioNet(net_resource_carrier) => {
+                                let net_param = &net_resource_carrier.net_param;
+                                let jail = net_param
+                                    .create_jail(
+                                        config.jail_config.as_ref(),
+                                        VirtioDeviceType::Regular,
+                                    )?
+                                    .ok_or(anyhow!("no jail created"))?;
+                                let net_local_parameters = NetLocalParameters::new(
+                                    guest_memory.clone(),
+                                    config.protection_type,
+                                );
+                                let pci_device = build_hotplug_net_device(
+                                    net_resource_carrier,
+                                    net_local_parameters,
+                                )?;
+                                (pci_device, jail)
+                            }
+                            ResourceCarrier::VirtioBlock(block_resource_carrier) => {
+                                let seccomp_policy =
+                                    VirtioDeviceType::Regular.seccomp_policy_file("block");
+                                let jail = jail::simple_jail(
+                                    config.jail_config.as_ref(),
+                                    &seccomp_policy,
+                                )?
+                                .ok_or(anyhow!("no jail created"))?;
+                                let block_local_parameters = BlockLocalParameters::new(
+                                    guest_memory.clone(),
+                                    config.protection_type,
+                                );
+                                let pci_device = build_hotplug_block_device(
+                                    block_resource_carrier,
+                                    block_local_parameters,
+                                )?;
+                                (pci_device, jail)
+                            }
+                            ResourceCarrier::VhostUserBlock(vhost_user_block_carrier) => {
+                                let seccomp_policy =
+                                    VirtioDeviceType::VhostUser.seccomp_policy_file("block");
+                                let jail = jail::simple_jail(
+                                    config.jail_config.as_ref(),
+                                    &seccomp_policy,
+                                )?
+                                .ok_or(anyhow!("no jail created"))?;
+                                let local_parameters = VhostUserBlockLocalParameters::new(
+                                    guest_memory.clone(),
+                                    config.protection_type,
+                                );
+                                let pci_device = build_hotplug_vhost_user_block_device(
+                                    vhost_user_block_carrier,
+                                    local_parameters,
+                                )?;
+                                (pci_device, jail)
+                            }
+                        };
+                        Ok((pci_device, jail))
+                    })();
+
+                match result {
+                    Ok((pci_device, jail)) => {
+                        let mut keep_rds = vec![];
+                        syslog::push_descriptors(&mut keep_rds);
+                        cros_tracing::push_descriptors!(&mut keep_rds);
+                        metrics::push_descriptors(&mut keep_rds);
+                        keep_rds.extend(pci_device.keep_rds());
+                        let proxy_device_primitive = ChildProcIntf::new(
+                            pci_device,
+                            jail,
+                            keep_rds,
+                            #[cfg(feature = "swap")]
+                            &mut swap_device_helper,
                         )?;
-                        (pci_device, jail)
+                        worker_tube
+                            .send(&JailResponse::ForkDeviceOk(proxy_device_primitive))
+                            .context("send ChildProcIntf failed.")?;
                     }
-                };
-                let mut keep_rds = vec![];
-                syslog::push_descriptors(&mut keep_rds);
-                cros_tracing::push_descriptors!(&mut keep_rds);
-                metrics::push_descriptors(&mut keep_rds);
-                keep_rds.extend(pci_device.keep_rds());
-                let proxy_device_primitive = ChildProcIntf::new(
-                    pci_device,
-                    jail,
-                    keep_rds,
-                    #[cfg(feature = "swap")]
-                    &mut swap_device_helper,
-                )?;
-                worker_tube
-                    .send(&JailResponse::ForkDeviceOk(proxy_device_primitive))
-                    .context("send ChildProcIntf failed.")?;
+                    Err(e) => {
+                        error!("ForkDevice failed: {:#}", e);
+                        worker_tube
+                            .send(&JailResponse::ForkDeviceError(format!("{:#}", e)))
+                            .context("send ForkDeviceError failed.")?;
+                    }
+                }
             }
         }
     }
@@ -271,6 +318,13 @@ impl JailWarden for PermissiveJailWarden {
                 let block_local_parameters =
                     BlockLocalParameters::new(self.guest_memory.clone(), self.protection_type);
                 build_hotplug_block_device(block_resource_carrier, block_local_parameters)?
+            }
+            ResourceCarrier::VhostUserBlock(vhost_user_block_carrier) => {
+                let local_parameters = VhostUserBlockLocalParameters::new(
+                    self.guest_memory.clone(),
+                    self.protection_type,
+                );
+                build_hotplug_vhost_user_block_device(vhost_user_block_carrier, local_parameters)?
             }
         };
         Ok((Arc::new(Mutex::new(pci_device)), 0))
