@@ -173,6 +173,64 @@ pub fn do_block_remove<T: AsRef<Path> + std::fmt::Debug>(
     anyhow::bail!("Unsupported: pci-hotplug feature disabled");
 }
 
+#[cfg(feature = "pci-hotplug")]
+/// Send a `VmRequest` for vhost-user-block device hotplug that expects
+/// `VmResponse::PciHotPlugResponse`
+pub fn do_vhost_user_block_add<T: AsRef<Path> + std::fmt::Debug>(
+    socket_path: &str,
+    vm_socket_path: T,
+) -> AnyHowResult<u8> {
+    let request = VmRequest::HotPlugVhostUserBlockCommand(
+        crate::VhostUserBlockControlCommand::AddVhostUserBlock {
+            socket_path: socket_path.to_owned(),
+        },
+    );
+    let response =
+        handle_request(&request, vm_socket_path).map_err(|()| anyhow!("socket error: "))?;
+    match response {
+        VmResponse::PciHotPlugResponse { bus } => Ok(bus),
+        e => Err(anyhow!("Unexpected response: {:#}", e)),
+    }
+}
+
+#[cfg(not(feature = "pci-hotplug"))]
+/// Send a `VmRequest` for vhost-user-block device hotplug that expects
+/// `VmResponse::PciHotPlugResponse`
+pub fn do_vhost_user_block_add<T: AsRef<Path> + std::fmt::Debug>(
+    _socket_path: &str,
+    _vm_socket_path: T,
+) -> AnyHowResult<u8> {
+    anyhow::bail!("Unsupported: pci-hotplug feature disabled");
+}
+
+#[cfg(feature = "pci-hotplug")]
+/// Send a `VmRequest` for removing hotplugged vhost-user-block device that expects
+/// `VmResponse::Ok`
+pub fn do_vhost_user_block_remove<T: AsRef<Path> + std::fmt::Debug>(
+    bus_num: u8,
+    vm_socket_path: T,
+) -> AnyHowResult<()> {
+    let request = VmRequest::HotPlugVhostUserBlockCommand(
+        crate::VhostUserBlockControlCommand::RemoveVhostUserBlock(bus_num),
+    );
+    let response =
+        handle_request(&request, vm_socket_path).map_err(|()| anyhow!("socket error: "))?;
+    match response {
+        VmResponse::Ok => Ok(()),
+        e => Err(anyhow!("Unexpected response: {:#}", e)),
+    }
+}
+
+#[cfg(not(feature = "pci-hotplug"))]
+/// Send a `VmRequest` for removing hotplugged vhost-user-block device that expects
+/// `VmResponse::Ok`
+pub fn do_vhost_user_block_remove<T: AsRef<Path> + std::fmt::Debug>(
+    _bus_num: u8,
+    _vm_socket_path: T,
+) -> AnyHowResult<()> {
+    anyhow::bail!("Unsupported: pci-hotplug feature disabled");
+}
+
 pub fn do_usb_attach<T: AsRef<Path> + std::fmt::Debug>(
     socket_path: T,
     dev_path: &Path,
