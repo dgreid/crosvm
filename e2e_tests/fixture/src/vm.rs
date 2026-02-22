@@ -582,6 +582,28 @@ impl TestVm {
             .map(|_| ())
     }
 
+    /// Hotplug a vhost-user-block device by backend socket path.
+    pub fn hotplug_vhost_user_block(&mut self, socket_path: &str) -> Result<()> {
+        self.sys
+            .crosvm_command(
+                "vhost-user-block",
+                vec!["add".to_owned(), socket_path.to_owned()],
+                self.sudo,
+            )
+            .map(|_| ())
+    }
+
+    /// Remove hotplugged vhost-user-block device on bus.
+    pub fn remove_vhost_user_block(&mut self, bus_num: u8) -> Result<()> {
+        self.sys
+            .crosvm_command(
+                "vhost-user-block",
+                vec!["remove".to_owned(), bus_num.to_string()],
+                self.sudo,
+            )
+            .map(|_| ())
+    }
+
     pub fn stop(&mut self) -> Result<()> {
         self.sys
             .crosvm_command("stop", vec![], self.sudo)
