@@ -124,6 +124,8 @@ pub use self::pci::PreferredIrq;
 pub use self::pci::ResourceCarrier;
 pub use self::pci::StubPciDevice;
 pub use self::pci::StubPciParameters;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci::VhostUserBlockResourceCarrier;
 pub use self::pflash::Pflash;
 pub use self::pflash::PflashParameters;
 pub use self::pl030::Pl030;

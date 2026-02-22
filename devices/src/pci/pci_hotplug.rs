@@ -6,9 +6,12 @@
 
 #![deny(missing_docs)]
 
+use std::path::PathBuf;
+
 use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::RawDescriptor;
+use base::SendTube;
 use base::Tube;
 use serde::Deserialize;
 use serde::Serialize;
@@ -30,6 +33,7 @@ macro_rules! carrier_delegate {
         match $self {
             ResourceCarrier::VirtioNet(c) => c.$method($($arg),*),
             ResourceCarrier::VirtioBlock(c) => c.$method($($arg),*),
+            ResourceCarrier::VhostUserBlock(c) => c.$method($($arg),*),
         }
     }
 }
@@ -44,6 +48,8 @@ pub enum ResourceCarrier {
     VirtioNet(NetResourceCarrier),
     /// virtio-block device.
     VirtioBlock(BlockResourceCarrier),
+    /// vhost-user-block device.
+    VhostUserBlock(VhostUserBlockResourceCarrier),
 }
 
 impl ResourceCarrier {
@@ -237,6 +243,97 @@ impl BlockResourceCarrier {
         let mut keep_rds = vec![
             self.msi_device_tube.as_raw_descriptor(),
             self.ioevent_vm_memory_client.as_raw_descriptor(),
+        ];
+        if let Some(intx_parameter) = &self.intx_parameter {
+            keep_rds.extend(intx_parameter.irq_evt.as_raw_descriptors());
+        }
+        keep_rds
+    }
+
+    fn allocate_address(
+        &mut self,
+        preferred_address: PciAddress,
+        resources: &mut resources::SystemAllocator,
+    ) -> Result<()> {
+        match self.pci_address {
+            None => {
+                if resources.reserve_pci(preferred_address, self.debug_label()) {
+                    self.pci_address = Some(preferred_address);
+                } else {
+                    return Err(PciDeviceError::PciAllocationFailed);
+                }
+            }
+            Some(pci_address) => {
+                if pci_address != preferred_address {
+                    return Err(PciDeviceError::PciAllocationFailed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
+        self.intx_parameter = Some(IntxParameter {
+            irq_evt,
+            pin,
+            irq_num,
+        });
+    }
+}
+
+/// A VhostUserBlockResourceCarrier is a ResourceCarrier specialization for vhost-user-block
+/// devices.
+#[derive(Serialize, Deserialize)]
+pub struct VhostUserBlockResourceCarrier {
+    /// Socket path for connecting to the vhost-user backend
+    pub socket_path: PathBuf,
+    /// Optional maximum queue size
+    pub max_queue_size: Option<u16>,
+    /// msi_device_tube for VirtioPciDevice constructor
+    pub msi_device_tube: Tube,
+    /// ioevent_vm_memory_client for VirtioPciDevice constructor
+    pub ioevent_vm_memory_client: VmMemoryClient,
+    /// pci_address for the hotplugged device
+    pub pci_address: Option<PciAddress>,
+    /// intx_parameter for assign_irq
+    pub intx_parameter: Option<IntxParameter>,
+    /// vm_control_tube for VirtioPciDevice constructor
+    pub vm_control_tube: Tube,
+    /// vm_evt_wrtube for signaling backend crashes to the main loop
+    pub vm_evt_wrtube: SendTube,
+}
+
+impl VhostUserBlockResourceCarrier {
+    /// Constructs VhostUserBlockResourceCarrier.
+    pub fn new(
+        socket_path: PathBuf,
+        max_queue_size: Option<u16>,
+        msi_device_tube: Tube,
+        ioevent_vm_memory_client: VmMemoryClient,
+        vm_control_tube: Tube,
+        vm_evt_wrtube: SendTube,
+    ) -> Self {
+        Self {
+            socket_path,
+            max_queue_size,
+            msi_device_tube,
+            ioevent_vm_memory_client,
+            pci_address: None,
+            intx_parameter: None,
+            vm_control_tube,
+            vm_evt_wrtube,
+        }
+    }
+
+    fn debug_label(&self) -> String {
+        "vhost-user-block".to_owned()
+    }
+
+    fn keep_rds(&self) -> Vec<RawDescriptor> {
+        let mut keep_rds = vec![
+            self.msi_device_tube.as_raw_descriptor(),
+            self.ioevent_vm_memory_client.as_raw_descriptor(),
+            self.vm_evt_wrtube.as_raw_descriptor(),
         ];
         if let Some(intx_parameter) = &self.intx_parameter {
             keep_rds.extend(intx_parameter.irq_evt.as_raw_descriptors());
