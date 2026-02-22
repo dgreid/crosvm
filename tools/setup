@@ -4,8 +4,30 @@
 # found in the LICENSE file.
 set -ex
 
-$(dirname $0)/deps/install-x86_64-debs
-$(dirname $0)/deps/install-x86_64-other
+DEPS_DIR="$(dirname $0)/deps"
+
+# Detect distro from /etc/os-release
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+else
+    echo >&2 "ERROR: /etc/os-release not found. Cannot detect distribution."
+    exit 1
+fi
+
+case "$ID" in
+    ubuntu|debian)
+        "$DEPS_DIR/install-x86_64-debs"
+        ;;
+    arch)
+        "$DEPS_DIR/install-x86_64-arch"
+        ;;
+    *)
+        echo >&2 "ERROR: Unsupported distribution '$ID'. Supported: ubuntu, debian, arch."
+        exit 1
+        ;;
+esac
+
+"$DEPS_DIR/install-x86_64-other"
 
 Red='\033[0;31m'
 Reset='\033[0m'

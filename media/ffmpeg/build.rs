@@ -23,7 +23,7 @@ fn main() {
     }
 
     // Match all ffmpeg 6.0+ versions.
-    Config::new()
+    let libavcodec = Config::new()
         .atleast_version("60")
         .probe("libavcodec")
         .unwrap();
@@ -35,6 +35,18 @@ fn main() {
         .atleast_version("7")
         .probe("libswscale")
         .unwrap();
+
+    // FFmpeg 7.x (libavcodec >= 61) renamed FF_PROFILE_* to AV_PROFILE_*.
+    let avcodec_major: u32 = libavcodec
+        .version
+        .split('.')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    if avcodec_major >= 61 {
+        println!("cargo:rustc-cfg=ffmpeg_profile_prefix_av");
+    }
 
     let bindings = bindgen::Builder::default()
         .header("src/bindings.h")

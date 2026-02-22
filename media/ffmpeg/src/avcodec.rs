@@ -18,6 +18,12 @@ use libc::c_int;
 use libc::c_void;
 use thiserror::Error as ThisError;
 
+// FFmpeg 7.x renamed FF_PROFILE_UNKNOWN to AV_PROFILE_UNKNOWN.
+#[cfg(not(ffmpeg_profile_prefix_av))]
+const PROFILE_UNKNOWN: i32 = ffi::FF_PROFILE_UNKNOWN;
+#[cfg(ffmpeg_profile_prefix_av)]
+const PROFILE_UNKNOWN: i32 = ffi::AV_PROFILE_UNKNOWN;
+
 use super::*;
 use crate::ffi::AVPictureType;
 
@@ -305,11 +311,11 @@ impl Iterator for AvProfileIterator {
             None => None,
             Some(profile) => {
                 match profile.profile {
-                    ffi::FF_PROFILE_UNKNOWN => None,
+                    PROFILE_UNKNOWN => None,
                     _ => {
                         // SAFETY:
                         // Safe because we have been initialized to a static, valid profiles array
-                        // which is terminated by FF_PROFILE_UNKNOWN.
+                        // which is terminated by PROFILE_UNKNOWN.
                         self.0 = unsafe { self.0.offset(1) };
                         Some(AvProfile(profile))
                     }

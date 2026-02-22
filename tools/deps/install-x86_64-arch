@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Copyright 2025 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+set -ex
+
+sudo pacman -S --needed --noconfirm \
+    ca-certificates \
+    clang \
+    curl \
+    dbus \
+    expect \
+    ffmpeg \
+    gcc \
+    git \
+    glib2 \
+    jq \
+    libcap \
+    libdrm \
+    libepoxy \
+    libguestfs \
+    libslirp \
+    libva \
+    libxext \
+    lld \
+    make \
+    meson \
+    mypy \
+    nasm \
+    ninja \
+    nmap \
+    openssl \
+    pkgconf \
+    protobuf \
+    python \
+    python-black \
+    python-pip \
+    python-pipx \
+    python-rich \
+    qemu-system-x86 \
+    rsync \
+    screen \
+    strace \
+    tmux \
+    wayland \
+    wayland-protocols \
+    wget
+
+# AUR packages require yay
+if ! command -v yay &>/dev/null; then
+    echo >&2 "ERROR: yay is required to install AUR packages (cloud-image-utils, python-argh)."
+    echo >&2 "Install yay from https://github.com/Jguer/yay and re-run this script."
+    exit 1
+fi
+
+yay -S --needed --noconfirm \
+    cloud-image-utils \
+    python-argh
