@@ -382,7 +382,18 @@ impl VirtioDevice for VhostUserFrontend {
     }
 
     fn keep_rds(&self) -> Vec<RawDescriptor> {
-        Vec::new()
+        let mut rds = Vec::new();
+        // Keep the vhost-user backend connection socket alive across the fork.
+        rds.push(
+            self.backend_client
+                .get_read_notifier()
+                .as_raw_descriptor(),
+        );
+        rds.push(self.vm_evt_wrtube.as_raw_descriptor());
+        if let Some(handler) = &self.backend_req_handler {
+            rds.push(handler.as_raw_descriptor());
+        }
+        rds
     }
 
     fn device_type(&self) -> DeviceType {
