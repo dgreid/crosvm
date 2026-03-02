@@ -2948,7 +2948,7 @@ fn handle_hotplug_net_command(
             &tap_name,
         ),
         NetControlCommand::RemoveTap(bus) => {
-            handle_hotplug_net_remove(linux, sys_allocator, hotplug_manager, bus)
+            handle_hotplug_device_remove(linux, sys_allocator, hotplug_manager, bus)
         }
     }
 }
@@ -2988,7 +2988,7 @@ fn handle_hotplug_net_add(
 }
 
 #[cfg(feature = "pci-hotplug")]
-fn handle_hotplug_net_remove(
+fn handle_hotplug_device_remove(
     linux: &mut RunnableLinuxVm,
     sys_allocator: &mut SystemAllocator,
     hotplug_manager: &mut PciHotPlugManager,
