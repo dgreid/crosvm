@@ -2803,7 +2803,7 @@ fn handle_hotplug_net_command<V: VmArch, Vcpu: VcpuArch>(
             &tap_name,
         ),
         NetControlCommand::RemoveTap(bus) => {
-            handle_hotplug_net_remove(linux, sys_allocator, hotplug_manager, bus)
+            handle_hotplug_device_remove(linux, sys_allocator, hotplug_manager, bus)
         }
     }
 }
@@ -2843,7 +2843,7 @@ fn handle_hotplug_net_add<V: VmArch, Vcpu: VcpuArch>(
 }
 
 #[cfg(feature = "pci-hotplug")]
-fn handle_hotplug_net_remove<V: VmArch, Vcpu: VcpuArch>(
+fn handle_hotplug_device_remove<V: VmArch, Vcpu: VcpuArch>(
     linux: &mut RunnableLinuxVm<V, Vcpu>,
     sys_allocator: &mut SystemAllocator,
     hotplug_manager: &mut PciHotPlugManager,
