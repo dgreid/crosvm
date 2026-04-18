@@ -371,3 +371,197 @@ impl VhostUserBlockResourceCarrier {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use resources::AddressRange;
+    use resources::SystemAllocator;
+    use resources::SystemAllocatorConfig;
+
+    use super::*;
+    use crate::virtio::NetParametersMode;
+
+    fn test_allocator() -> SystemAllocator {
+        SystemAllocator::new(
+            SystemAllocatorConfig {
+                io: Some(AddressRange {
+                    start: 0x1000,
+                    end: 0xffff,
+                }),
+                low_mmio: AddressRange {
+                    start: 0x3000_0000,
+                    end: 0x3000_ffff,
+                },
+                high_mmio: AddressRange {
+                    start: 0x1_0000_0000,
+                    end: 0x1_ffff_ffff,
+                },
+                platform_mmio: None,
+                first_irq: 5,
+            },
+            None,
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn test_addr() -> PciAddress {
+        PciAddress {
+            bus: 1,
+            dev: 0,
+            func: 0,
+        }
+    }
+
+    fn net_params() -> NetParameters {
+        NetParameters {
+            mode: NetParametersMode::TapName {
+                tap_name: "t".to_owned(),
+                mac: None,
+            },
+            vq_pairs: None,
+            vhost_net: None,
+            packed_queue: false,
+            pci_address: None,
+            mrg_rxbuf: false,
+        }
+    }
+
+    fn new_net_carrier() -> NetResourceCarrier {
+        let (_msi_h, msi_d) = Tube::pair().unwrap();
+        let (_io_h, io_d) = Tube::pair().unwrap();
+        let (_vmc_h, vmc_d) = Tube::pair().unwrap();
+        NetResourceCarrier::new(net_params(), msi_d, VmMemoryClient::new(io_d), vmc_d)
+    }
+
+    fn new_block_carrier() -> BlockResourceCarrier {
+        let (_msi_h, msi_d) = Tube::pair().unwrap();
+        let (_io_h, io_d) = Tube::pair().unwrap();
+        let (_vmc_h, vmc_d) = Tube::pair().unwrap();
+        BlockResourceCarrier::new(
+            DiskOption::default(),
+            msi_d,
+            VmMemoryClient::new(io_d),
+            vmc_d,
+        )
+    }
+
+    fn new_vhost_user_block_carrier() -> VhostUserBlockResourceCarrier {
+        let (_msi_h, msi_d) = Tube::pair().unwrap();
+        let (_io_h, io_d) = Tube::pair().unwrap();
+        let (_vmc_h, vmc_d) = Tube::pair().unwrap();
+        let (_evt_h, evt_d) = Tube::pair().unwrap();
+        let evt_send = evt_d.try_clone_send_tube().unwrap();
+        VhostUserBlockResourceCarrier::new(
+            PathBuf::from("/tmp/test.sock"),
+            None,
+            msi_d,
+            VmMemoryClient::new(io_d),
+            vmc_d,
+            evt_send,
+        )
+    }
+
+    #[test]
+    fn debug_labels() {
+        assert_eq!(
+            ResourceCarrier::VirtioNet(new_net_carrier()).debug_label(),
+            "virtio-net"
+        );
+        assert_eq!(
+            ResourceCarrier::VirtioBlock(new_block_carrier()).debug_label(),
+            "virtio-block"
+        );
+        assert_eq!(
+            ResourceCarrier::VhostUserBlock(new_vhost_user_block_carrier()).debug_label(),
+            "vhost-user-block"
+        );
+    }
+
+    #[test]
+    fn net_keep_rds_without_irq() {
+        let c = ResourceCarrier::VirtioNet(new_net_carrier());
+        assert_eq!(c.keep_rds().len(), 2);
+    }
+
+    #[test]
+    fn block_keep_rds_without_irq() {
+        let c = ResourceCarrier::VirtioBlock(new_block_carrier());
+        assert_eq!(c.keep_rds().len(), 2);
+    }
+
+    // vhost-user-block uniquely threads vm_evt_wrtube through keep_rds.
+    #[test]
+    fn vhost_user_block_keep_rds_includes_vm_evt_wrtube() {
+        let c = ResourceCarrier::VhostUserBlock(new_vhost_user_block_carrier());
+        assert_eq!(c.keep_rds().len(), 3);
+    }
+
+    #[test]
+    fn keep_rds_includes_irq_after_assign() {
+        let mut c = ResourceCarrier::VhostUserBlock(new_vhost_user_block_carrier());
+        let pre = c.keep_rds().len();
+        c.assign_irq(IrqLevelEvent::new().unwrap(), PciInterruptPin::IntA, 5);
+        assert_eq!(c.keep_rds().len(), pre + 2);
+    }
+
+    #[test]
+    fn allocate_address_reserves_exactly_once() {
+        let mut allocator = test_allocator();
+        let addr = test_addr();
+        let mut c = ResourceCarrier::VirtioBlock(new_block_carrier());
+
+        c.allocate_address(addr, &mut allocator).unwrap();
+        c.allocate_address(addr, &mut allocator).unwrap();
+        assert!(!allocator.reserve_pci(addr, "other".to_owned()));
+    }
+
+    #[test]
+    fn allocate_address_rejects_different_address_after_first() {
+        let mut allocator = test_allocator();
+        let first = test_addr();
+        let second = PciAddress {
+            bus: 1,
+            dev: 1,
+            func: 0,
+        };
+        let mut c = ResourceCarrier::VirtioNet(new_net_carrier());
+
+        c.allocate_address(first, &mut allocator).unwrap();
+        assert!(matches!(
+            c.allocate_address(second, &mut allocator),
+            Err(PciDeviceError::PciAllocationFailed)
+        ));
+    }
+
+    #[test]
+    fn allocate_address_fails_if_slot_taken() {
+        let mut allocator = test_allocator();
+        let addr = test_addr();
+        assert!(allocator.reserve_pci(addr, "sitter".to_owned()));
+
+        let mut c = ResourceCarrier::VhostUserBlock(new_vhost_user_block_carrier());
+        assert!(matches!(
+            c.allocate_address(addr, &mut allocator),
+            Err(PciDeviceError::PciAllocationFailed)
+        ));
+    }
+
+    // Regression for the PCI-address-leak-on-failure path: after a carrier reserves an address and
+    // that address is released (as cleanup_hotplug_resources would do on a failed hotplug), a
+    // fresh carrier must be able to reserve the same slot.
+    #[test]
+    fn released_address_is_reusable_by_next_carrier() {
+        let mut allocator = test_allocator();
+        let addr = test_addr();
+
+        let mut first = ResourceCarrier::VirtioNet(new_net_carrier());
+        first.allocate_address(addr, &mut allocator).unwrap();
+        assert!(!allocator.reserve_pci(addr, "other".to_owned()));
+
+        assert!(allocator.release_pci(addr));
+
+        let mut second = ResourceCarrier::VirtioBlock(new_block_carrier());
+        second.allocate_address(addr, &mut allocator).unwrap();
+    }
+}

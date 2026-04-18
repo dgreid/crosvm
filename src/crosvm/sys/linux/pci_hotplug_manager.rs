@@ -1744,4 +1744,138 @@ mod tests {
             "Expected InvalidCommand when no ports exist, got {response:?}"
         );
     }
+
+    /// Drives a port through AddPort + signal_ready + plug-and-ack so it lands in Occupied(0).
+    fn plug_and_ack(
+        client: &WorkerClient,
+        upstream_addr: PciAddress,
+        bus: u8,
+    ) -> Arc<Mutex<MockPort>> {
+        let port = new_port(bus);
+        let downstream_addr = PciAddress {
+            bus,
+            dev: 0,
+            func: 0,
+        };
+        let hotplug_key = HotPlugKey::GuestDevice {
+            guest_addr: downstream_addr,
+        };
+        let device = GuestDeviceStub {
+            pci_addr: downstream_addr,
+            key: hotplug_key,
+            device: Arc::new(Mutex::new(MockDevice::new())),
+        };
+        let hotplug_command = SignalHotPlugCommand::new(upstream_addr, [device].to_vec()).unwrap();
+
+        assert_eq!(
+            WorkerResponse::AddPortOk,
+            client
+                .send_worker_command(WorkerCommand::AddPort(
+                    upstream_addr,
+                    PortWorkerStub::new(port.clone(), bus).unwrap()
+                ))
+                .unwrap()
+        );
+        port.lock().signal_ready();
+        assert!(poll_until_with_timeout(
+            || client
+                .send_worker_command(WorkerCommand::GetPortState(upstream_addr))
+                .unwrap()
+                == WorkerResponse::GetPortStateOk(PortState::Empty(0)),
+            Duration::from_millis(500)
+        ));
+        assert_eq!(
+            WorkerResponse::SignalOk,
+            client
+                .send_worker_command(WorkerCommand::SignalHotPlug(hotplug_command))
+                .unwrap()
+        );
+        // Occupied(1) → Occupied(0) after guest acks the plug.
+        assert!(poll_until_with_timeout(
+            || client
+                .send_worker_command(WorkerCommand::GetPortState(upstream_addr))
+                .unwrap()
+                == WorkerResponse::GetPortStateOk(PortState::Occupied(1)),
+            Duration::from_millis(500)
+        ));
+        port.lock().signal_cc();
+        assert!(poll_until_with_timeout(
+            || client
+                .send_worker_command(WorkerCommand::GetPortState(upstream_addr))
+                .unwrap()
+                == WorkerResponse::GetPortStateOk(PortState::Occupied(0)),
+            Duration::from_millis(500)
+        ));
+        port
+    }
+
+    // Covers cooperative-unplug happy path: guest acks within the timeout.
+    #[test]
+    fn worker_wait_unplug_complete_guest_acks() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+        let upstream_addr = PciAddress {
+            bus: 0,
+            dev: 6,
+            func: 0,
+        };
+        let bus = 30;
+        let port = plug_and_ack(&client, upstream_addr, bus);
+
+        assert_eq!(
+            WorkerResponse::SignalOk,
+            client
+                .send_worker_command(WorkerCommand::SignalHotUnplug(upstream_addr))
+                .unwrap()
+        );
+
+        // Spawn a thread that acks the unplug after a brief delay, simulating the guest.
+        let port_for_ack = port.clone();
+        let ack_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            port_for_ack.lock().signal_cc();
+        });
+
+        // WaitUnplugComplete blocks until the port drains to Empty(0) or the timeout expires.
+        let resp = client
+            .send_worker_command(WorkerCommand::WaitUnplugComplete(
+                upstream_addr,
+                Duration::from_secs(2),
+            ))
+            .unwrap();
+        assert_eq!(resp, WorkerResponse::UnplugCompleted);
+
+        ack_thread.join().unwrap();
+    }
+
+    // Covers cooperative-unplug fallback: guest never acks, worker must time out so the caller can
+    // fall back to surprise removal.
+    #[test]
+    fn worker_wait_unplug_complete_times_out() {
+        let (rootbus_controller, _rootbus_recvr) = mpsc::channel();
+        let client = WorkerClient::new(rootbus_controller).unwrap();
+        let upstream_addr = PciAddress {
+            bus: 0,
+            dev: 6,
+            func: 1,
+        };
+        let bus = 31;
+        let _port = plug_and_ack(&client, upstream_addr, bus);
+
+        assert_eq!(
+            WorkerResponse::SignalOk,
+            client
+                .send_worker_command(WorkerCommand::SignalHotUnplug(upstream_addr))
+                .unwrap()
+        );
+
+        // Don't signal_cc. Expect UnplugTimedOut when the short timeout elapses.
+        let resp = client
+            .send_worker_command(WorkerCommand::WaitUnplugComplete(
+                upstream_addr,
+                Duration::from_millis(100),
+            ))
+            .unwrap();
+        assert_eq!(resp, WorkerResponse::UnplugTimedOut);
+    }
 }
