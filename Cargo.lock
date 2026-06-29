@@ -1273,6 +1273,7 @@ dependencies = [
  "audio_util",
  "base",
  "cfg-if",
+ "coreaudio",
  "cros_async",
  "cros_tracing",
  "crosvm_cli",
