@@ -13,6 +13,7 @@ pub mod config;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::stdin;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -33,6 +34,10 @@ use base::warn;
 use base::AsRawDescriptor;
 use base::Event;
 use base::Terminal;
+use base::Tube;
+use base::UnixSeqpacket;
+use base::UnixSeqpacketListener;
+use base::UnlinkUnixSeqpacketListener;
 use cros_fdt::Fdt;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -54,6 +59,20 @@ use devices::irqchip::VTIMER_PPI;
 use devices::virtio::base_features;
 use devices::virtio::block::BlockAsync;
 use devices::virtio::fs::Fs;
+#[cfg(feature = "gpu")]
+use devices::virtio::gpu::DisplayBackend;
+#[cfg(feature = "gpu")]
+use devices::virtio::gpu::Gpu;
+#[cfg(feature = "gpu")]
+use devices::virtio::gpu::GpuParameters;
+#[cfg(feature = "audio")]
+use devices::virtio::snd::common_backend::VirtioSnd;
+#[cfg(feature = "audio")]
+use devices::virtio::snd::parameters::Parameters as SndParameters;
+#[cfg(feature = "audio")]
+use devices::virtio::snd::parameters::StreamSourceBackend;
+#[cfg(feature = "audio")]
+use devices::virtio::snd::sys::StreamSourceBackend as SysStreamSourceBackend;
 use hypervisor::hvf::hv_interrupt_type_t;
 use hypervisor::hvf::hv_result;
 use hypervisor::hvf::hv_vm_map;
@@ -73,6 +92,8 @@ use hypervisor::VmAArch64;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sync::Mutex;
+use vm_control::VmRequest;
+use vm_control::VmResponse;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryRegionOptions;
@@ -258,6 +279,77 @@ impl VcpuCoordinator {
         self.shutdown.store(true, Ordering::Relaxed);
         self.startup_signal.notify_all();
     }
+
+    /// Request VM shutdown from outside the VCPU threads.
+    fn request_shutdown(&self) {
+        self.signal_shutdown();
+        self.kick_boot_vcpu();
+    }
+}
+
+fn start_control_server(
+    socket_path: Option<PathBuf>,
+    coordinator: Arc<VcpuCoordinator>,
+) -> Result<Option<JoinHandle<()>>> {
+    let Some(socket_path) = socket_path else {
+        return Ok(None);
+    };
+
+    let listener = UnlinkUnixSeqpacketListener(
+        UnixSeqpacketListener::bind(&socket_path)
+            .with_context(|| format!("failed to bind control socket {}", socket_path.display()))?,
+    );
+
+    let thread = thread::Builder::new()
+        .name("control-server".to_string())
+        .spawn(move || {
+            while !coordinator.shutdown.load(Ordering::Relaxed) {
+                match listener.accept_with_timeout(Duration::from_millis(100)) {
+                    Ok(socket) => handle_control_connection(socket, &coordinator),
+                    Err(e) if e.raw_os_error() == Some(libc::ETIMEDOUT) => {}
+                    Err(e) => {
+                        warn!("control server accept failed: {}", e);
+                        break;
+                    }
+                }
+            }
+        })
+        .context("failed to spawn control server thread")?;
+
+    Ok(Some(thread))
+}
+
+fn handle_control_connection(socket: UnixSeqpacket, coordinator: &VcpuCoordinator) {
+    let tube = match Tube::try_from(socket) {
+        Ok(tube) => tube,
+        Err(e) => {
+            warn!("failed to create control tube: {}", e);
+            return;
+        }
+    };
+
+    let request = match tube.recv::<VmRequest>() {
+        Ok(request) => request,
+        Err(e) => {
+            warn!("failed to receive control request: {}", e);
+            return;
+        }
+    };
+
+    let response = match request {
+        VmRequest::Exit => {
+            coordinator.request_shutdown();
+            VmResponse::Ok
+        }
+        request => VmResponse::ErrString(format!(
+            "control request {:?} is not supported on macOS",
+            request
+        )),
+    };
+
+    if let Err(e) = tube.send(&response) {
+        warn!("failed to send control response: {}", e);
+    }
 }
 
 /// Run a VM with the given configuration.
@@ -390,12 +482,21 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     debug!("FDT will be placed at {:#x}", fdt_address.offset());
 
     // Create a minimal device tree for the kernel
-    // Pass the number of disks so virtio-mmio nodes can be added to FDT
+    // Pass the number of virtio-mmio devices so nodes can be added to FDT
+    let mut num_mmio_devices = cfg.disks.len() + cfg.shared_dirs.len();
+    #[cfg(feature = "audio")]
+    {
+        num_mmio_devices += 1; // virtio-snd
+    }
+    #[cfg(feature = "gpu")]
+    {
+        num_mmio_devices += 1; // virtio-gpu
+    }
     let mut fdt = create_minimal_fdt(
         memory_size,
         vcpu_count,
         fdt_address,
-        cfg.disks.len() + cfg.shared_dirs.len(),
+        num_mmio_devices,
         &cfg.params,
     )?;
     let fdt_data = fdt.finish().context("failed to finish FDT")?;
@@ -601,10 +702,146 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         next_irq += 1;
     }
 
+    // Set up virtio-snd device with CoreAudio backend
+    #[cfg(feature = "audio")]
+    let mut snd_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
+    #[cfg(feature = "audio")]
+    {
+        let mut snd_params = SndParameters::default();
+        snd_params.backend =
+            StreamSourceBackend::Sys(SysStreamSourceBackend::COREAUDIO);
+        let (snd_control_tube, _snd_control_response) = Tube::pair()
+            .context("failed to create sound control tube")?;
+
+        match VirtioSnd::new(
+            base_features(ProtectionType::Unprotected),
+            snd_params,
+            snd_control_tube,
+        ) {
+            Ok(snd_device) => {
+                let mut mmio_device = match VirtioMmioDevice::new(
+                    guest_mem.clone(),
+                    Box::new(snd_device),
+                    false,
+                ) {
+                    Ok(device) => device,
+                    Err(e) => {
+                        error!("Failed to create VirtioMmioDevice for sound: {}", e);
+                        info!("Starting VM execution with {} VCPUs", vcpu_count);
+                        // Fall through to rest of setup
+                        return Err(anyhow::anyhow!("sound device setup failed: {}", e));
+                    }
+                };
+
+                let mmio_addr = next_mmio_addr;
+                let irq = next_irq;
+
+                let irq_evt = IrqEdgeEvent::new()
+                    .context("failed to create IrqEdgeEvent for sound")?;
+
+                match irq_evt.try_clone() {
+                    Ok(cloned_evt) => {
+                        snd_irq_events.push((cloned_evt, irq));
+                    }
+                    Err(e) => {
+                        error!("Failed to clone IrqEdgeEvent for sound: {}", e);
+                    }
+                }
+
+                mmio_device.assign_irq(&irq_evt, irq);
+
+                mmio_bus
+                    .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+                    .context("failed to insert sound device into MMIO bus")?;
+
+                info!(
+                    "Sound device added at MMIO address {:#x} with IRQ {}",
+                    mmio_addr, irq
+                );
+
+                next_mmio_addr += VIRTIO_MMIO_SIZE;
+                next_irq += 1;
+            }
+            Err(e) => {
+                warn!("Failed to create sound device, continuing without audio: {}", e);
+            }
+        }
+    }
+
+    // Set up virtio-gpu device (2D mode with stub display for now)
+    #[cfg(feature = "gpu")]
+    let mut gpu_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
+    #[cfg(feature = "gpu")]
+    {
+        let gpu_params = GpuParameters::default();
+        let (exit_evt_wrtube, _exit_evt_rdtube) = Tube::directional_pair()
+            .context("failed to create GPU exit event tube")?;
+        let (gpu_control_tube, _gpu_control_resp) = Tube::pair()
+            .context("failed to create GPU control tube")?;
+
+        let gpu_device = Gpu::new(
+            exit_evt_wrtube,
+            gpu_control_tube,
+            Vec::new(), // resource_bridges
+            vec![DisplayBackend::MacOs, DisplayBackend::Stub],
+            &gpu_params,
+            None, // rutabaga_server_descriptor
+            Vec::new(), // event_devices
+            base_features(ProtectionType::Unprotected),
+            &std::collections::BTreeMap::new(), // paths
+        );
+
+        let mut mmio_device = match VirtioMmioDevice::new(
+            guest_mem.clone(),
+            Box::new(gpu_device),
+            false,
+        ) {
+            Ok(device) => device,
+            Err(e) => {
+                error!("Failed to create VirtioMmioDevice for GPU: {}", e);
+                return Err(anyhow::anyhow!("GPU device setup failed: {}", e));
+            }
+        };
+
+        let mmio_addr = next_mmio_addr;
+        let irq = next_irq;
+
+        let irq_evt = IrqEdgeEvent::new()
+            .context("failed to create IrqEdgeEvent for GPU")?;
+
+        match irq_evt.try_clone() {
+            Ok(cloned_evt) => {
+                gpu_irq_events.push((cloned_evt, irq));
+            }
+            Err(e) => {
+                error!("Failed to clone IrqEdgeEvent for GPU: {}", e);
+            }
+        }
+
+        mmio_device.assign_irq(&irq_evt, irq);
+
+        mmio_bus
+            .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+            .context("failed to insert GPU device into MMIO bus")?;
+
+        info!(
+            "GPU device (2D stub) added at MMIO address {:#x} with IRQ {}",
+            mmio_addr, irq
+        );
+
+        next_mmio_addr += VIRTIO_MMIO_SIZE;
+        next_irq += 1;
+    }
+
+    // Suppress unused warnings — these will be used when more devices are added.
+    let _ = next_mmio_addr;
+    let _ = next_irq;
+
     info!("Starting VM execution with {} VCPUs", vcpu_count);
 
     // Create VCPU coordinator for multi-VCPU support (must be before IRQ handler)
     let coordinator = Arc::new(VcpuCoordinator::new(irq_chip.clone(), has_in_kernel_gic));
+    let control_server_thread = start_control_server(cfg.socket_path.clone(), coordinator.clone())?;
 
     // Spawn interrupt handler thread to inject device interrupts into the GIC
     // This is needed because vcpu.run() blocks, so we can't poll for interrupts
@@ -627,6 +864,22 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     // Add virtiofs device interrupt events
     for (evt, irq) in &fs_irq_events {
+        if let Ok(cloned) = evt.try_clone() {
+            irq_events_for_handler.push((cloned, *irq));
+        }
+    }
+
+    // Add sound device interrupt events
+    #[cfg(feature = "audio")]
+    for (evt, irq) in &snd_irq_events {
+        if let Ok(cloned) = evt.try_clone() {
+            irq_events_for_handler.push((cloned, *irq));
+        }
+    }
+
+    // Add GPU device interrupt events
+    #[cfg(feature = "gpu")]
+    for (evt, irq) in &gpu_irq_events {
         if let Ok(cloned) = evt.try_clone() {
             irq_events_for_handler.push((cloned, *irq));
         }
@@ -787,6 +1040,12 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     if let Some(thread) = irq_handler_thread {
         if let Err(e) = thread.join() {
             error!("IRQ handler thread panicked: {:?}", e);
+        }
+    }
+
+    if let Some(thread) = control_server_thread {
+        if let Err(e) = thread.join() {
+            error!("control server thread panicked: {:?}", e);
         }
     }
 
