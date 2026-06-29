@@ -676,6 +676,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "coreaudio"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "audio_streams",
+ "base",
+]
+
+[[package]]
 name = "crash_report"
 version = "0.1.0"
 dependencies = [
@@ -1068,6 +1077,7 @@ dependencies = [
  "cfg-if",
  "chrono",
  "ciborium",
+ "coreaudio",
  "crc32fast",
  "cros-codecs",
  "cros_async",

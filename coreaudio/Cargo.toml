@@ -1,0 +1,12 @@
+[package]
+name = "coreaudio"
+version = "0.1.0"
+authors = ["The ChromiumOS Authors"]
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.36"
+audio_streams = { path = "../common/audio_streams" }
+base = { path = "../base" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
