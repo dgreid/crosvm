@@ -50,6 +50,7 @@ members = [
     "base_tokio",
     "bit_field",
     "proc_init",
+    "coreaudio",
     "common/audio_streams",
     "common/balloon_control",
     "common/data_model",
