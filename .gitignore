@@ -9,3 +9,11 @@ lcov.info
 .vscode/*
 !.vscode/settings.json
 .claude/
+
+# macOS development artifacts
+arm64_Image
+.macos-debian/
+old.config
+test_boot.log
+test_debug.log
+test_run.log
