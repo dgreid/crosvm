@@ -34,6 +34,8 @@ mod gpu_display_android;
 #[cfg(feature = "android_display_stub")]
 mod gpu_display_android_stub;
 mod gpu_display_stub;
+#[cfg(target_os = "macos")]
+mod gpu_display_macos;
 #[cfg(windows)]
 mod gpu_display_win;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -479,6 +481,21 @@ impl GpuDisplay {
 
     pub fn open_stub() -> GpuDisplayResult<GpuDisplay> {
         let display = gpu_display_stub::DisplayStub::new()?;
+        let wait_ctx = WaitContext::new()?;
+        wait_ctx.add(&display, DisplayEventToken::Display)?;
+
+        Ok(GpuDisplay {
+            inner: Box::new(display),
+            next_id: 1,
+            event_devices: Default::default(),
+            surfaces: Default::default(),
+            wait_ctx,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn open_macos() -> GpuDisplayResult<GpuDisplay> {
+        let display = gpu_display_macos::DisplayMacos::new()?;
         let wait_ctx = WaitContext::new()?;
         wait_ctx.add(&display, DisplayEventToken::Display)?;
 

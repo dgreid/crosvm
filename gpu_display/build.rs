@@ -112,6 +112,15 @@ fn main() {
         "linux" | "android" => {
             build_wayland();
         }
+        "macos" => {
+            println!("cargo:rerun-if-changed=src/gpu_display_macos_bridge.m");
+            cc::Build::new()
+                .file("src/gpu_display_macos_bridge.m")
+                .flag("-fobjc-arc")
+                .compile("display_macos_bridge");
+            println!("cargo:rustc-link-lib=framework=AppKit");
+            println!("cargo:rustc-link-lib=framework=QuartzCore");
+        }
         _ => {}
     }
 }
