@@ -650,6 +650,7 @@ winapi = "0.3"
 win_util = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gpu_display = { workspace = true, optional = true }
 rand = { workspace = true }
 
 [dev-dependencies]

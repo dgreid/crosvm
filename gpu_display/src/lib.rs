@@ -36,6 +36,8 @@ mod gpu_display_android_stub;
 mod gpu_display_stub;
 #[cfg(target_os = "macos")]
 mod gpu_display_macos;
+#[cfg(target_os = "macos")]
+mod gpu_display_macos_helper;
 #[cfg(windows)]
 mod gpu_display_win;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -50,6 +52,8 @@ pub mod vulkan;
 
 pub use event_device::EventDevice;
 pub use event_device::EventDeviceKind;
+#[cfg(target_os = "macos")]
+pub use gpu_display_macos_helper::run_display_helper;
 #[cfg(windows)]
 pub use gpu_display_win::WindowProcedureThread;
 #[cfg(windows)]

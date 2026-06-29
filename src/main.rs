@@ -912,6 +912,17 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
 
 fn main() {
     syslog::early_init();
+
+    // Internal subcommand: display helper process for macOS.
+    // Intercepted before argh parsing since it's not a user-facing command.
+    #[cfg(all(target_os = "macos", feature = "gpu"))]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() >= 3 && args[1] == "display-helper" {
+            gpu_display::run_display_helper(&args[2]);
+        }
+    }
+
     debug!("crosvm started.");
     let res = crosvm_main(std::env::args());
 
