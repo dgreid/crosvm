@@ -2,17 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! macOS stubs for virtio-snd.
-//!
-//! Audio on macOS would require CoreAudio integration, which is not yet implemented.
-//! This module provides stub implementations that return errors.
-
 use async_trait::async_trait;
 use audio_streams::capture::AsyncCaptureBuffer;
+use audio_streams::capture::AsyncCaptureBufferStream;
 use audio_streams::AsyncPlaybackBufferStream;
 use audio_streams::BoxError;
 use audio_streams::StreamSource;
 use audio_streams::StreamSourceGenerator;
+use coreaudio::CoreAudioStreamSourceGenerator;
 use cros_async::Executor;
 use futures::channel::mpsc::UnboundedSender;
 use serde::Deserialize;
@@ -42,17 +39,17 @@ pub(crate) struct SysAsyncStreamObjects {
     pub(crate) pcm_sender: UnboundedSender<PcmResponse>,
 }
 
-/// Audio backend types for macOS (none implemented yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum StreamSourceBackend {
-    /// Null backend that produces silence and discards output.
     Null,
+    COREAUDIO,
 }
 
 impl From<StreamSourceBackend> for String {
     fn from(backend: StreamSourceBackend) -> Self {
         match backend {
             StreamSourceBackend::Null => "null".to_owned(),
+            StreamSourceBackend::COREAUDIO => "coreaudio".to_owned(),
         }
     }
 }
@@ -63,6 +60,7 @@ impl TryFrom<&str> for StreamSourceBackend {
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
             "null" => Ok(StreamSourceBackend::Null),
+            "coreaudio" => Ok(StreamSourceBackend::COREAUDIO),
             _ => Err(ParametersError::InvalidBackend),
         }
     }
@@ -74,55 +72,115 @@ pub(crate) fn create_stream_source_generators(
     params: &Parameters,
     snd_data: &SndData,
 ) -> Vec<Box<dyn StreamSourceGenerator>> {
-    // No audio backends implemented for macOS yet
-    base::warn!("Sound stream source generation not implemented on macOS, returning no generators");
-    Vec::new()
+    match backend {
+        StreamSourceBackend::Null => {
+            base::warn!("Using null sound backend, audio will not be functional");
+            let mut generators: Vec<Box<dyn StreamSourceGenerator>> =
+                Vec::with_capacity(snd_data.pcm_info_len());
+            for _ in snd_data.pcm_info_iter() {
+                generators.push(Box::new(audio_streams::NoopStreamSourceGenerator::new()));
+            }
+            generators
+        }
+        StreamSourceBackend::COREAUDIO => {
+            let mut generators: Vec<Box<dyn StreamSourceGenerator>> =
+                Vec::with_capacity(snd_data.pcm_info_len());
+            for _ in snd_data.pcm_info_iter() {
+                generators.push(Box::new(CoreAudioStreamSourceGenerator::new()));
+            }
+            generators
+        }
+    }
 }
 
 pub(crate) fn set_audio_thread_priority() -> Result<(), base::Error> {
-    // Thread priority setting not implemented for macOS
+    // macOS handles audio thread priority via CoreAudio's real-time thread.
     Ok(())
 }
 
 impl StreamInfo {
     async fn set_up_async_playback_stream(
         &mut self,
-        _frame_size: usize,
-        _ex: &Executor,
+        frame_size: usize,
+        ex: &Executor,
     ) -> Result<Box<dyn AsyncPlaybackBufferStream>, Error> {
-        Err(Error::OperationNotSupported)
+        Ok(self
+            .stream_source
+            .as_mut()
+            .ok_or(Error::EmptyStreamSource)?
+            .async_new_async_playback_stream(
+                self.channels as usize,
+                self.format,
+                self.frame_rate,
+                self.period_bytes / frame_size,
+                ex,
+            )
+            .await
+            .map_err(Error::CreateStream)?
+            .1)
     }
 
     pub(crate) async fn set_up_async_capture_stream(
         &mut self,
-        _frame_size: usize,
-        _ex: &Executor,
+        frame_size: usize,
+        ex: &Executor,
     ) -> Result<SysBufferReader, Error> {
-        Err(Error::OperationNotSupported)
+        let async_capture_buffer_stream = self
+            .stream_source
+            .as_mut()
+            .ok_or(Error::EmptyStreamSource)?
+            .async_new_async_capture_stream(
+                self.channels as usize,
+                self.format,
+                self.frame_rate,
+                self.period_bytes / frame_size,
+                &self.effects,
+                ex,
+            )
+            .await
+            .map_err(Error::CreateStream)?
+            .1;
+        Ok(SysBufferReader::new(async_capture_buffer_stream))
     }
 
     pub(crate) async fn create_directionstream_output(
         &mut self,
-        _frame_size: usize,
-        _ex: &Executor,
+        frame_size: usize,
+        ex: &Executor,
     ) -> Result<DirectionalStream, Error> {
-        Err(Error::OperationNotSupported)
+        let async_playback_buffer_stream =
+            self.set_up_async_playback_stream(frame_size, ex).await?;
+
+        let buffer_writer = MacosBufferWriter::new(self.period_bytes);
+
+        Ok(DirectionalStream::Output(SysDirectionOutput {
+            async_playback_buffer_stream,
+            buffer_writer: Box::new(buffer_writer),
+        }))
     }
 }
 
-/// Placeholder buffer reader for macOS.
-pub(crate) struct MacosBufferReader {}
+pub(crate) struct MacosBufferReader {
+    async_stream: Box<dyn AsyncCaptureBufferStream>,
+}
+
+impl MacosBufferReader {
+    fn new(async_stream: Box<dyn AsyncCaptureBufferStream>) -> Self {
+        MacosBufferReader { async_stream }
+    }
+}
 
 #[async_trait(?Send)]
 impl CaptureBufferReader for MacosBufferReader {
     async fn get_next_capture_period(
         &mut self,
-        _ex: &Executor,
+        ex: &Executor,
     ) -> Result<AsyncCaptureBuffer, BoxError> {
-        Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "capture not implemented on macOS",
-        )))
+        Ok(self
+            .async_stream
+            .next_capture_buffer(ex)
+            .await
+            .map_err(Error::FetchBuffer)?)
     }
 }
 
