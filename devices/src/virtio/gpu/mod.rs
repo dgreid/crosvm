@@ -1380,6 +1380,9 @@ pub enum DisplayBackend {
     X(Option<String>),
     /// Emulate a display without actually displaying it.
     Stub,
+    #[cfg(target_os = "macos")]
+    /// Open a native macOS window using AppKit.
+    MacOs,
     #[cfg(windows)]
     /// Open a window using WinAPI.
     WinApi,
@@ -1403,6 +1406,8 @@ impl DisplayBackend {
             #[cfg(any(target_os = "android", target_os = "linux"))]
             DisplayBackend::X(display) => GpuDisplay::open_x(display.as_deref()),
             DisplayBackend::Stub => GpuDisplay::open_stub(),
+            #[cfg(target_os = "macos")]
+            DisplayBackend::MacOs => GpuDisplay::open_macos(),
             #[cfg(windows)]
             DisplayBackend::WinApi => match wndproc_thread.take() {
                 Some(wndproc_thread) => GpuDisplay::open_winapi(
