@@ -681,6 +681,7 @@ win_util = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 device_virtio_fs = { workspace = true }
+gpu_display = { workspace = true, optional = true }
 rand = { workspace = true }
 
 [dev-dependencies]
