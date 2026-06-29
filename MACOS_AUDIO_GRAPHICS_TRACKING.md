@@ -24,21 +24,26 @@
 
 ### P0 — Required for functional audio/graphics
 
-#### Main thread restructuring for AppKit
-**Status:** Not started
-**Why:** AppKit requires all UI operations on thread 0. The ObjC bridge dispatches window creation and
-framebuffer updates to the main thread via `dispatch_async(dispatch_get_main_queue(), ...)`, but this
-only works if the main thread is running a runloop/event loop. Currently the main thread blocks on
-`vcpu_threads[0].join()`.
+#### Display helper process (AppKit main thread solution)
+**Status:** IPC framework complete, AppKit windowing TODO
+**Why:** AppKit requires all UI operations on thread 0. crosvm's main thread blocks on
+`vcpu_threads[0].join()`. Solution: separate helper process owns AppKit main thread.
 
-**What to do:**
-1. After spawning VCPU threads, have the main thread call `macos_display_run_event_loop()` (wraps `[NSApp run]`)
-2. When VCPUs exit, call `macos_display_stop_event_loop()` (posts `[NSApp stop:nil]` + dummy event)
-3. After the event loop exits, join VCPU threads and clean up
-4. This must work with `DisplayStub` too (skip event loop when no native display)
-5. Test: window should appear and display framebuffer content
+**Done:**
+- IPC protocol: `DisplayRequest`/`DisplayResponse` enums over Tube (JSON + SCM_RIGHTS)
+- `DisplayMacos` (DisplayT impl) spawns helper via `crosvm display-helper` subcommand
+- SharedMemory framebuffer: crosvm creates shm, mmaps it, sends fd to helper via Tube
+- `MacosSurface::flip()` sends Flip message to helper
+- Helper receives CreateSurface, maps shm, acknowledges
+- Helper handles Shutdown, DestroySurface, Tube EOF → clean exit
+- 9 unit tests covering protocol roundtrip, fd passing, shared memory visibility
+- AI design review + implementation review incorporated
 
-**Files:** `src/crosvm/sys/macos.rs`, `gpu_display/src/gpu_display_macos_bridge.m`
+**Remaining:**
+1. Add AppKit windowing in helper: create NSWindow, blit from shm to CALayer on Flip
+2. Wire `AsRawDescriptor` to Tube fd (not Event fd) so WaitContext wakes on responses
+3. Forward input events (keyboard/mouse) from helper → crosvm via DisplayResponse
+4. Handle CloseRequested → set surface flag
 
 #### Runtime validation — audio
 **Status:** Not started
