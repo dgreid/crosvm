@@ -25,7 +25,7 @@
 ### P0 — Required for functional audio/graphics
 
 #### Display helper process (AppKit main thread solution)
-**Status:** IPC framework complete, AppKit windowing TODO
+**Status:** Complete (pending commit)
 **Why:** AppKit requires all UI operations on thread 0. crosvm's main thread blocks on
 `vcpu_threads[0].join()`. Solution: separate helper process owns AppKit main thread.
 
@@ -36,14 +36,39 @@
 - `MacosSurface::flip()` sends Flip message to helper
 - Helper receives CreateSurface, maps shm, acknowledges
 - Helper handles Shutdown, DestroySurface, Tube EOF → clean exit
-- 9 unit tests covering protocol roundtrip, fd passing, shared memory visibility
-- AI design review + implementation review incorporated
+- AppKit windowing: NSWindow + FramebufferView blitting from shm on Flip
+- Input forwarding: keyboard (keyDown/keyUp/flagsChanged), mouse, scroll → InputEvent responses
+- macOS→Linux keycode mapping (A-Z, 0-9, F1-F12, arrows, modifiers, special keys)
+- CloseRequested → surface flag propagation via shared HashSet
+- `AsRawDescriptor` returns Tube fd so WaitContext wakes on helper responses
+- `flush()` non-blocking drain of Tube into pending queue
+- `next_event()` pops into current_response (prevents infinite loop on unmatched surfaces)
+- Drop sends Shutdown + waits for child to prevent zombies
+- 12 unit tests covering protocol, fd passing, shm visibility, flush drain, close flag
+- Two AI reviews incorporated (display backend + ObjC bridge)
+  - Fixed critical: window delegate ARC retention
+  - Fixed critical: flagsChanged for modifier keys
+  - Fixed critical: F3-F12 keycode mappings were all wrong
+  - Fixed: F13→KEY_SYSRQ (was KEY_PRINT=210)
+  - Fixed: added Right Command mapping
+  - Fixed: added rightMouseDragged handler
+  - Fixed: infinite loop on unmatched surface events
 
-**Remaining:**
-1. Add AppKit windowing in helper: create NSWindow, blit from shm to CALayer on Flip
-2. Wire `AsRawDescriptor` to Tube fd (not Event fd) so WaitContext wakes on responses
-3. Forward input events (keyboard/mouse) from helper → crosvm via DisplayResponse
-4. Handle CloseRequested → set surface flag
+#### Audio capture (microphone)
+**Status:** Complete (pending commit)
+**Why:** Only playback was implemented. Capture uses reversed SPSC (CoreAudio writes, executor reads).
+
+**Done:**
+- `coreaudio/src/capture.rs`: CoreAudioCaptureStream using HALOutput AudioUnit with input enabled
+- Input callback renders captured audio into ring buffer with overrun handling
+- `next_capture_buffer()` reads from ring buffer, converts Float32→guest format
+- Both sync and async capture buffer stream implementations
+- Wired into `CoreAudioStreamSource::new_capture_stream()` and `new_async_capture_stream()`
+
+#### StreamControl pause/resume
+**Status:** Implemented (stores AudioUnit, no-op trait methods)
+**Why:** The `StreamControl` trait only has `set_volume` and `set_mute` — there are no pause/resume
+methods in the trait. `CoreAudioStreamControl` stores the AudioUnit for potential future use.
 
 #### Runtime validation — audio
 **Status:** Not started
@@ -62,41 +87,8 @@
 **What to test:**
 1. Boot VM, `dmesg | grep virtio` shows GPU device detected
 2. Guest loads virtio-gpu DRM driver
-3. With main thread fix: window appears on host with console output visible
-
-### P1 — Important for usability
-
-#### Keyboard input forwarding
-**Status:** Not started
-**Why:** Without this, the display window is view-only.
-
-**What to do:**
-1. In the ObjC bridge, intercept NSEvent key events in the poll loop
-2. Translate NSEvent keycodes to Linux input_event codes
-3. Return events via `handle_next_event()` → `GpuDisplayEvents`
-4. May need a keycode_converter module for macOS (similar to X11/Windows ones)
-
-**Files:** `gpu_display/src/gpu_display_macos_bridge.m`, `gpu_display/src/gpu_display_macos.rs`
-
-#### Mouse input forwarding
-**Status:** Not started
-**Similar to keyboard** — translate NSEvent mouse events to virtio input events.
-
-#### Audio capture (microphone)
-**Status:** Not started
-**Why:** Only playback is implemented. Capture requires a reversed SPSC
-(CoreAudio input callback writes, executor reads) plus HAL input AudioUnit setup.
-
-**What to do:**
-1. Add `capture.rs` to `coreaudio/` crate
-2. Implement `new_capture_stream()` / `new_async_capture_stream()` on `CoreAudioStreamSource`
-3. Use `kAudioUnitSubType_HALOutput` with input enabled for capture AudioUnit
-
-#### StreamControl pause/resume
-**Status:** Not started (CoreAudioStreamControl is a no-op)
-**Why:** Audio starts playing immediately and can't be paused. Low priority since the guest controls playback, and underruns produce silence.
-
-**What to do:** Store the AudioUnit in CoreAudioStreamControl, implement `pause()` → `AudioOutputUnitStop()` and `resume()` → `AudioOutputUnitStart()`.
+3. With display helper: window appears on host with console output visible
+4. Keyboard/mouse input works in guest
 
 ### P2 — Nice to have
 
@@ -128,3 +120,6 @@ Switching headphones mid-stream may break. Would need AudioUnit notification cal
 - No channel mapping beyond CoreAudio's internal mixer
 - No window close → guest shutdown (window close just hides window)
 - `AudioOutputUnitStop` synchronicity assumption — we assume it waits for in-flight callbacks (observed but not documented by Apple)
+- Mouse X/Y deltas sent as separate SYN reports (may cause slightly jerky diagonal movement)
+- Trackpad scroll values are raw pixels (not normalized for notch-based scrolling)
+- No keypad, F14-F20, or media key mappings
