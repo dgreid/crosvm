@@ -8,14 +8,23 @@
 //! on behalf of the crosvm GPU device. It communicates with crosvm via a Tube
 //! over a unix socket, receiving framebuffer data through shared memory.
 //!
-//! Invoked as `crosvm display-helper <fd>` where <fd> is the file descriptor
-//! of the unix socket to communicate on.
+//! Architecture:
+//! - Main thread: runs `[NSApp run]`, handles all AppKit/UI operations
+//! - Background thread: reads from the Tube, dispatches to main thread via
+//!   `dispatch_async_f`
+//!
+//! Invoked as `crosvm display-helper <fd>`.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::os::unix::io::IntoRawFd;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use base::error;
 use base::info;
 use base::FromRawDescriptor;
+use base::MappedRegion;
 use base::MemoryMapping;
 use base::MemoryMappingBuilder;
 use base::SafeDescriptor;
@@ -26,125 +35,271 @@ use base::UnixSeqpacket;
 use crate::gpu_display_macos::protocol::DisplayRequest;
 use crate::gpu_display_macos::protocol::DisplayResponse;
 
+// FFI declarations for the ObjC bridge.
+extern "C" {
+    fn macos_helper_init_app();
+    fn macos_helper_run_app();
+    fn macos_helper_stop_app();
+    fn macos_helper_set_event_callback(
+        callback: extern "C" fn(*mut c_void, u32, u16, u16, i32),
+        context: *mut c_void,
+    );
+    fn macos_helper_set_close_callback(
+        callback: extern "C" fn(*mut c_void, u32),
+        context: *mut c_void,
+    );
+    fn macos_helper_create_window(
+        surface_id: u32,
+        width: u32,
+        height: u32,
+        framebuffer: *mut u8,
+    ) -> *mut c_void;
+    fn macos_helper_destroy_window(handle: *mut c_void);
+    fn macos_helper_flip(handle: *mut c_void);
+
+    static _dispatch_main_q: c_void;
+
+    fn dispatch_async_f(
+        queue: *mut c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+}
+
+fn dispatch_get_main_queue() -> *mut c_void {
+    std::ptr::addr_of!(_dispatch_main_q) as *mut c_void
+}
+
 struct HelperSurface {
     _id: u32,
     _width: u32,
     _height: u32,
     _shm: SharedMemory,
-    _mmap: MemoryMapping,
+    mmap: MemoryMapping,
+    window_handle: *mut c_void,
 }
 
-struct DisplayHelper {
-    tube: Tube,
+// SAFETY: window_handle is only accessed on the main thread. The HelperSurface
+// is stored in HelperState which is protected by a Mutex.
+unsafe impl Send for HelperSurface {}
+
+struct HelperState {
+    tube: Arc<Tube>,
     surfaces: HashMap<u32, HelperSurface>,
+}
+
+// Global state accessible from dispatch callbacks. Protected by Mutex for
+// thread safety between the bg thread (which modifies surfaces map) and the
+// main thread (which accesses window handles and sends responses).
+static HELPER_STATE: Mutex<Option<HelperState>> = Mutex::new(None);
+
+struct DisplayHelper {
+    tube: Arc<Tube>,
 }
 
 impl DisplayHelper {
     fn new(tube: Tube) -> Self {
-        DisplayHelper {
-            tube,
+        let tube = Arc::new(tube);
+        *HELPER_STATE.lock().unwrap() = Some(HelperState {
+            tube: Arc::clone(&tube),
             surfaces: HashMap::new(),
-        }
+        });
+        DisplayHelper { tube }
     }
+}
 
-    fn handle_request(&mut self, req: DisplayRequest) -> bool {
-        match req {
-            DisplayRequest::CreateSurface {
-                surface_id,
-                width,
-                height,
-                shm,
-                shm_size,
-            } => {
-                let file: std::fs::File = shm.into();
-                let raw_fd = std::os::unix::io::IntoRawFd::into_raw_fd(file);
-                // SAFETY: the fd is valid, received via SCM_RIGHTS from crosvm.
-                let sd = unsafe { SafeDescriptor::from_raw_descriptor(raw_fd) };
-                let shm = match SharedMemory::from_safe_descriptor(sd, shm_size) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(
-                            "display helper: failed to create SharedMemory for surface {}: {}",
-                            surface_id, e
-                        );
-                        let _ = self.tube.send(&DisplayResponse::Error {
-                            message: format!("SharedMemory::from_safe_descriptor failed: {}", e),
-                        });
-                        return true;
-                    }
-                };
+// Operations dispatched from bg thread to main thread.
+enum MainThreadOp {
+    CreateSurface {
+        surface_id: u32,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+        shm_size: u64,
+    },
+    DestroySurface {
+        surface_id: u32,
+    },
+    Flip {
+        surface_id: u32,
+    },
+    Stop,
+}
 
-                match MemoryMappingBuilder::new(shm_size as usize)
-                    .from_shared_memory(&shm)
-                    .build()
-                {
-                    Ok(mmap) => {
-                        info!(
-                            "display helper: created surface {} ({}x{})",
-                            surface_id, width, height
-                        );
-                        self.surfaces.insert(
-                            surface_id,
-                            HelperSurface {
-                                _id: surface_id,
-                                _width: width,
-                                _height: height,
-                                _shm: shm,
-                                _mmap: mmap,
-                            },
-                        );
-                        let _ = self.tube.send(&DisplayResponse::SurfaceCreated {
-                            surface_id,
-                        });
-                    }
-                    Err(e) => {
-                        error!("display helper: failed to mmap surface {}: {}", surface_id, e);
-                        let _ = self.tube.send(&DisplayResponse::Error {
-                            message: format!("mmap failed: {}", e),
-                        });
-                    }
-                }
-            }
-            DisplayRequest::DestroySurface { surface_id } => {
-                info!("display helper: destroying surface {}", surface_id);
-                self.surfaces.remove(&surface_id);
-            }
-            DisplayRequest::Flip { surface_id } => {
-                if self.surfaces.contains_key(&surface_id) {
-                    // TODO: blit from shared memory to NSWindow via CALayer.
-                    // For now this is a no-op — the surface data is in shared
-                    // memory but we haven't created the AppKit window yet.
-                }
-            }
-            DisplayRequest::Shutdown => {
-                info!("display helper: shutdown requested");
-                return false;
-            }
-        }
-        true
-    }
+// SAFETY: SharedMemory is Send.
+unsafe impl Send for MainThreadOp {}
 
-    fn run(&mut self) {
-        info!("display helper: starting event loop");
-        loop {
-            match self.tube.recv::<DisplayRequest>() {
-                Ok(req) => {
-                    if !self.handle_request(req) {
-                        break;
-                    }
+extern "C" fn handle_op_on_main(context: *mut c_void) {
+    // SAFETY: context was created by Box::into_raw in the bg thread.
+    let op = unsafe { Box::from_raw(context as *mut MainThreadOp) };
+
+    let mut guard = HELPER_STATE.lock().unwrap();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+
+    match *op {
+        MainThreadOp::CreateSurface {
+            surface_id,
+            width,
+            height,
+            shm,
+            shm_size,
+        } => {
+            match MemoryMappingBuilder::new(shm_size as usize)
+                .from_shared_memory(&shm)
+                .build()
+            {
+                Ok(mmap) => {
+                    let fb_ptr = mmap.as_ptr();
+                    // SAFETY: macos_helper_create_window is called on the main
+                    // thread and creates an NSWindow backed by the framebuffer.
+                    let handle = unsafe {
+                        macos_helper_create_window(surface_id, width, height, fb_ptr)
+                    };
+                    info!(
+                        "display helper: created surface {} ({}x{}) handle={:?}",
+                        surface_id, width, height, handle
+                    );
+                    state.surfaces.insert(
+                        surface_id,
+                        HelperSurface {
+                            _id: surface_id,
+                            _width: width,
+                            _height: height,
+                            _shm: shm,
+                            mmap,
+                            window_handle: handle,
+                        },
+                    );
+                    let _ = state.tube.send(&DisplayResponse::SurfaceCreated {
+                        surface_id,
+                    });
                 }
                 Err(e) => {
-                    info!("display helper: tube closed ({}), exiting", e);
+                    error!("display helper: mmap failed for surface {}: {}", surface_id, e);
+                    let _ = state.tube.send(&DisplayResponse::Error {
+                        message: format!("mmap failed: {}", e),
+                    });
+                }
+            }
+        }
+        MainThreadOp::DestroySurface { surface_id } => {
+            if let Some(surface) = state.surfaces.remove(&surface_id) {
+                info!("display helper: destroying surface {}", surface_id);
+                // SAFETY: window_handle was created by macos_helper_create_window.
+                unsafe { macos_helper_destroy_window(surface.window_handle) };
+            }
+        }
+        MainThreadOp::Flip { surface_id } => {
+            if let Some(surface) = state.surfaces.get(&surface_id) {
+                // SAFETY: window_handle is valid, called on main thread.
+                unsafe { macos_helper_flip(surface.window_handle) };
+            }
+        }
+        MainThreadOp::Stop => {
+            // Destroy all windows first.
+            for (_, surface) in state.surfaces.drain() {
+                unsafe { macos_helper_destroy_window(surface.window_handle) };
+            }
+            // SAFETY: called on main thread.
+            unsafe { macos_helper_stop_app() };
+        }
+    }
+}
+
+fn dispatch_to_main(op: MainThreadOp) {
+    let boxed = Box::new(op);
+    let ptr = Box::into_raw(boxed) as *mut c_void;
+    // SAFETY: dispatch_get_main_queue and dispatch_async_f are safe to call
+    // from any thread.
+    unsafe {
+        dispatch_async_f(dispatch_get_main_queue(), ptr, handle_op_on_main);
+    }
+}
+
+// Callback invoked by the ObjC bridge when an input event occurs.
+extern "C" fn on_input_event(
+    _context: *mut c_void,
+    surface_id: u32,
+    type_: u16,
+    code: u16,
+    value: i32,
+) {
+    let guard = HELPER_STATE.lock().unwrap();
+    if let Some(state) = guard.as_ref() {
+        let _ = state.tube.send(&DisplayResponse::InputEvent {
+            surface_id,
+            type_,
+            code,
+            value,
+        });
+    }
+}
+
+// Callback invoked by the ObjC bridge when window close is requested.
+extern "C" fn on_close_requested(_context: *mut c_void, surface_id: u32) {
+    let guard = HELPER_STATE.lock().unwrap();
+    if let Some(state) = guard.as_ref() {
+        let _ = state.tube.send(&DisplayResponse::CloseRequested { surface_id });
+    }
+}
+
+fn bg_thread_fn(tube: Arc<Tube>) {
+    loop {
+        match tube.recv::<DisplayRequest>() {
+            Ok(req) => {
+                let op = match req {
+                    DisplayRequest::CreateSurface {
+                        surface_id,
+                        width,
+                        height,
+                        shm,
+                        shm_size,
+                    } => {
+                        let file: std::fs::File = shm.into();
+                        let raw_fd = IntoRawFd::into_raw_fd(file);
+                        // SAFETY: fd is valid, received via SCM_RIGHTS.
+                        let sd = unsafe { SafeDescriptor::from_raw_descriptor(raw_fd) };
+                        match SharedMemory::from_safe_descriptor(sd, shm_size) {
+                            Ok(shm) => MainThreadOp::CreateSurface {
+                                surface_id,
+                                width,
+                                height,
+                                shm,
+                                shm_size,
+                            },
+                            Err(e) => {
+                                error!("display helper: SharedMemory failed: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    DisplayRequest::DestroySurface { surface_id } => {
+                        MainThreadOp::DestroySurface { surface_id }
+                    }
+                    DisplayRequest::Flip { surface_id } => {
+                        MainThreadOp::Flip { surface_id }
+                    }
+                    DisplayRequest::Shutdown => MainThreadOp::Stop,
+                };
+                let is_stop = matches!(op, MainThreadOp::Stop);
+                dispatch_to_main(op);
+                if is_stop {
                     break;
                 }
             }
+            Err(e) => {
+                info!("display helper: tube closed ({}), stopping", e);
+                dispatch_to_main(MainThreadOp::Stop);
+                break;
+            }
         }
-        info!("display helper: exiting");
     }
 }
 
 /// Entry point for the display helper process.
-/// Called from main.rs when `display-helper` is the first argument.
 pub fn run_display_helper(fd_str: &str) -> ! {
     let fd: i32 = fd_str.parse().unwrap_or_else(|e| {
         eprintln!("display-helper: invalid fd '{}': {}", fd_str, e);
@@ -158,13 +313,29 @@ pub fn run_display_helper(fd_str: &str) -> ! {
         std::process::exit(1);
     });
 
-    let mut helper = DisplayHelper::new(tube);
+    let helper = DisplayHelper::new(tube);
+    let tube_for_bg = Arc::clone(&helper.tube);
 
-    // For now, run the Tube event loop on the main thread.
-    // When we add AppKit windowing, this will instead:
-    // 1. Spawn a background thread for the Tube reader
-    // 2. Run [NSApp run] on the main thread
-    helper.run();
+    // Initialize NSApplication on main thread (thread 0).
+    // SAFETY: called on main thread before any other AppKit operations.
+    unsafe {
+        macos_helper_init_app();
+        macos_helper_set_event_callback(on_input_event, std::ptr::null_mut());
+        macos_helper_set_close_callback(on_close_requested, std::ptr::null_mut());
+    }
+
+    // Spawn background thread for Tube I/O.
+    std::thread::spawn(move || {
+        bg_thread_fn(tube_for_bg);
+    });
+
+    // Run the AppKit event loop on the main thread. This blocks until
+    // macos_helper_stop_app() is called (triggered by Shutdown or Tube EOF).
+    // SAFETY: called on main thread.
+    unsafe { macos_helper_run_app() };
+
+    // Clean up global state.
+    *HELPER_STATE.lock().unwrap() = None;
 
     std::process::exit(0);
 }
@@ -199,124 +370,130 @@ mod tests {
     }
 
     #[test]
-    fn helper_create_and_destroy_surface() {
-        let (crosvm_tube, helper_tube) = make_tube_pair();
-        let mut helper = DisplayHelper::new(helper_tube);
+    fn dispatch_op_size() {
+        // Ensure MainThreadOp is reasonably sized for dispatch_async_f.
+        assert!(std::mem::size_of::<MainThreadOp>() < 256);
+    }
 
-        let width = 640u32;
-        let height = 480u32;
-        let fb_size = (width as u64) * (height as u64) * 4;
-        let shm = SharedMemory::new("test_surface", fb_size).unwrap();
+    #[test]
+    fn protocol_request_roundtrip() {
+        let (sender, receiver) = make_tube_pair();
+
+        sender.send(&DisplayRequest::Flip { surface_id: 42 }).unwrap();
+        let decoded: DisplayRequest = receiver.recv().unwrap();
+        assert!(matches!(decoded, DisplayRequest::Flip { surface_id: 42 }));
+
+        sender.send(&DisplayRequest::Shutdown).unwrap();
+        let decoded: DisplayRequest = receiver.recv().unwrap();
+        assert!(matches!(decoded, DisplayRequest::Shutdown));
+    }
+
+    #[test]
+    fn protocol_response_roundtrip() {
+        let (sender, receiver) = make_tube_pair();
+
+        sender
+            .send(&DisplayResponse::CloseRequested { surface_id: 5 })
+            .unwrap();
+        let decoded: DisplayResponse = receiver.recv().unwrap();
+        match decoded {
+            DisplayResponse::CloseRequested { surface_id } => assert_eq!(surface_id, 5),
+            _ => panic!("expected CloseRequested"),
+        }
+
+        sender
+            .send(&DisplayResponse::InputEvent {
+                surface_id: 1,
+                type_: 1,
+                code: 30,
+                value: 1,
+            })
+            .unwrap();
+        let decoded: DisplayResponse = receiver.recv().unwrap();
+        match decoded {
+            DisplayResponse::InputEvent {
+                surface_id,
+                type_,
+                code,
+                value,
+            } => {
+                assert_eq!(surface_id, 1);
+                assert_eq!(type_, 1);
+                assert_eq!(code, 30);
+                assert_eq!(value, 1);
+            }
+            _ => panic!("expected InputEvent"),
+        }
+    }
+
+    #[test]
+    fn create_surface_with_shm_fd() {
+        let (sender, receiver) = make_tube_pair();
+
+        let shm = SharedMemory::new("test", 4096).unwrap();
         let dup_fd = unsafe { libc::dup(shm.as_raw_descriptor()) };
         assert!(dup_fd >= 0);
         let shm_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
 
-        crosvm_tube
+        sender
             .send(&DisplayRequest::CreateSurface {
                 surface_id: 1,
-                width,
-                height,
+                width: 32,
+                height: 32,
                 shm: FileSerdeWrapper(shm_file),
-                shm_size: fb_size,
+                shm_size: 4096,
             })
             .unwrap();
 
-        let req: DisplayRequest = helper.tube.recv().unwrap();
-        assert!(helper.handle_request(req));
-        assert!(helper.surfaces.contains_key(&1));
-
-        let resp: DisplayResponse = crosvm_tube.recv().unwrap();
-        match resp {
-            DisplayResponse::SurfaceCreated { surface_id } => assert_eq!(surface_id, 1),
-            _ => panic!("expected SurfaceCreated"),
+        let decoded: DisplayRequest = receiver.recv().unwrap();
+        match decoded {
+            DisplayRequest::CreateSurface {
+                surface_id,
+                width,
+                height,
+                shm: _,
+                shm_size,
+            } => {
+                assert_eq!(surface_id, 1);
+                assert_eq!(width, 32);
+                assert_eq!(height, 32);
+                assert_eq!(shm_size, 4096);
+            }
+            _ => panic!("expected CreateSurface"),
         }
-
-        // Destroy
-        crosvm_tube
-            .send(&DisplayRequest::DestroySurface { surface_id: 1 })
-            .unwrap();
-        let req: DisplayRequest = helper.tube.recv().unwrap();
-        assert!(helper.handle_request(req));
-        assert!(!helper.surfaces.contains_key(&1));
     }
 
     #[test]
-    fn helper_shutdown() {
-        let (crosvm_tube, helper_tube) = make_tube_pair();
-        let mut helper = DisplayHelper::new(helper_tube);
-
-        crosvm_tube.send(&DisplayRequest::Shutdown).unwrap();
-        let req: DisplayRequest = helper.tube.recv().unwrap();
-        assert!(!helper.handle_request(req));
-    }
-
-    #[test]
-    fn helper_flip_no_crash() {
-        let (crosvm_tube, helper_tube) = make_tube_pair();
-        let mut helper = DisplayHelper::new(helper_tube);
-
-        crosvm_tube
-            .send(&DisplayRequest::Flip { surface_id: 99 })
-            .unwrap();
-        let req: DisplayRequest = helper.tube.recv().unwrap();
-        assert!(helper.handle_request(req));
-    }
-
-    #[test]
-    fn helper_tube_eof_exits() {
-        let (crosvm_tube, helper_tube) = make_tube_pair();
-        let mut helper = DisplayHelper::new(helper_tube);
-
-        drop(crosvm_tube);
-        helper.run();
-    }
-
-    #[test]
-    fn helper_shared_memory_visible() {
-        let (crosvm_tube, helper_tube) = make_tube_pair();
-        let mut helper = DisplayHelper::new(helper_tube);
-
+    fn shared_memory_cross_process_visible() {
         let width = 4u32;
         let height = 4u32;
         let fb_size = (width as u64) * (height as u64) * 4;
         let shm = SharedMemory::new("test_visible", fb_size).unwrap();
 
-        // Write a pattern into the shared memory from the crosvm side.
         let mmap = MemoryMappingBuilder::new(fb_size as usize)
             .from_shared_memory(&shm)
             .build()
             .unwrap();
+
+        // Write pattern.
         // SAFETY: mmap is valid for its entire size.
-        let crosvm_slice = unsafe {
+        let slice = unsafe {
             std::slice::from_raw_parts_mut(mmap.as_ptr(), mmap.size())
         };
-        for (i, byte) in crosvm_slice.iter_mut().enumerate() {
+        for (i, byte) in slice.iter_mut().enumerate() {
             *byte = (i & 0xFF) as u8;
         }
 
-        let dup_fd = unsafe { libc::dup(shm.as_raw_descriptor()) };
-        assert!(dup_fd >= 0);
-        let shm_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-
-        crosvm_tube
-            .send(&DisplayRequest::CreateSurface {
-                surface_id: 1,
-                width,
-                height,
-                shm: FileSerdeWrapper(shm_file),
-                shm_size: fb_size,
-            })
+        // Create second mapping from the same shm fd.
+        let mmap2 = MemoryMappingBuilder::new(fb_size as usize)
+            .from_shared_memory(&shm)
+            .build()
             .unwrap();
 
-        let req: DisplayRequest = helper.tube.recv().unwrap();
-        assert!(helper.handle_request(req));
-
-        // Verify the helper can see the same data through its mmap.
-        let helper_surface = helper.surfaces.get(&1).unwrap();
-        let helper_slice = unsafe {
-            std::slice::from_raw_parts(helper_surface._mmap.as_ptr(), helper_surface._mmap.size())
+        let slice2 = unsafe {
+            std::slice::from_raw_parts(mmap2.as_ptr(), mmap2.size())
         };
-        for (i, byte) in helper_slice.iter().enumerate() {
+        for (i, byte) in slice2.iter().enumerate() {
             assert_eq!(*byte, (i & 0xFF) as u8, "mismatch at byte {}", i);
         }
     }
