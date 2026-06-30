@@ -26,6 +26,7 @@ pub const kAudioUnitSubType_HALOutput: u32 = u32::from_be_bytes(*b"ahal");
 pub const kAudioUnitProperty_StreamFormat: u32 = 8;
 pub const kAudioUnitProperty_SetRenderCallback: u32 = 23;
 pub const kAudioUnitProperty_EnableIO: u32 = 2003;
+pub const kAudioOutputUnitProperty_SetInputCallback: u32 = 15;
 
 // AudioUnit scopes
 pub const kAudioUnitScope_Input: u32 = 1;
@@ -174,4 +175,13 @@ extern "C" {
     pub fn AudioOutputUnitStart(ci: AudioUnit) -> OSStatus;
 
     pub fn AudioOutputUnitStop(ci: AudioUnit) -> OSStatus;
+
+    pub fn AudioUnitRender(
+        in_unit: AudioUnit,
+        io_action_flags: *mut u32,
+        in_time_stamp: *const AudioTimeStamp,
+        in_output_bus_number: u32,
+        in_number_frames: u32,
+        io_data: *mut AudioBufferList,
+    ) -> OSStatus;
 }

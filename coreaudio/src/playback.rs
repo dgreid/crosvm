@@ -15,6 +15,7 @@ use audio_streams::PlaybackBuffer;
 use audio_streams::PlaybackBufferStream;
 use audio_streams::SampleFormat;
 use audio_streams::StreamControl;
+use audio_streams::StreamEffect;
 use audio_streams::StreamSource;
 
 use crate::convert;
@@ -33,10 +34,10 @@ impl Drop for CoreAudioDevice {
     fn drop(&mut self) {
         if !self.audio_unit.is_null() {
             // SAFETY: audio_unit was created by AudioComponentInstanceNew and is non-null.
-            // AudioOutputUnitStop waits for any in-flight render callback to complete
-            // before returning (observed behavior on macOS, though not explicitly
-            // documented). This ensures _callback_data (dropped after _device) is
-            // still valid during the final callback invocation.
+            // Stop the unit before uninitializing. AudioOutputUnitStop waits for
+            // any in-flight render callback to complete before returning. This
+            // ensures _callback_data (dropped after _device) is still valid
+            // during the final callback invocation.
             unsafe {
                 AudioOutputUnitStop(self.audio_unit);
                 AudioUnitUninitialize(self.audio_unit);
@@ -234,6 +235,8 @@ fn make_stream(
     let (device, callback_data) =
         create_output_audio_unit(frame_rate, num_channels, &ring_buffer)?;
 
+    let au = device.audio_unit;
+
     let interval = Duration::from_millis(
         (buffer_size as u64) * 1000 / (frame_rate as u64),
     );
@@ -254,7 +257,7 @@ fn make_stream(
         start_time: None,
     };
 
-    Ok((CoreAudioStreamControl, stream))
+    Ok((CoreAudioStreamControl { audio_unit: au }, stream))
 }
 
 impl StreamSource for CoreAudioStreamSource {
@@ -284,6 +287,45 @@ impl StreamSource for CoreAudioStreamSource {
         BoxError,
     > {
         let (control, stream) = make_stream(num_channels, format, frame_rate, buffer_size)?;
+        Ok((Box::new(control), Box::new(stream)))
+    }
+
+    fn new_capture_stream(
+        &mut self,
+        num_channels: usize,
+        format: SampleFormat,
+        frame_rate: u32,
+        buffer_size: usize,
+        _effects: &[StreamEffect],
+    ) -> Result<
+        (
+            Box<dyn StreamControl>,
+            Box<dyn audio_streams::capture::CaptureBufferStream>,
+        ),
+        BoxError,
+    > {
+        let (control, stream) =
+            crate::capture::make_capture_stream(num_channels, format, frame_rate, buffer_size)?;
+        Ok((Box::new(control), Box::new(stream)))
+    }
+
+    fn new_async_capture_stream(
+        &mut self,
+        num_channels: usize,
+        format: SampleFormat,
+        frame_rate: u32,
+        buffer_size: usize,
+        _effects: &[StreamEffect],
+        _ex: &dyn audio_streams::AudioStreamsExecutor,
+    ) -> Result<
+        (
+            Box<dyn StreamControl>,
+            Box<dyn audio_streams::capture::AsyncCaptureBufferStream>,
+        ),
+        BoxError,
+    > {
+        let (control, stream) =
+            crate::capture::make_capture_stream(num_channels, format, frame_rate, buffer_size)?;
         Ok((Box::new(control), Box::new(stream)))
     }
 }
@@ -339,6 +381,13 @@ impl AsyncPlaybackBufferStream for CoreAudioPlaybackStream {
     }
 }
 
-struct CoreAudioStreamControl;
+struct CoreAudioStreamControl {
+    audio_unit: AudioUnit,
+}
+
+// SAFETY: AudioUnit is thread-safe when accessed via AudioToolbox API.
+unsafe impl Send for CoreAudioStreamControl {}
+// SAFETY: set_volume/set_mute use AudioUnitSetParameter which is thread-safe.
+unsafe impl Sync for CoreAudioStreamControl {}
 
 impl StreamControl for CoreAudioStreamControl {}
