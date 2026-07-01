@@ -1,90 +1,38 @@
 #!/bin/bash
-# Boot test script for macOS ARM64
+# Boot and device test script for macOS ARM64
+#
+# Runs three test tiers:
+#   1. Kernel boot (bare kernel, no devices)
+#   2. Block device + root mount (with Debian kernel + initrd + disk)
+#   3. Virtiofs shared directory (host-guest filesystem sharing)
 #
 # Usage:
-#   ./tools/test_macos_boot.sh [kernel_image] [timeout_seconds]
+#   ./tools/test_macos_boot.sh [test_tier]
+#
+#   test_tier: "boot", "block", "virtiofs", or "all" (default: "all")
 #
 # Environment variables:
 #   CROSVM_BIN - Path to crosvm binary (default: target/release/crosvm)
-#   CROSVM_ENTITLEMENTS - Path to entitlements file (default: crosvm.entitlements)
+#   CROSVM_KERNEL - Kernel image for bare boot test (default: arm64_Image)
+#   DEBIAN_DIR - Directory with Debian test files (default: .macos-debian)
 
 set -e
 
-KERNEL="${1:-arm64_Image}"
-TIMEOUT="${2:-30}"
+TEST_TIER="${1:-all}"
 CROSVM_BIN="${CROSVM_BIN:-target/release/crosvm}"
+CROSVM_KERNEL="${CROSVM_KERNEL:-arm64_Image}"
+DEBIAN_DIR="${DEBIAN_DIR:-.macos-debian}"
 CROSVM_ENTITLEMENTS="${CROSVM_ENTITLEMENTS:-crosvm.entitlements}"
 BOOT_LOG="/tmp/crosvm_boot_test.log"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo "=== crosvm macOS Boot Test ==="
-echo ""
-
-# Check for kernel image
-if [ ! -f "$KERNEL" ]; then
-    echo -e "${RED}Error: Kernel image not found: $KERNEL${NC}"
-    echo "Please provide a valid ARM64 Linux kernel image."
-    echo "Usage: $0 [kernel_image] [timeout_seconds]"
-    exit 1
-fi
-
-echo "Kernel: $KERNEL"
-echo "Timeout: ${TIMEOUT}s"
-echo "Binary: $CROSVM_BIN"
-echo ""
-
-# Build if binary doesn't exist
-if [ ! -f "$CROSVM_BIN" ]; then
-    echo "Building crosvm..."
-    cargo build --release -p crosvm
-fi
-
-# Check if entitlements file exists
-if [ ! -f "$CROSVM_ENTITLEMENTS" ]; then
-    echo "Creating entitlements file..."
-    cat > "$CROSVM_ENTITLEMENTS" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.hypervisor</key>
-    <true/>
-</dict>
-</plist>
-EOF
-fi
-
-# Sign binary if not already signed with correct entitlements
-echo "Checking code signature..."
-if ! codesign -v "$CROSVM_BIN" 2>/dev/null; then
-    echo "Signing crosvm binary with HVF entitlements..."
-    codesign --sign - --entitlements "$CROSVM_ENTITLEMENTS" --force "$CROSVM_BIN"
-fi
-
-# Run boot test
-echo ""
-echo "Starting boot test..."
-echo "Running: timeout $TIMEOUT $CROSVM_BIN run $KERNEL"
-echo ""
-
-# Run crosvm with timeout, capturing output
-set +e
-timeout "$TIMEOUT" "$CROSVM_BIN" run "$KERNEL" 2>&1 | tee "$BOOT_LOG"
-EXIT_CODE=$?
-set -e
-
-echo ""
-echo "=== Boot Test Results ==="
-echo ""
-
-# Check results
 PASSED=0
 FAILED=0
+SKIPPED=0
 
 check_output() {
     local pattern="$1"
@@ -100,43 +48,191 @@ check_output() {
     fi
 }
 
-check_output_optional() {
-    local pattern="$1"
-    local description="$2"
-    if grep -q "$pattern" "$BOOT_LOG" 2>/dev/null; then
-        echo -e "${GREEN}[PASS]${NC} $description"
-        ((PASSED++))
-    else
-        echo -e "${YELLOW}[SKIP]${NC} $description (optional)"
-    fi
+skip() {
+    echo -e "${YELLOW}[SKIP]${NC} $1"
+    ((SKIPPED++))
 }
 
-# Core boot checks
-check_output "Booting Linux" "Kernel started booting"
-check_output_optional "Linux version" "Kernel version printed"
-check_output_optional "Machine model: crosvm" "Device tree loaded"
-check_output_optional "psci:" "PSCI initialized"
-check_output_optional "clocksource:" "Timer working"
-check_output_optional "smp:" "SMP initialized"
+ensure_signed() {
+    if [ ! -f "$CROSVM_ENTITLEMENTS" ]; then
+        cat > "$CROSVM_ENTITLEMENTS" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+    fi
+    codesign --sign - --entitlements "$CROSVM_ENTITLEMENTS" --force "$CROSVM_BIN" 2>/dev/null
+}
 
-echo ""
-echo "Summary: $PASSED passed, $FAILED failed"
+echo "=== crosvm macOS Boot & Device Tests ==="
 echo ""
 
-# Show last lines of log if there were failures
-if [ $FAILED -gt 0 ]; then
-    echo "=== Last 20 lines of boot log ==="
-    tail -20 "$BOOT_LOG"
-    echo ""
+# Build if needed
+if [ ! -f "$CROSVM_BIN" ]; then
+    echo "Building crosvm..."
+    cargo build --release -p crosvm
 fi
+ensure_signed
 
-# Basic success: kernel must at least start booting
-if grep -q "Booting Linux" "$BOOT_LOG" 2>/dev/null; then
-    echo -e "${GREEN}Boot test PASSED${NC} - Kernel started successfully"
-    exit 0
-else
-    echo -e "${RED}Boot test FAILED${NC} - Kernel did not start"
+# ============================================================
+# Test 1: Bare kernel boot
+# ============================================================
+run_boot_test() {
+    echo "--- Test: Kernel Boot ---"
+    if [ ! -f "$CROSVM_KERNEL" ]; then
+        skip "Kernel boot (no kernel image: $CROSVM_KERNEL)"
+        return
+    fi
+
+    timeout 15 "$CROSVM_BIN" run "$CROSVM_KERNEL" < /dev/null > "$BOOT_LOG" 2>&1 || true
+
+    check_output "Booting Linux" "Kernel starts booting"
+    check_output "psci:" "PSCI detected"
     echo ""
-    echo "Full log available at: $BOOT_LOG"
+}
+
+# ============================================================
+# Test 2: Block device + root mount
+# ============================================================
+run_block_test() {
+    echo "--- Test: Block Device + Root Mount ---"
+    local kernel="$DEBIAN_DIR/debian-vmlinuz"
+    local initrd="$DEBIAN_DIR/mini-initrd.cpio"
+    local disk="$DEBIAN_DIR/debian-work.raw"
+
+    if [ ! -f "$kernel" ] || [ ! -f "$initrd" ] || [ ! -f "$disk" ]; then
+        skip "Block device test (missing Debian test files in $DEBIAN_DIR)"
+        return
+    fi
+
+    timeout 30 "$CROSVM_BIN" run -m 4096 \
+        --rwdisk "$disk" \
+        --initrd "$initrd" \
+        -p "root=/dev/vda1 rw console=ttyS0 earlycon panic=5" \
+        "$kernel" < /dev/null > "$BOOT_LOG" 2>&1 || true
+
+    check_output "virtio_blk virtio0" "Block device detected by guest"
+    check_output "vda:" "Partition table scanned"
+    check_output "EXT4-fs" "ext4 filesystem operations"
+    echo ""
+}
+
+# ============================================================
+# Test 3: Virtiofs shared directory
+# ============================================================
+run_virtiofs_test() {
+    echo "--- Test: Virtiofs Shared Directory ---"
+    local kernel="$DEBIAN_DIR/debian-vmlinuz"
+    local initrd="$DEBIAN_DIR/mini-initrd.cpio"
+    local disk="$DEBIAN_DIR/debian-work.raw"
+
+    if [ ! -f "$kernel" ] || [ ! -f "$initrd" ] || [ ! -f "$disk" ]; then
+        skip "Virtiofs test (missing Debian test files in $DEBIAN_DIR)"
+        return
+    fi
+
+    # Create a temporary shared directory with a marker file
+    local shared_dir
+    shared_dir=$(mktemp -d)
+    echo "VIRTIOFS_TEST_MARKER" > "$shared_dir/test_marker.txt"
+
+    # Resolve paths to absolute before changing directories
+    local abs_initrd
+    abs_initrd=$(cd "$(dirname "$initrd")" && echo "$PWD/$(basename "$initrd")")
+
+    # Build a temporary init that mounts virtiofs and checks the marker
+    local tmp_initrd_dir
+    tmp_initrd_dir=$(mktemp -d)
+    local saved_dir="$PWD"
+    cd "$tmp_initrd_dir"
+    cpio -i < "$abs_initrd" 2>/dev/null || true
+    cat > init << 'INITEOF'
+#!/bin/sh
+set +e
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+/bin/insmod /lib/modules/virtio_mmio.ko
+/bin/insmod /lib/modules/virtio_blk.ko
+/bin/insmod /lib/modules/crc32c_generic.ko
+/bin/insmod /lib/modules/libcrc32c.ko
+/bin/insmod /lib/modules/crc16.ko
+/bin/insmod /lib/modules/mbcache.ko
+/bin/insmod /lib/modules/jbd2.ko
+/bin/insmod /lib/modules/ext4.ko
+sleep 1
+/bin/mount -t ext4 /dev/vda1 /newroot
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/fs/fuse/fuse.ko 2>/dev/null
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/fs/fuse/virtiofs.ko 2>/dev/null
+/bin/mount -t virtiofs testshare /newroot/mnt 2>&1
+if [ -f /newroot/mnt/test_marker.txt ]; then
+    /bin/cat /newroot/mnt/test_marker.txt
+fi
+exec /bin/sh
+INITEOF
+    chmod +x init
+    local test_initrd="/tmp/crosvm_virtiofs_test.cpio"
+    find . | cpio -o -H newc > "$test_initrd" 2>/dev/null
+    cd "$saved_dir"
+
+    timeout 35 "$CROSVM_BIN" run -m 4096 \
+        --rwdisk "$disk" \
+        --initrd "$test_initrd" \
+        --shared-dir "$shared_dir:testshare" \
+        -p "root=/dev/vda1 rw console=ttyS0 earlycon panic=5" \
+        "$kernel" < /dev/null > "$BOOT_LOG" 2>&1 || true
+
+    check_output "VIRTIOFS_TEST_MARKER" "Virtiofs mount and file read"
+
+    # Cleanup
+    rm -rf "$shared_dir" "$tmp_initrd_dir" "$test_initrd"
+    echo ""
+}
+
+# ============================================================
+# Run selected tests
+# ============================================================
+case "$TEST_TIER" in
+    boot)
+        run_boot_test
+        ;;
+    block)
+        run_block_test
+        ;;
+    virtiofs)
+        run_virtiofs_test
+        ;;
+    all)
+        run_boot_test
+        run_block_test
+        run_virtiofs_test
+        ;;
+    *)
+        echo "Unknown test tier: $TEST_TIER"
+        echo "Usage: $0 [boot|block|virtiofs|all]"
+        exit 1
+        ;;
+esac
+
+# ============================================================
+# Summary
+# ============================================================
+echo "=== Summary ==="
+echo -e "  ${GREEN}Passed:${NC}  $PASSED"
+echo -e "  ${RED}Failed:${NC}  $FAILED"
+echo -e "  ${YELLOW}Skipped:${NC} $SKIPPED"
+echo ""
+
+if [ $FAILED -gt 0 ]; then
+    echo -e "${RED}FAILED${NC} — see $BOOT_LOG for details"
     exit 1
+else
+    echo -e "${GREEN}ALL TESTS PASSED${NC}"
+    exit 0
 fi
