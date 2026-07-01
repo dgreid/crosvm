@@ -61,6 +61,10 @@ pub struct VirtioMmioDevice {
     mmio_base: u64,
     irq_num: u32,
     config_generation: u32,
+    shm_select: u32,
+    shm_region_base: Option<u64>,
+    shm_region_len: Option<u64>,
+    shm_region_id: Option<u8>,
 }
 
 impl VirtioMmioDevice {
@@ -96,6 +100,10 @@ impl VirtioMmioDevice {
             mmio_base: 0,
             irq_num: 0,
             config_generation: 0,
+            shm_select: 0,
+            shm_region_base: None,
+            shm_region_len: None,
+            shm_region_id: None,
         })
     }
     pub fn ioevents(&self) -> Vec<(&Event, u64, Datamatch)> {
@@ -220,6 +228,50 @@ impl VirtioMmioDevice {
                 }
             }
             VIRTIO_MMIO_STATUS => self.driver_status.into(),
+            VIRTIO_MMIO_SHM_LEN_LOW => {
+                if let (Some(id), Some(len)) = (self.shm_region_id, self.shm_region_len) {
+                    if self.shm_select as u8 == id {
+                        len as u32
+                    } else {
+                        !0u32
+                    }
+                } else {
+                    !0u32
+                }
+            }
+            VIRTIO_MMIO_SHM_LEN_HIGH => {
+                if let (Some(id), Some(len)) = (self.shm_region_id, self.shm_region_len) {
+                    if self.shm_select as u8 == id {
+                        (len >> 32) as u32
+                    } else {
+                        !0u32
+                    }
+                } else {
+                    !0u32
+                }
+            }
+            VIRTIO_MMIO_SHM_BASE_LOW => {
+                if let (Some(id), Some(base)) = (self.shm_region_id, self.shm_region_base) {
+                    if self.shm_select as u8 == id {
+                        base as u32
+                    } else {
+                        !0u32
+                    }
+                } else {
+                    !0u32
+                }
+            }
+            VIRTIO_MMIO_SHM_BASE_HIGH => {
+                if let (Some(id), Some(base)) = (self.shm_region_id, self.shm_region_base) {
+                    if self.shm_select as u8 == id {
+                        (base >> 32) as u32
+                    } else {
+                        !0u32
+                    }
+                } else {
+                    !0u32
+                }
+            }
             VIRTIO_MMIO_CONFIG_GENERATION => self.config_generation,
             _ => {
                 warn!("{}: unsupported read address {}", self.debug_label(), info);
@@ -266,6 +318,7 @@ impl VirtioMmioDevice {
         match info.offset as u32 {
             VIRTIO_MMIO_DEVICE_FEATURES_SEL => self.device_feature_select = val,
             VIRTIO_MMIO_DRIVER_FEATURES_SEL => self.driver_feature_select = val,
+            VIRTIO_MMIO_SHM_SEL => self.shm_select = val,
             VIRTIO_MMIO_DRIVER_FEATURES => {
                 // Only 64 bits of features (2 pages) are defined for now, so limit
                 // device_feature_select to avoid shifting by 64 or more bits.
@@ -414,6 +467,18 @@ impl VirtioMmioDevice {
     pub fn assign_irq(&mut self, irq_evt: &IrqEdgeEvent, irq_num: u32) {
         self.interrupt_evt = Some(irq_evt.try_clone().unwrap());
         self.irq_num = irq_num;
+    }
+
+    /// Configure the shared memory region exposed via MMIO SHM registers.
+    pub fn set_shm_region(&mut self, id: u8, base: u64, len: u64) {
+        self.shm_region_id = Some(id);
+        self.shm_region_base = Some(base);
+        self.shm_region_len = Some(len);
+    }
+
+    /// Returns a mutable reference to the underlying VirtioDevice.
+    pub fn device_mut(&mut self) -> &mut dyn VirtioDevice {
+        self.device.as_mut()
     }
 
     pub fn keep_rds(&self) -> Vec<RawDescriptor> {
