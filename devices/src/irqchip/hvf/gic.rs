@@ -365,6 +365,20 @@ impl RedistributorState {
 
     /// Handle read from redistributor register space
     pub fn read(&self, offset: u64, data: &mut [u8]) {
+        // GICR_TYPER is a 64-bit register that the kernel reads with a single
+        // 8-byte load. Handle it specially to return both halves.
+        if offset == GICR_TYPER && data.len() >= 8 {
+            let mut typer_lo: u32 = (self.cpu_id as u32) << 8;
+            if self.is_last {
+                typer_lo |= 1 << 4;
+            }
+            let typer_hi: u32 = self.cpu_id as u32;
+            let typer: u64 = (typer_lo as u64) | ((typer_hi as u64) << 32);
+            let bytes = typer.to_le_bytes();
+            data[..8].copy_from_slice(&bytes);
+            return;
+        }
+
         let value = match offset {
             GICR_CTLR => self.ctlr.load(Ordering::SeqCst),
             GICR_IIDR => {
