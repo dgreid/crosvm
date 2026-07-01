@@ -29,6 +29,7 @@ use anyhow::Result;
 use base::debug;
 use base::error;
 use base::info;
+use base::MappedRegion;
 use base::open_file_or_duplicate;
 use base::trace;
 use base::warn;
@@ -43,6 +44,7 @@ use cros_fdt::Fdt;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::Bus;
+use devices::BusDevice;
 use devices::BusType;
 use devices::IrqEdgeEvent;
 use devices::Serial;
@@ -205,8 +207,8 @@ struct VcpuCoordinator {
     startup_signal: Condvar,
     /// Global shutdown flag
     shutdown: AtomicBool,
-    /// Boot VCPU handle for kicking out of hv_vcpu_run()
-    boot_vcpu: std::sync::Mutex<Option<u64>>,
+    /// Active VCPU handles for kicking out of hv_vcpu_run()
+    active_vcpus: std::sync::Mutex<HashMap<usize, u64>>,
     /// Flag indicating a device interrupt is pending and needs to be injected
     device_irq_pending: AtomicBool,
     /// The userspace GIC irq chip (for ICC register handling and interrupt state)
@@ -221,31 +223,40 @@ impl VcpuCoordinator {
             startup_requests: std::sync::Mutex::new(HashMap::new()),
             startup_signal: Condvar::new(),
             shutdown: AtomicBool::new(false),
-            boot_vcpu: std::sync::Mutex::new(None),
+            active_vcpus: std::sync::Mutex::new(HashMap::new()),
             device_irq_pending: AtomicBool::new(false),
             irq_chip,
             has_in_kernel_gic: AtomicBool::new(has_in_kernel_gic),
         }
     }
 
-    /// Set the boot VCPU handle for interrupt kicking
-    fn set_boot_vcpu(&self, vcpu_id: u64) {
-        *self.boot_vcpu.lock().expect("VcpuCoordinator mutex poisoned") = Some(vcpu_id);
+    /// Register an active VCPU handle for interrupt kicking.
+    fn register_vcpu(&self, cpu_id: usize, vcpu_handle: u64) {
+        self.active_vcpus
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned")
+            .insert(cpu_id, vcpu_handle);
     }
 
-    /// Kick the boot VCPU to exit hv_vcpu_run() for interrupt handling
-    fn kick_boot_vcpu(&self) {
+    /// Unregister a VCPU (e.g. on CPU_OFF or shutdown).
+    fn unregister_vcpu(&self, cpu_id: usize) {
+        self.active_vcpus
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned")
+            .remove(&cpu_id);
+    }
+
+    /// Kick all active VCPUs to exit hv_vcpu_run() for interrupt handling.
+    fn kick_vcpus(&self) {
         use hypervisor::hvf::hv_vcpus_exit;
 
-        if let Some(vcpu_id) = *self.boot_vcpu.lock().expect("VcpuCoordinator mutex poisoned") {
-            // SAFETY: vcpu_id is a valid handle stored by set_boot_vcpu, and we pass its
-            // address with count=1.
-            let ret = unsafe { hv_vcpus_exit(&vcpu_id, 1) };
+        let vcpus = self.active_vcpus.lock().expect("VcpuCoordinator mutex poisoned");
+        for (&_cpu_id, &vcpu_handle) in vcpus.iter() {
+            // SAFETY: vcpu_handle is a valid HVF handle stored by register_vcpu.
+            let ret = unsafe { hv_vcpus_exit(&vcpu_handle, 1) };
             if ret != 0 {
-                warn!("Failed to kick boot VCPU: error {}", ret);
+                warn!("Failed to kick VCPU {}: error {}", _cpu_id, ret);
             }
-        } else {
-            warn!("kick_boot_vcpu called but no boot VCPU registered");
         }
     }
 
@@ -289,7 +300,7 @@ impl VcpuCoordinator {
     /// Request VM shutdown from outside the VCPU threads.
     fn request_shutdown(&self) {
         self.signal_shutdown();
-        self.kick_boot_vcpu();
+        self.kick_vcpus();
     }
 }
 
@@ -825,12 +836,18 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         }
     }
 
-    // Set up virtio-gpu device (2D mode with stub display for now)
+    // Set up virtio-gpu device (2D mode)
     #[cfg(feature = "gpu")]
     let mut gpu_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
     #[cfg(feature = "gpu")]
+    let _gpu_shm_mmap: Option<base::MemoryMapping>; // keep allocation alive
+    #[cfg(feature = "gpu")]
     {
-        let gpu_params = GpuParameters::default();
+        let mut gpu_params = GpuParameters::default();
+        // Use a 64 MiB SHM region for MMIO transport instead of the 8 GiB PCI BAR default
+        const GPU_SHM_SIZE: u64 = 64 << 20;
+        gpu_params.pci_bar_size = GPU_SHM_SIZE;
+
         let (exit_evt_wrtube, _exit_evt_rdtube) = Tube::directional_pair()
             .context("failed to create GPU exit event tube")?;
         let (gpu_control_tube, _gpu_control_resp) = Tube::pair()
@@ -859,6 +876,44 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                 return Err(anyhow::anyhow!("GPU device setup failed: {}", e));
             }
         };
+
+        // Allocate a shared memory region for the GPU's host-visible memory.
+        // Place it above the high memory bank.
+        let gpu_shm_guest_addr = AARCH64_HIGH_MEM_START + high_size;
+        let gpu_shm_guest_addr =
+            (gpu_shm_guest_addr + 0xFFF) & !0xFFF; // page-align
+
+        let shm_mmap = base::MemoryMappingBuilder::new(GPU_SHM_SIZE as usize)
+            .build()
+            .context("failed to allocate GPU SHM region")?;
+
+        // SAFETY: shm_mmap is a valid host mapping that persists for the VM lifetime
+        // (held in _gpu_shm_mmap). GPU_SHM_SIZE matches the mapping size.
+        let ret = unsafe {
+            hv_vm_map(
+                shm_mmap.as_ptr() as *mut std::ffi::c_void,
+                gpu_shm_guest_addr,
+                GPU_SHM_SIZE as usize,
+                HV_MEMORY_READ | HV_MEMORY_WRITE,
+            )
+        };
+        hv_result(ret).context("failed to map GPU SHM region into guest")?;
+        info!(
+            "GPU SHM region mapped at guest={:#x}, size={:#x}",
+            gpu_shm_guest_addr, GPU_SHM_SIZE
+        );
+
+        mmio_device.set_shm_region(
+            devices::virtio::gpu::VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
+            gpu_shm_guest_addr,
+            GPU_SHM_SIZE,
+        );
+
+        _gpu_shm_mmap = Some(shm_mmap);
+
+        // Start the GPU worker thread. On Linux this happens via on_device_sandboxed()
+        // when the device is jailed, but macOS has no jails.
+        BusDevice::on_sandboxed(&mut mmio_device);
 
         let mmio_addr = next_mmio_addr;
         let irq = next_irq;
@@ -982,7 +1037,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
                                 // Set the device IRQ pending flag and kick the VCPU
                                 coordinator_for_handler.set_device_irq_pending();
-                                coordinator_for_handler.kick_boot_vcpu();
+                                coordinator_for_handler.kick_vcpus();
                             }
                             Ok(base::EventWaitResult::TimedOut) => {
                                 // No interrupt, continue polling
@@ -1067,7 +1122,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                         return ExitState::Crash;
                     }
                     // Register the boot VCPU handle for IRQ handler to kick
-                    coordinator.set_boot_vcpu(vcpu.vcpu_handle());
+                    coordinator.register_vcpu(vcpu_id, vcpu.vcpu_handle());
                     debug!("Boot VCPU initialized: PC={:#x}, X0={:#x}", kernel_entry, fdt_addr);
                     // Boot CPU - run immediately
                     run_vcpu_loop(vcpu, vcpu_id, mmio_bus, &guest_mem, &coordinator)
@@ -1563,8 +1618,13 @@ fn run_secondary_vcpu(
     vcpu.set_one_reg(VcpuRegAArch64::Pstate, pstate)
         .context("failed to set PSTATE for secondary VCPU")?;
 
-    // Run the VCPU (secondary VCPUs don't handle device interrupts)
-    run_vcpu_loop(vcpu, vcpu_id, mmio_bus, guest_mem, coordinator)
+    // Register this VCPU for interrupt delivery
+    coordinator.register_vcpu(vcpu_id, vcpu.vcpu_handle());
+
+    let result = run_vcpu_loop(vcpu, vcpu_id, mmio_bus, guest_mem, coordinator);
+
+    coordinator.unregister_vcpu(vcpu_id);
+    result
 }
 
 /// Walk ARM64 page tables to translate a kernel virtual address to a guest
@@ -1720,9 +1780,14 @@ fn handle_hypercall(vcpu: &mut dyn VcpuAArch64, _guest_mem: &GuestMemory, coordi
             (PSCI_MIGRATE_INFO_TYPE_NOT_SUPPORTED, None)
         }
         PSCI_AFFINITY_INFO_32 | PSCI_AFFINITY_INFO_64 => {
-            // Return 0 (ON) for any affinity level query
-            debug!("PSCI AFFINITY_INFO called");
-            (0, None) // AFFINITY_LEVEL_ON
+            let target_affinity = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
+            let target_cpu = (target_affinity & 0xFF) as usize;
+            let is_on = coordinator.active_vcpus
+                .lock()
+                .expect("VcpuCoordinator mutex poisoned")
+                .contains_key(&target_cpu);
+            debug!("PSCI AFFINITY_INFO cpu={} is_on={}", target_cpu, is_on);
+            (if is_on { 0 } else { 1 }, None) // 0=ON, 1=OFF
         }
         PSCI_CPU_SUSPEND_32 | PSCI_CPU_SUSPEND_64 => {
             debug!("PSCI CPU_SUSPEND requested");
@@ -1831,8 +1896,14 @@ fn handle_hypercall_with_result_buffer(
             (PSCI_MIGRATE_INFO_TYPE_NOT_SUPPORTED, None)
         }
         PSCI_AFFINITY_INFO_32 | PSCI_AFFINITY_INFO_64 => {
-            debug!("PSCI AFFINITY_INFO called");
-            (0, None) // AFFINITY_LEVEL_ON
+            let target_affinity = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
+            let target_cpu = (target_affinity & 0xFF) as usize;
+            let is_on = coordinator.active_vcpus
+                .lock()
+                .expect("VcpuCoordinator mutex poisoned")
+                .contains_key(&target_cpu);
+            debug!("PSCI AFFINITY_INFO cpu={} is_on={}", target_cpu, is_on);
+            (if is_on { 0 } else { 1 }, None)
         }
         PSCI_CPU_SUSPEND_32 | PSCI_CPU_SUSPEND_64 => {
             debug!("PSCI CPU_SUSPEND requested");
