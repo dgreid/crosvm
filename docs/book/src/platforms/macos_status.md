@@ -4,7 +4,7 @@ This document tracks the current status of the macOS ARM64 (Apple Silicon) port 
 
 ## Overview
 
-The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon Macs. This is an experimental port with VM boot, block devices, and shared filesystems working.
+The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon Macs. This is an experimental port with VM boot, block devices, shared filesystems, GPU, SMP, and audio working.
 
 ## Current Status
 
@@ -27,22 +27,21 @@ The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines o
 | Filesystem Sharing | ✅ Working | virtiofs via --shared-dir, host-guest file sharing |
 | MMIO Bus | ✅ Working | Full virtio MMIO v2 device support |
 | IRQ Delivery | ✅ Working | Edge-triggered SPI injection via IRQ handler thread |
+| GPU (virtio-gpu) | ✅ Working | 2D framebuffer via MMIO, DRM/fb0 device in guest |
+| SMP Boot | ✅ Working | PSCI CPU_ON, tested with up to 4 CPUs |
 
 ### Partially Working
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Serial Input | ⚠️ Workaround | Polling-based input, kqueue doesn't work with stdin |
-| Multiple VCPUs | ⚠️ Untested | Infrastructure exists, PSCI CPU_ON implemented |
-| Audio (virtio-snd) | ⚠️ Stub | Device registered, needs CoreAudio backend |
-| GPU (virtio-gpu) | ⚠️ Stub | 2D stub device registered, no rendering backend |
+| Audio (virtio-snd) | ⚠️ No driver | CoreAudio backend wired up, needs kernel with CONFIG_SND_VIRTIO |
 
 ### Not Yet Implemented
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Network | ❌ Missing | No virtio-net yet |
-| SMP Boot | ❌ Untested | PSCI CPU_ON wired up but secondary VCPUs untested |
 
 ## Boot Progress
 
