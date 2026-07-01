@@ -4,7 +4,7 @@ This document tracks the current status of the macOS ARM64 (Apple Silicon) port 
 
 ## Overview
 
-The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon Macs. This is an experimental port with basic VM execution working.
+The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon Macs. This is an experimental port with VM boot, block devices, and shared filesystems working.
 
 ## Current Status
 
@@ -13,68 +13,66 @@ The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines o
 | Feature | Status | Notes |
 |---------|--------|-------|
 | HVF VM Creation | ✅ Working | Creates VM using Hypervisor.framework |
-| Memory Mapping | ✅ Working | Maps guest memory with correct permissions |
+| Memory Mapping | ✅ Working | Split low/high banks to avoid GIC region |
 | Kernel Loading | ✅ Working | Loads ARM64 Linux kernel at 0x80000000 |
-| FDT Generation | ✅ Working | Generates device tree for guest |
+| Initrd Loading | ✅ Working | Loads initramfs for module-based kernels |
+| FDT Generation | ✅ Working | Generates device tree with memory, devices, initrd |
 | VCPU Execution | ✅ Working | Runs guest code in EL1 |
-| PSCI v1.1 | ✅ Working | VERSION, FEATURES, MIGRATE_INFO_TYPE |
+| PSCI v1.1 | ✅ Working | VERSION, FEATURES, MIGRATE_INFO_TYPE, CPU_ON |
 | Serial Output | ✅ Working | Earlycon via MMIO UART at 0x3f8 |
-| HVC Handling | ✅ Working | Hypercall trap and emulation |
+| HVC Handling | ✅ Working | Hypercall trap with page-table-based VA translation |
+| GIC Emulation | ✅ Working | HVF in-kernel GICv3 with userspace fallback |
+| Virtual Timer | ✅ Working | PPI 11 via GIC interrupt delivery |
+| Block Devices | ✅ Working | virtio-blk via MMIO transport, async I/O |
+| Filesystem Sharing | ✅ Working | virtiofs via --shared-dir, host-guest file sharing |
+| MMIO Bus | ✅ Working | Full virtio MMIO v2 device support |
+| IRQ Delivery | ✅ Working | Edge-triggered SPI injection via IRQ handler thread |
 
 ### Partially Working
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Virtual Timer | ⚠️ Partial | HVF vtimer APIs implemented, but no GIC to deliver interrupts |
-| MMIO Bus | ⚠️ Partial | Serial works, some accesses fail |
-| Serial Input | ⚠️ Disabled | kqueue doesn't work with stdin on macOS |
+| Serial Input | ⚠️ Workaround | Polling-based input, kqueue doesn't work with stdin |
+| Multiple VCPUs | ⚠️ Untested | Infrastructure exists, PSCI CPU_ON implemented |
+| Audio (virtio-snd) | ⚠️ Stub | Device registered, needs CoreAudio backend |
+| GPU (virtio-gpu) | ⚠️ Stub | 2D stub device registered, no rendering backend |
 
 ### Not Yet Implemented
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| GIC Emulation | ❌ Missing | Required for proper interrupt delivery |
-| Block Devices | ❌ Missing | No disk support yet |
 | Network | ❌ Missing | No virtio-net yet |
-| Multiple VCPUs | ❌ Untested | Code exists but needs testing |
+| SMP Boot | ❌ Untested | PSCI CPU_ON wired up but secondary VCPUs untested |
 
 ## Boot Progress
 
-The Linux kernel boots through:
+The Linux kernel (tested with Debian 6.1.0-49-arm64) boots fully:
 
 1. ✅ Early boot and earlycon initialization
 2. ✅ PSCI probe - detects PSCIv1.1
-3. ✅ CPU feature detection (BTI, PAC, LSE, etc.)
-4. ✅ Memory zone initialization
-5. ✅ RCU and scheduler setup
-6. ✅ SMP initialization (single CPU)
-7. ⚠️ Timer initialization fails ("No interrupt available")
-8. ✅ Uses jiffies clocksource as fallback
-9. ✅ devtmpfs, pinctrl, netlink initialized
-10. ⚠️ Continues with MMIO errors for unhandled devices
+3. ✅ CPU feature detection
+4. ✅ Memory zone initialization (split low/high banks)
+5. ✅ GIC initialization (in-kernel HVF GIC)
+6. ✅ Timer initialization (vtimer PPI 11)
+7. ✅ virtio-mmio device detection
+8. ✅ virtio-blk driver loads, partition table scanned
+9. ✅ ext4 root filesystem mounted
+10. ✅ virtiofs shared directories accessible
+11. ✅ Init process runs, shell prompt reached
 
-## Known Issues
+## Key Bug Fixes
 
-### Timer Interrupts
+### XZR Register in MMIO Data Abort (Critical)
 
-The kernel reports:
-```
-arch_timer: No interrupt available, giving up
-Failed to initialize '/timer': -22
-```
+The `get_reg(31)` and `set_reg(31, value)` methods in HVF VCPU incorrectly mapped register 31 to the PC instead of the zero register (XZR). In ARM64 data abort syndrome encoding, SRT=31 always means XZR. This caused every `str wzr, [addr]` instruction (write zero) during MMIO to write the PC value instead, corrupting virtio device status registers and preventing device activation.
 
-This is because:
-- HVF provides vtimer support via `hv_vcpu_set_vtimer_mask()` and exit reason `HV_EXIT_REASON_VTIMER_ACTIVATED`
-- We inject IRQs via `hv_vcpu_set_pending_interrupt()`
-- But without GIC emulation, the kernel can't identify which interrupt (PPI 11) fired
+### Page Table Walking for KASLR
 
-### Serial Input
+The HVC/PSCI workaround for `__arm_smccc_hvc` result buffer access now uses proper ARM64 4-level page table walking (TTBR1_EL1 + TCR_EL1) instead of hardcoded VA ranges, supporting any kernel with KASLR.
 
-Serial input is disabled because macOS kqueue doesn't work properly with stdin when it's a TTY. Serial output (kernel messages) works fine.
+### GICR_TYPER 64-bit Access
 
-### MMIO Errors
-
-Some MMIO accesses fail with "Invalid argument" for addresses not handled by the MMIO bus. These are typically for devices not yet emulated.
+The GIC redistributor's GICR_TYPER register is 64-bit but was only handling 32-bit reads. Added 8-byte read handling for kernels that read it as a single 64-bit load.
 
 ## Building and Running
 
@@ -82,71 +80,65 @@ Some MMIO accesses fail with "Invalid argument" for addresses not handled by the
 
 - macOS on Apple Silicon (M1/M2/M3)
 - Rust toolchain
-- ARM64 Linux kernel image
+- ARM64 Linux kernel image (uncompressed Image format)
 
 ### Build
 
 ```bash
-cargo build -p crosvm
-```
-
-### Sign with HVF Entitlement
-
-```bash
-cat > crosvm.entitlements << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.hypervisor</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-codesign --sign - --entitlements crosvm.entitlements --force target/debug/crosvm
+cargo build --release
+codesign --sign - --entitlements crosvm.entitlements --force target/release/crosvm
 ```
 
 ### Run
 
 ```bash
-./target/debug/crosvm run path/to/arm64_Image
+# Basic run with kernel
+./target/release/crosvm run -m 512 arm64_Image
+
+# With disk and initrd (e.g., Debian)
+./target/release/crosvm run -m 4096 \
+    --rwdisk disk.raw \
+    --initrd initrd.cpio \
+    -p "root=/dev/vda1 rw console=ttyS0 earlycon" \
+    vmlinuz
+
+# With shared directory
+./target/release/crosvm run -m 4096 \
+    --rwdisk disk.raw \
+    --initrd initrd.cpio \
+    --shared-dir "/path/on/host:tagname" \
+    -p "root=/dev/vda1 rw console=ttyS0 earlycon" \
+    vmlinuz
 ```
 
-With options:
+Guest can mount the shared directory:
 ```bash
-./target/debug/crosvm run --mem 1024 --cpus 1 path/to/arm64_Image
+mount -t virtiofs tagname /mnt
 ```
 
 ## Architecture Notes
 
 ### HVF PSCI Handling
 
-The PSCI implementation includes a workaround for HVF's handling of the ARM SMCCC calling convention:
+The PSCI implementation includes a workaround for HVF's handling of the ARM SMCCC calling convention. When HVC traps, the next instruction (`ldr x4, [sp]`) loads the result buffer address from the kernel stack, but HVF doesn't execute it. We walk the kernel's page tables to translate SP_EL1 to a physical address, read the result buffer pointer, set X4, and skip the ldr.
 
-1. When HVC traps, HVF advances PC past the HVC instruction
-2. The next instruction is typically `ldr x4, [sp]` to load the result buffer address
-3. HVF doesn't properly handle this load from SP_EL1 (kernel stack)
-4. We read SP_EL1 ourselves, extract the result buffer address from guest memory
-5. Set X4 to this address and advance PC by 4 to skip the ldr
-6. The guest's stp instruction then stores results correctly
+### Memory Layout
 
-### Virtual Timer
+```
+0x00000000 - 0x7FFFFFFF  Device/unmapped
+0x80000000 - 0xBFFFFFFF  Low RAM bank (up to 1 GiB)
+0xC0000000 - 0xC00FFFFF  GIC Distributor + Redistributors
+0xC0100000 - 0xFFFFFFFF  Unmapped
+0x100000000+             High RAM bank (remainder if >1 GiB)
+```
 
-HVF provides virtual timer support:
-- `hv_vcpu_set_vtimer_offset()` - set timer epoch
-- `hv_vcpu_set_vtimer_mask()` - enable/disable timer exits
-- `HV_EXIT_REASON_VTIMER_ACTIVATED` - timer fired
-- `hv_vcpu_set_pending_interrupt()` - inject IRQ
+### IRQ Delivery
 
-However, proper timer support requires GIC emulation to route the timer interrupt (PPI 11) to the guest.
-
-## Next Steps
-
-1. **GIC Emulation** - Implement minimal GICv3 distributor/redistributor to deliver timer interrupts
-2. **Block Device** - Add virtio-blk support for disk images
-3. **Network** - Add virtio-net support
-4. **Serial Input** - Implement polling-based input as alternative to kqueue
+Device interrupts flow through a dedicated IRQ handler thread:
+1. Device worker completes I/O → signals IrqEdgeEvent (pipe-based)
+2. IRQ handler thread polls events with 10ms timeout
+3. Calls `hv_gic_set_spi()` to inject SPI into HVF's in-kernel GIC
+4. Kicks boot VCPU via `hv_vcpus_exit()` to process the interrupt
 
 ## References
 
