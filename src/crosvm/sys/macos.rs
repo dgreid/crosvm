@@ -12,6 +12,7 @@ pub mod config;
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::io::Seek;
 use std::io::stdin;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -104,6 +105,11 @@ use crate::crosvm::config::Executable;
 // ARM64 memory layout constants (from aarch64 crate)
 const AARCH64_PHYS_MEM_START: u64 = 0x80000000;
 const AARCH64_FDT_ALIGN: u64 = 0x200000;
+
+// GIC is at 0xC0000000, so low memory bank can only go up to there.
+const AARCH64_LOW_MEM_MAX: u64 = 0xC0000000 - AARCH64_PHYS_MEM_START; // 1 GiB
+// High memory bank starts above 4 GiB device space.
+const AARCH64_HIGH_MEM_START: u64 = 0x1_0000_0000;
 
 // Serial device constants
 const AARCH64_SERIAL_ADDR: u64 = 0x3f8;
@@ -401,12 +407,24 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     let hvf = Hvf::new().context("failed to create HVF hypervisor")?;
     debug!("HVF hypervisor created");
 
-    // Create guest memory layout
-    let guest_mem_layout = vec![(
+    // Create guest memory layout.
+    // The GIC is mapped at 0xC0000000, so RAM must avoid that region.
+    // For memory > 1 GiB, split into a low bank (below GIC) and a high bank (above 4 GiB).
+    let low_size = memory_size.min(AARCH64_LOW_MEM_MAX);
+    let high_size = memory_size.saturating_sub(AARCH64_LOW_MEM_MAX);
+
+    let mut guest_mem_layout = vec![(
         GuestAddress(AARCH64_PHYS_MEM_START),
-        memory_size,
+        low_size,
         MemoryRegionOptions::new(),
     )];
+    if high_size > 0 {
+        guest_mem_layout.push((
+            GuestAddress(AARCH64_HIGH_MEM_START),
+            high_size,
+            MemoryRegionOptions::new(),
+        ));
+    }
 
     let guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
         .context("failed to create guest memory")?;
@@ -474,10 +492,47 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         loaded_kernel.size
     );
 
-    // Calculate FDT address (after kernel)
-    let kernel_end = loaded_kernel.address_range.end;
+    // Load initrd if specified
+    let initrd_range = if let Some(ref initrd_path) = cfg.initrd_path {
+        let mut initrd_file =
+            open_file_or_duplicate(initrd_path, OpenOptions::new().read(true))
+                .with_context(|| {
+                    format!("failed to open initrd {}", initrd_path.display())
+                })?;
+        let initrd_start = GuestAddress(
+            ((loaded_kernel.address_range.end + AARCH64_FDT_ALIGN)
+                / AARCH64_FDT_ALIGN)
+                * AARCH64_FDT_ALIGN,
+        );
+        let initrd_size = std::io::Read::read_to_end(&mut initrd_file, &mut Vec::new())
+            .context("failed to get initrd size")?;
+        initrd_file
+            .seek(std::io::SeekFrom::Start(0))
+            .context("failed to seek initrd")?;
+        let mut initrd_data = vec![0u8; initrd_size];
+        std::io::Read::read_exact(&mut initrd_file, &mut initrd_data)
+            .context("failed to read initrd")?;
+        guest_mem
+            .write_at_addr(&initrd_data, initrd_start)
+            .context("failed to write initrd to guest memory")?;
+        info!(
+            "Initrd loaded at {:#x}, size={}",
+            initrd_start.offset(),
+            initrd_size
+        );
+        Some((initrd_start.offset(), initrd_start.offset() + initrd_size as u64))
+    } else {
+        None
+    };
+
+    // Calculate FDT address (after kernel and initrd)
+    let last_loaded_end = if let Some((_, end)) = initrd_range {
+        end
+    } else {
+        loaded_kernel.address_range.end
+    };
     let fdt_address = GuestAddress(
-        ((kernel_end + 1 + AARCH64_FDT_ALIGN - 1) / AARCH64_FDT_ALIGN) * AARCH64_FDT_ALIGN,
+        ((last_loaded_end + 1 + AARCH64_FDT_ALIGN - 1) / AARCH64_FDT_ALIGN) * AARCH64_FDT_ALIGN,
     );
     debug!("FDT will be placed at {:#x}", fdt_address.offset());
 
@@ -493,11 +548,13 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         num_mmio_devices += 1; // virtio-gpu
     }
     let mut fdt = create_minimal_fdt(
-        memory_size,
+        low_size,
+        high_size,
         vcpu_count,
         fdt_address,
         num_mmio_devices,
         &cfg.params,
+        initrd_range,
     )?;
     let fdt_data = fdt.finish().context("failed to finish FDT")?;
 
@@ -974,6 +1031,14 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                     return ExitState::Crash;
                 }
 
+                // Set MPIDR_EL1 so the kernel can identify each CPU.
+                // Aff0 = cpu_id, bit 31 set (Res1 in AArch64 MPIDR format).
+                let mpidr = (1u64 << 31) | (vcpu_id as u64);
+                if let Err(e) = vcpu.set_mpidr_el1(mpidr) {
+                    error!("Failed to set MPIDR for VCPU {}: {}", vcpu_id, e);
+                    return ExitState::Crash;
+                }
+
                 // Set up virtual timer
                 if let Err(e) = vcpu.set_vtimer_offset(0) {
                     error!("Failed to set vtimer offset for VCPU {}: {}", vcpu_id, e);
@@ -1061,11 +1126,13 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
 /// Create a minimal FDT (Flattened Device Tree) for booting Linux.
 fn create_minimal_fdt(
-    memory_size: u64,
+    low_mem_size: u64,
+    high_mem_size: u64,
     vcpu_count: usize,
     _fdt_address: GuestAddress,
     num_mmio_devices: usize,
     extra_kernel_params: &[String],
+    initrd_range: Option<(u64, u64)>,
 ) -> Result<Fdt> {
     let mut fdt = Fdt::new(&[]);
 
@@ -1103,19 +1170,34 @@ fn create_minimal_fdt(
     chosen_node.set_prop("bootargs", bootargs.as_str())?;
     chosen_node.set_prop("stdout-path", "/uart@3f8")?;
 
-    // TODO: Adding kaslr-seed here would enable kernel ASLR, but the HVC ldr
-    // workaround in handle_hypercall_with_result_buffer uses a hardcoded kernel
-    // linear map offset (0xffffc00080000000) that assumes KASLR is disabled.
-    // Once that workaround is removed, kaslr-seed and rng-seed should be added:
+    if let Some((initrd_start, initrd_end)) = initrd_range {
+        chosen_node.set_prop("linux,initrd-start", initrd_start)?;
+        chosen_node.set_prop("linux,initrd-end", initrd_end)?;
+    }
+
+    // TODO: Adding kaslr-seed here would enable kernel ASLR. The HVC
+    // workaround in handle_hypercall_with_result_buffer now uses page table
+    // walking which handles KASLR, but this hasn't been tested with KASLR
+    // enabled yet. Uncomment once verified:
     //   chosen_node.set_prop("kaslr-seed", rand::random::<u64>())?;
     //   let mut rng_seed = [0u8; 256];
     //   OsRng.fill_bytes(&mut rng_seed);
     //   chosen_node.set_prop("rng-seed", &rng_seed)?;
 
-    // Memory node
+    // Memory node(s) — low bank always present, high bank if memory > 1 GiB.
     let memory_node = root_node.subnode_mut("memory@80000000")?;
     memory_node.set_prop("device_type", "memory")?;
-    memory_node.set_prop("reg", &[AARCH64_PHYS_MEM_START, memory_size])?;
+    if high_mem_size > 0 {
+        memory_node.set_prop(
+            "reg",
+            &[
+                AARCH64_PHYS_MEM_START, low_mem_size,
+                AARCH64_HIGH_MEM_START, high_mem_size,
+            ],
+        )?;
+    } else {
+        memory_node.set_prop("reg", &[AARCH64_PHYS_MEM_START, low_mem_size])?;
+    }
 
     // CPUs node
     let cpus_node = root_node.subnode_mut("cpus")?;
@@ -1293,7 +1375,6 @@ fn run_vcpu_loop(
                 return Ok(ExitState::Stop);
             }
             Ok(VcpuExit::Hypercall) => {
-                // Get SP_EL1 (the kernel stack pointer, since kernel uses EL1h mode)
                 let sp_el1 = vcpu.get_sp_el1().unwrap_or(0);
                 let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0)).unwrap_or(0);
 
@@ -1303,15 +1384,8 @@ fn run_vcpu_loop(
                     sp_el1,
                 );
 
-                // Translate kernel virtual address to guest physical address
-                // The kernel uses a linear map: VA = 0xffffc000_80000000 + offset
-                let sp_phys = if sp_el1 >= 0xffffc00080000000 && sp_el1 < 0xffffc000a0000000 {
-                    Some(sp_el1 - 0xffffc00080000000 + 0x80000000)
-                } else if sp_el1 >= 0x80000000 && sp_el1 < 0xa0000000 {
-                    Some(sp_el1)
-                } else {
-                    None
-                };
+                // Translate SP_EL1 to guest physical address via page table walk
+                let sp_phys = translate_kernel_va(&vcpu, &guest_mem, sp_el1);
 
                 let hypercall_exit = if let Some(phys) = sp_phys {
                     let gpa = GuestAddress(phys);
@@ -1491,6 +1565,69 @@ fn run_secondary_vcpu(
 
     // Run the VCPU (secondary VCPUs don't handle device interrupts)
     run_vcpu_loop(vcpu, vcpu_id, mmio_bus, guest_mem, coordinator)
+}
+
+/// Walk ARM64 page tables to translate a kernel virtual address to a guest
+/// physical address. Uses TTBR1_EL1 as the page table root and TCR_EL1 to
+/// determine the translation granule and number of levels.
+fn translate_kernel_va(vcpu: &HvfVcpu, guest_mem: &GuestMemory, va: u64) -> Option<u64> {
+    let ttbr1 = vcpu.get_ttbr1_el1().ok()?;
+    let tcr = vcpu.get_tcr_el1().ok()?;
+
+    let t1sz = ((tcr >> 16) & 0x3F) as u32;
+    let va_bits = 64 - t1sz;
+
+    // TG1 field [31:30]: 01=16KB, 10=4KB, 11=64KB
+    let tg1 = ((tcr >> 30) & 0x3) as u32;
+    let granule_bits: u32 = match tg1 {
+        1 => 14,
+        3 => 16,
+        _ => 12, // 4KB (value 2 or default)
+    };
+    let bits_per_level = granule_bits - 3; // entries per table = 2^bits_per_level
+
+    let table_base = ttbr1 & 0x0000_FFFF_FFFF_F000;
+
+    // Number of levels needed to cover va_bits
+    let levels =
+        (va_bits.saturating_sub(granule_bits) + bits_per_level - 1) / bits_per_level;
+    let start_level = 4u32.saturating_sub(levels);
+    let level_mask = (1u64 << bits_per_level) - 1;
+
+    let mut table_pa = table_base;
+
+    for level in start_level..4 {
+        let shift = granule_bits + bits_per_level * (3 - level);
+        let index = (va >> shift) & level_mask;
+
+        let entry_pa = table_pa + index * 8;
+        let mut entry_bytes = [0u8; 8];
+        guest_mem
+            .read_at_addr(&mut entry_bytes, GuestAddress(entry_pa))
+            .ok()?;
+        let entry = u64::from_le_bytes(entry_bytes);
+
+        if entry & 1 == 0 {
+            return None;
+        }
+
+        if level < 3 && (entry & 0b10) == 0 {
+            // Block descriptor
+            let block_mask = (1u64 << shift) - 1;
+            let output_addr = entry & 0x0000_FFFF_FFFF_F000 & !block_mask;
+            return Some(output_addr | (va & block_mask));
+        }
+
+        if level == 3 {
+            let page_mask = (1u64 << granule_bits) - 1;
+            let output_addr = entry & 0x0000_FFFF_FFFF_F000;
+            return Some(output_addr | (va & page_mask));
+        }
+
+        table_pa = entry & 0x0000_FFFF_FFFF_F000;
+    }
+
+    None
 }
 
 /// Handle PSCI hypercalls.
