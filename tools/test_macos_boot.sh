@@ -1,15 +1,17 @@
 #!/bin/bash
 # Boot and device test script for macOS ARM64
 #
-# Runs three test tiers:
+# Runs five test tiers:
 #   1. Kernel boot (bare kernel, no devices)
 #   2. Block device + root mount (with Debian kernel + initrd + disk)
 #   3. Virtiofs shared directory (host-guest filesystem sharing)
+#   4. GPU (virtio-gpu DRM device detection)
+#   5. SMP (multi-CPU boot)
 #
 # Usage:
 #   ./tools/test_macos_boot.sh [test_tier]
 #
-#   test_tier: "boot", "block", "virtiofs", or "all" (default: "all")
+#   test_tier: "boot", "block", "virtiofs", "gpu", "smp", or "all" (default: "all")
 #
 # Environment variables:
 #   CROSVM_BIN - Path to crosvm binary (default: target/release/crosvm)
@@ -67,6 +69,25 @@ ensure_signed() {
 PLIST
     fi
     codesign --sign - --entitlements "$CROSVM_ENTITLEMENTS" --force "$CROSVM_BIN" 2>/dev/null
+}
+
+# Helper: build a custom initrd from the base mini-initrd with a custom init script.
+# Usage: build_custom_initrd <init_script_path> <output_cpio_path>
+build_custom_initrd() {
+    local init_script="$1"
+    local output="$2"
+    local abs_initrd
+    abs_initrd=$(cd "$(dirname "$DEBIAN_DIR/mini-initrd.cpio")" && echo "$PWD/$(basename "mini-initrd.cpio")")
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local saved_dir="$PWD"
+    cd "$tmp_dir"
+    cpio -i < "$abs_initrd" 2>/dev/null || true
+    cp "$init_script" init
+    chmod +x init
+    find . | cpio -o -H newc > "$output" 2>/dev/null
+    cd "$saved_dir"
+    rm -rf "$tmp_dir"
 }
 
 echo "=== crosvm macOS Boot & Device Tests ==="
@@ -136,22 +157,11 @@ run_virtiofs_test() {
         return
     fi
 
-    # Create a temporary shared directory with a marker file
     local shared_dir
     shared_dir=$(mktemp -d)
     echo "VIRTIOFS_TEST_MARKER" > "$shared_dir/test_marker.txt"
 
-    # Resolve paths to absolute before changing directories
-    local abs_initrd
-    abs_initrd=$(cd "$(dirname "$initrd")" && echo "$PWD/$(basename "$initrd")")
-
-    # Build a temporary init that mounts virtiofs and checks the marker
-    local tmp_initrd_dir
-    tmp_initrd_dir=$(mktemp -d)
-    local saved_dir="$PWD"
-    cd "$tmp_initrd_dir"
-    cpio -i < "$abs_initrd" 2>/dev/null || true
-    cat > init << 'INITEOF'
+    cat > /tmp/crosvm_virtiofs_init << 'INITEOF'
 #!/bin/sh
 set +e
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
@@ -176,10 +186,9 @@ if [ -f /newroot/mnt/test_marker.txt ]; then
 fi
 exec /bin/sh
 INITEOF
-    chmod +x init
+
     local test_initrd="/tmp/crosvm_virtiofs_test.cpio"
-    find . | cpio -o -H newc > "$test_initrd" 2>/dev/null
-    cd "$saved_dir"
+    build_custom_initrd /tmp/crosvm_virtiofs_init "$test_initrd"
 
     timeout 35 "$CROSVM_BIN" run -m 4096 \
         --rwdisk "$disk" \
@@ -190,8 +199,87 @@ INITEOF
 
     check_output "VIRTIOFS_TEST_MARKER" "Virtiofs mount and file read"
 
-    # Cleanup
-    rm -rf "$shared_dir" "$tmp_initrd_dir" "$test_initrd"
+    rm -rf "$shared_dir" "$test_initrd" /tmp/crosvm_virtiofs_init
+    echo ""
+}
+
+# ============================================================
+# Test 4: GPU (virtio-gpu DRM detection)
+# ============================================================
+run_gpu_test() {
+    echo "--- Test: GPU (virtio-gpu) ---"
+    local kernel="$DEBIAN_DIR/debian-vmlinuz"
+    local initrd="$DEBIAN_DIR/mini-initrd.cpio"
+    local disk="$DEBIAN_DIR/debian-work.raw"
+
+    if [ ! -f "$kernel" ] || [ ! -f "$initrd" ] || [ ! -f "$disk" ]; then
+        skip "GPU test (missing Debian test files in $DEBIAN_DIR)"
+        return
+    fi
+
+    cat > /tmp/crosvm_gpu_init << 'INITEOF'
+#!/bin/sh
+set +e
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+/bin/insmod /lib/modules/virtio_mmio.ko
+/bin/insmod /lib/modules/virtio_blk.ko
+/bin/insmod /lib/modules/crc32c_generic.ko
+/bin/insmod /lib/modules/libcrc32c.ko
+/bin/insmod /lib/modules/crc16.ko
+/bin/insmod /lib/modules/mbcache.ko
+/bin/insmod /lib/modules/jbd2.ko
+/bin/insmod /lib/modules/ext4.ko
+sleep 1
+/bin/mount -t ext4 /dev/vda1 /newroot
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/drivers/gpu/drm/drm.ko 2>/dev/null
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/drivers/gpu/drm/drm_kms_helper.ko 2>/dev/null
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/drivers/gpu/drm/drm_shmem_helper.ko 2>/dev/null
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/drivers/virtio/virtio_dma_buf.ko 2>/dev/null
+/bin/insmod /newroot/lib/modules/6.1.0-49-arm64/kernel/drivers/gpu/drm/virtio/virtio-gpu.ko 2>/dev/null
+exec /bin/sh
+INITEOF
+
+    local test_initrd="/tmp/crosvm_gpu_test.cpio"
+    build_custom_initrd /tmp/crosvm_gpu_init "$test_initrd"
+
+    timeout 35 "$CROSVM_BIN" run -m 4096 \
+        --rwdisk "$disk" \
+        --initrd "$test_initrd" \
+        -p "root=/dev/vda1 rw console=ttyS0 earlycon panic=5" \
+        "$kernel" < /dev/null > "$BOOT_LOG" 2>&1 || true
+
+    check_output "Initialized virtio_gpu" "virtio-gpu driver initialized"
+    check_output "virtio_gpudrmfb" "DRM framebuffer device created"
+
+    rm -rf "$test_initrd" /tmp/crosvm_gpu_init
+    echo ""
+}
+
+# ============================================================
+# Test 5: SMP (multi-CPU boot)
+# ============================================================
+run_smp_test() {
+    echo "--- Test: SMP (2 CPUs) ---"
+    local kernel="$DEBIAN_DIR/debian-vmlinuz"
+    local initrd="$DEBIAN_DIR/mini-initrd.cpio"
+    local disk="$DEBIAN_DIR/debian-work.raw"
+
+    if [ ! -f "$kernel" ] || [ ! -f "$initrd" ] || [ ! -f "$disk" ]; then
+        skip "SMP test (missing Debian test files in $DEBIAN_DIR)"
+        return
+    fi
+
+    timeout 35 "$CROSVM_BIN" run -m 4096 --cpus 2 \
+        --rwdisk "$disk" \
+        --initrd "$initrd" \
+        -p "root=/dev/vda1 rw console=ttyS0 earlycon panic=5" \
+        "$kernel" < /dev/null > "$BOOT_LOG" 2>&1 || true
+
+    check_output "CPU1: Booted secondary processor" "Secondary CPU booted"
+    check_output "Brought up 1 node, 2 CPUs" "Both CPUs online"
     echo ""
 }
 
@@ -208,14 +296,22 @@ case "$TEST_TIER" in
     virtiofs)
         run_virtiofs_test
         ;;
+    gpu)
+        run_gpu_test
+        ;;
+    smp)
+        run_smp_test
+        ;;
     all)
         run_boot_test
         run_block_test
         run_virtiofs_test
+        run_gpu_test
+        run_smp_test
         ;;
     *)
         echo "Unknown test tier: $TEST_TIER"
-        echo "Usage: $0 [boot|block|virtiofs|all]"
+        echo "Usage: $0 [boot|block|virtiofs|gpu|smp|all]"
         exit 1
         ;;
 esac
