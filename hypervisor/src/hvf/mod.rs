@@ -762,7 +762,7 @@ impl HvfVcpu {
                 // are all valid discriminant values.
                 unsafe { std::mem::transmute::<u32, hv_reg_t>(reg as u32) }
             }
-            31 => return self.get_pc(),
+            31 => return Ok(0),
             _ => return Err(Error::new(EINVAL)),
         };
 
@@ -781,7 +781,7 @@ impl HvfVcpu {
                 // are all valid discriminant values.
                 unsafe { std::mem::transmute::<u32, hv_reg_t>(reg as u32) }
             }
-            31 => return self.set_pc(value),
+            31 => return Ok(()),
             _ => return Err(Error::new(EINVAL)),
         };
 
