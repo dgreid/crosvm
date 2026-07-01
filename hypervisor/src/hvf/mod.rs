@@ -852,12 +852,41 @@ impl HvfVcpu {
         Ok(value)
     }
 
+    /// Set MPIDR_EL1 (multiprocessor affinity register).
+    pub fn set_mpidr_el1(&self, value: u64) -> Result<()> {
+        // SAFETY: We're writing a valid system register
+        let ret = unsafe {
+            hv_vcpu_set_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_MPIDR_EL1, value)
+        };
+        hv_result(ret)
+    }
+
     /// Get SP_EL0 (userspace stack pointer).
     pub fn get_sp_el0(&self) -> Result<u64> {
         let mut value: u64 = 0;
         // SAFETY: We're reading a valid system register
         let ret = unsafe {
             hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_SP_EL0, &mut value)
+        };
+        hv_result(ret)?;
+        Ok(value)
+    }
+
+    /// Get TTBR1_EL1 (kernel page table base register).
+    pub fn get_ttbr1_el1(&self) -> Result<u64> {
+        let mut value: u64 = 0;
+        let ret = unsafe {
+            hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_TTBR1_EL1, &mut value)
+        };
+        hv_result(ret)?;
+        Ok(value)
+    }
+
+    /// Get TCR_EL1 (translation control register).
+    pub fn get_tcr_el1(&self) -> Result<u64> {
+        let mut value: u64 = 0;
+        let ret = unsafe {
+            hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_TCR_EL1, &mut value)
         };
         hv_result(ret)?;
         Ok(value)
