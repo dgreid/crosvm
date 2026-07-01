@@ -51,6 +51,8 @@ use device_virtio_snd::parameters::Parameters as SndParameters;
 use device_virtio_snd::parameters::StreamSourceBackend;
 #[cfg(feature = "audio")]
 use device_virtio_snd::sys::StreamSourceBackend as SysStreamSourceBackend;
+use devices::irqchip::gic_redist_base;
+use devices::irqchip::GicCpuInterface;
 use devices::irqchip::HvfIrqChip;
 use devices::irqchip::AARCH64_GIC_DIST_BASE;
 use devices::irqchip::AARCH64_GIC_DIST_SIZE;
@@ -203,8 +205,8 @@ struct VcpuCoordinator {
     startup_signal: Condvar,
     /// Global shutdown flag
     shutdown: AtomicBool,
-    /// Boot VCPU handle for kicking out of hv_vcpu_run()
-    boot_vcpu: std::sync::Mutex<Option<u64>>,
+    /// Active VCPU handles for kicking out of hv_vcpu_run()
+    active_vcpus: std::sync::Mutex<HashMap<usize, u64>>,
     /// Flag indicating a device interrupt is pending and needs to be injected
     device_irq_pending: AtomicBool,
     /// The userspace GIC irq chip (for ICC register handling and interrupt state)
@@ -219,31 +221,43 @@ impl VcpuCoordinator {
             startup_requests: std::sync::Mutex::new(HashMap::new()),
             startup_signal: Condvar::new(),
             shutdown: AtomicBool::new(false),
-            boot_vcpu: std::sync::Mutex::new(None),
+            active_vcpus: std::sync::Mutex::new(HashMap::new()),
             device_irq_pending: AtomicBool::new(false),
             irq_chip,
             has_in_kernel_gic: AtomicBool::new(has_in_kernel_gic),
         }
     }
 
-    /// Set the boot VCPU handle for interrupt kicking
-    fn set_boot_vcpu(&self, vcpu_id: u64) {
-        *self.boot_vcpu.lock().expect("VcpuCoordinator mutex poisoned") = Some(vcpu_id);
+    /// Register an active VCPU handle for interrupt kicking.
+    fn register_vcpu(&self, cpu_id: usize, vcpu_handle: u64) {
+        self.active_vcpus
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned")
+            .insert(cpu_id, vcpu_handle);
     }
 
-    /// Kick the boot VCPU to exit hv_vcpu_run() for interrupt handling
-    fn kick_boot_vcpu(&self) {
+    /// Unregister a VCPU (e.g. on CPU_OFF or shutdown).
+    fn unregister_vcpu(&self, cpu_id: usize) {
+        self.active_vcpus
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned")
+            .remove(&cpu_id);
+    }
+
+    /// Kick all active VCPUs to exit hv_vcpu_run() for interrupt handling.
+    fn kick_vcpus(&self) {
         use hypervisor::hvf::hv_vcpus_exit;
 
-        if let Some(vcpu_id) = *self.boot_vcpu.lock().expect("VcpuCoordinator mutex poisoned") {
-            // SAFETY: vcpu_id is a valid handle stored by set_boot_vcpu, and we pass its
-            // address with count=1.
-            let ret = unsafe { hv_vcpus_exit(&vcpu_id, 1) };
+        let vcpus = self
+            .active_vcpus
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned");
+        for (&_cpu_id, &vcpu_handle) in vcpus.iter() {
+            // SAFETY: vcpu_handle is a valid HVF handle stored by register_vcpu.
+            let ret = unsafe { hv_vcpus_exit(&vcpu_handle, 1) };
             if ret != 0 {
-                warn!("Failed to kick boot VCPU: error {}", ret);
+                warn!("Failed to kick VCPU {}: error {}", _cpu_id, ret);
             }
-        } else {
-            warn!("kick_boot_vcpu called but no boot VCPU registered");
         }
     }
 
@@ -302,7 +316,7 @@ impl VcpuCoordinator {
     /// Request VM shutdown from outside the VCPU threads.
     fn request_shutdown(&self) {
         self.signal_shutdown();
-        self.kick_boot_vcpu();
+        self.kick_vcpus();
     }
 }
 
@@ -857,12 +871,18 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         }
     }
 
-    // Set up virtio-gpu device (2D mode with stub display for now)
+    // Set up virtio-gpu device (2D mode)
     #[cfg(feature = "gpu")]
     let mut gpu_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
     #[cfg(feature = "gpu")]
+    let _gpu_shm_mmap: Option<base::MemoryMapping>; // keep allocation alive
+    #[cfg(feature = "gpu")]
     {
-        let gpu_params = GpuParameters::default();
+        let mut gpu_params = GpuParameters::default();
+        // Use a 64 MiB SHM region for MMIO transport instead of the 8 GiB PCI BAR default
+        const GPU_SHM_SIZE: u64 = 64 << 20;
+        gpu_params.pci_bar_size = GPU_SHM_SIZE;
+
         let (exit_evt_wrtube, _exit_evt_rdtube) = Tube::directional_pair()
             .context("failed to create GPU exit event tube")?;
         let (gpu_control_tube, _gpu_control_resp) = Tube::pair()
@@ -888,6 +908,44 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                     return Err(anyhow::anyhow!("GPU device setup failed: {}", e));
                 }
             };
+
+        // Allocate a shared memory region for the GPU's host-visible memory.
+        // Place it above the high memory bank.
+        let gpu_shm_guest_addr = AARCH64_HIGH_MEM_START + high_size;
+        let gpu_shm_guest_addr =
+            (gpu_shm_guest_addr + 0xFFF) & !0xFFF; // page-align
+
+        let shm_mmap = base::MemoryMappingBuilder::new(GPU_SHM_SIZE as usize)
+            .build()
+            .context("failed to allocate GPU SHM region")?;
+
+        // SAFETY: shm_mmap is a valid host mapping that persists for the VM lifetime
+        // (held in _gpu_shm_mmap). GPU_SHM_SIZE matches the mapping size.
+        let ret = unsafe {
+            hv_vm_map(
+                shm_mmap.as_ptr() as *mut std::ffi::c_void,
+                gpu_shm_guest_addr,
+                GPU_SHM_SIZE as usize,
+                HV_MEMORY_READ | HV_MEMORY_WRITE,
+            )
+        };
+        hv_result(ret).context("failed to map GPU SHM region into guest")?;
+        info!(
+            "GPU SHM region mapped at guest={:#x}, size={:#x}",
+            gpu_shm_guest_addr, GPU_SHM_SIZE
+        );
+
+        mmio_device.set_shm_region(
+            devices::virtio::gpu::VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
+            gpu_shm_guest_addr,
+            GPU_SHM_SIZE,
+        );
+
+        _gpu_shm_mmap = Some(shm_mmap);
+
+        // Start the GPU worker thread. On Linux this happens via on_device_sandboxed()
+        // when the device is jailed, but macOS has no jails.
+        BusDevice::on_sandboxed(&mut mmio_device);
 
         let mmio_addr = next_mmio_addr;
         let irq = next_irq;
@@ -1015,7 +1073,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
                                 // Set the device IRQ pending flag and kick the VCPU
                                 coordinator_for_handler.set_device_irq_pending();
-                                coordinator_for_handler.kick_boot_vcpu();
+                                coordinator_for_handler.kick_vcpus();
                             }
                             Ok(base::EventWaitResult::TimedOut) => {
                                 // No interrupt, continue polling
@@ -1100,7 +1158,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                         return ExitState::Crash;
                     }
                     // Register the boot VCPU handle for IRQ handler to kick
-                    coordinator.set_boot_vcpu(vcpu.vcpu_handle());
+                    coordinator.register_vcpu(vcpu_id, vcpu.vcpu_handle());
                     debug!(
                         "Boot VCPU initialized: PC={:#x}, X0={:#x}",
                         kernel_entry, fdt_addr
@@ -1624,8 +1682,13 @@ fn run_secondary_vcpu(
     vcpu.set_one_reg(VcpuRegAArch64::Pstate, pstate)
         .context("failed to set PSTATE for secondary VCPU")?;
 
-    // Run the VCPU (secondary VCPUs don't handle device interrupts)
-    run_vcpu_loop(vcpu, vcpu_id, mmio_bus, guest_mem, coordinator)
+    // Register this VCPU for interrupt delivery
+    coordinator.register_vcpu(vcpu_id, vcpu.vcpu_handle());
+
+    let result = run_vcpu_loop(vcpu, vcpu_id, mmio_bus, guest_mem, coordinator);
+
+    coordinator.unregister_vcpu(vcpu_id);
+    result
 }
 
 /// Handle PSCI hypercalls.
@@ -1701,9 +1764,15 @@ fn handle_hypercall(
             (PSCI_MIGRATE_INFO_TYPE_NOT_SUPPORTED, None)
         }
         PSCI_AFFINITY_INFO_32 | PSCI_AFFINITY_INFO_64 => {
-            // Return 0 (ON) for any affinity level query
-            debug!("PSCI AFFINITY_INFO called");
-            (0, None) // AFFINITY_LEVEL_ON
+            let target_affinity = vcpu.get_one_reg(VcpuRegAArch64::X(1))?;
+            let target_cpu = (target_affinity & 0xFF) as usize;
+            let is_on = coordinator
+                .active_vcpus
+                .lock()
+                .expect("VcpuCoordinator mutex poisoned")
+                .contains_key(&target_cpu);
+            debug!("PSCI AFFINITY_INFO cpu={} is_on={}", target_cpu, is_on);
+            (if is_on { 0 } else { 1 }, None) // 0=ON, 1=OFF
         }
         PSCI_CPU_SUSPEND_32 | PSCI_CPU_SUSPEND_64 => {
             debug!("PSCI CPU_SUSPEND requested");
@@ -1722,130 +1791,10 @@ fn handle_hypercall(
     // Set return value in X0 (per SMCCC convention)
     vcpu.set_one_reg(VcpuRegAArch64::X(0), result)?;
 
-    // For HVF, we MUST advance PC past the HVC instruction.
-    // Note: This fallback path may not work correctly due to HVF ldr issue.
-    // The preferred path is handle_hypercall_with_result_buffer which works around this.
-    vcpu.set_one_reg(VcpuRegAArch64::Pc, pc + 4)?;
-
-    debug!("PSCI returned: result={:#x}, new_PC={:#x}", result, pc + 4);
-
-    // Restore callee-saved registers (X4-X17) per ARM SMCCC specification
-    for (i, &value) in saved_regs.iter().enumerate() {
-        let reg_num = (i + 4) as u8;
-        if let Err(e) = vcpu.set_one_reg(VcpuRegAArch64::X(reg_num), value) {
-            error!("Failed to restore X{}: {:?}", reg_num, e);
-        }
-    }
-
-    Ok(exit_state)
-}
-
-/// Handle PSCI hypercalls with explicit result buffer address.
-/// This version skips the problematic `ldr x4, [sp]` instruction by:
-/// 1. Setting X4 to the result buffer address ourselves
-/// 2. Advancing PC by 4 to skip the ldr instruction (HVF already advanced past HVC)
-fn handle_hypercall_with_result_buffer(
-    vcpu: &mut dyn VcpuAArch64,
-    _guest_mem: &GuestMemory,
-    result_buffer_addr: u64,
-    coordinator: &VcpuCoordinator,
-) -> Result<Option<ExitState>> {
-    // Get the function ID from X0
-    let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0)).unwrap_or(0);
-    let pc = vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap_or(0);
-
-    info!(
-        "PSCI call: function_id={:#x}, result_buf={:#x}",
-        function_id, result_buffer_addr
-    );
-
-    let (result, exit_state) = match function_id {
-        PSCI_VERSION => {
-            info!("PSCI VERSION called, returning 1.1");
-            (0x00010001u64, None)
-        }
-        PSCI_CPU_OFF => {
-            info!("PSCI CPU_OFF requested - halting VCPU");
-            (PSCI_SUCCESS, Some(ExitState::Stop))
-        }
-        PSCI_CPU_ON_32 | PSCI_CPU_ON_64 => {
-            // CPU_ON: X1 = target_cpu MPIDR, X2 = entry_point, X3 = context_id
-            let target_mpidr = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
-            let entry_point = vcpu.get_one_reg(VcpuRegAArch64::X(2)).unwrap_or(0);
-            let context_id = vcpu.get_one_reg(VcpuRegAArch64::X(3)).unwrap_or(0);
-
-            // For now, assume MPIDR affinity level 0 directly maps to VCPU ID
-            let target_vcpu_id = (target_mpidr & 0xFF) as usize;
-
-            info!(
-                "PSCI CPU_ON: target_mpidr={:#x} (vcpu_id={}), entry_point={:#x}, context_id={:#x}",
-                target_mpidr, target_vcpu_id, entry_point, context_id
-            );
-
-            // Request the target VCPU to start
-            coordinator.request_cpu_start(target_vcpu_id, entry_point, context_id);
-            (PSCI_SUCCESS, None)
-        }
-        PSCI_SYSTEM_OFF => {
-            info!("PSCI SYSTEM_OFF requested - shutting down");
-            coordinator.signal_shutdown();
-            (PSCI_SUCCESS, Some(ExitState::Stop))
-        }
-        PSCI_SYSTEM_RESET => {
-            info!("PSCI SYSTEM_RESET requested - resetting");
-            coordinator.signal_shutdown();
-            (PSCI_SUCCESS, Some(ExitState::Reset))
-        }
-        PSCI_FEATURES => {
-            let feature_id = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
-            debug!("PSCI FEATURES query for {:#x}", feature_id);
-            let r = match feature_id {
-                PSCI_VERSION | PSCI_CPU_OFF | PSCI_CPU_ON_32 | PSCI_CPU_ON_64
-                    | PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => PSCI_SUCCESS,
-                PSCI_MIGRATE_INFO_TYPE => PSCI_SUCCESS,
-                _ => PSCI_NOT_SUPPORTED,
-            };
-            (r, None)
-        }
-        PSCI_MIGRATE_INFO_TYPE => {
-            debug!("PSCI MIGRATE_INFO_TYPE called");
-            (PSCI_MIGRATE_INFO_TYPE_NOT_SUPPORTED, None)
-        }
-        PSCI_AFFINITY_INFO_32 | PSCI_AFFINITY_INFO_64 => {
-            debug!("PSCI AFFINITY_INFO called");
-            (0, None) // AFFINITY_LEVEL_ON
-        }
-        PSCI_CPU_SUSPEND_32 | PSCI_CPU_SUSPEND_64 => {
-            debug!("PSCI CPU_SUSPEND requested");
-            (PSCI_NOT_SUPPORTED, None)
-        }
-        PSCI_SYSTEM_SUSPEND_32 | PSCI_SYSTEM_SUSPEND_64 => {
-            debug!("PSCI SYSTEM_SUSPEND requested");
-            (PSCI_NOT_SUPPORTED, None)
-        }
-        _ => {
-            debug!("Unknown PSCI function: {:#x}", function_id);
-            (PSCI_NOT_SUPPORTED, None)
-        }
-    };
-
-    // Set return value in X0 (per SMCCC convention)
-    vcpu.set_one_reg(VcpuRegAArch64::X(0), result)?;
-
-    // Set X4 to the result buffer address and skip the ldr instruction
-    // This works around an HVF issue where ldr x4, [sp] doesn't properly load from SP_EL1
-    vcpu.set_one_reg(VcpuRegAArch64::X(4), result_buffer_addr)?;
-
-    // Advance PC by 4 to skip the ldr instruction
-    // HVF already advances PC past HVC, so PC now points to ldr x4, [sp]
-    // We skip to stp x0, x1, [x4] which stores the result
-    let new_pc = pc + 4;
-    vcpu.set_one_reg(VcpuRegAArch64::Pc, new_pc)?;
-
-    debug!(
-        "PSCI: result={:#x}, PC advanced to {:#x}",
-        result, new_pc
-    );
+    // Hypervisor.framework reports the PC at the instruction following HVC.
+    // Leave it untouched so the guest's version-specific SMCCC wrapper can store
+    // the result and restore its own registers.
+    debug!("PSCI returned: result={:#x}", result);
 
     Ok(exit_state)
 }
