@@ -4,45 +4,46 @@ This document tracks the current status of the macOS ARM64 (Apple Silicon) port 
 
 ## Overview
 
-The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon Macs. This is an experimental port with VM boot, block devices, and shared filesystems working.
+The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon
+Macs. This is an experimental port with VM boot, block devices, shared filesystems, GPU, SMP, and
+audio working.
 
 ## Current Status
 
 ### Working Features
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| HVF VM Creation | ✅ Working | Creates VM using Hypervisor.framework |
-| Memory Mapping | ✅ Working | Split low/high banks to avoid GIC region |
-| Kernel Loading | ✅ Working | Loads ARM64 Linux kernel at 0x80000000 |
-| Initrd Loading | ✅ Working | Loads initramfs for module-based kernels |
-| FDT Generation | ✅ Working | Generates device tree with memory, devices, initrd |
-| VCPU Execution | ✅ Working | Runs guest code in EL1 |
-| PSCI v1.1 | ✅ Working | VERSION, FEATURES, MIGRATE_INFO_TYPE, CPU_ON |
-| Serial Output | ✅ Working | Earlycon via MMIO UART at 0x3f8 |
-| HVC Handling | ✅ Working | Hypercall trap with page-table-based VA translation |
-| GIC Emulation | ✅ Working | HVF in-kernel GICv3 with userspace fallback |
-| Virtual Timer | ✅ Working | PPI 11 via GIC interrupt delivery |
-| Block Devices | ✅ Working | virtio-blk via MMIO transport, async I/O |
-| Filesystem Sharing | ✅ Working | virtiofs via --shared-dir, host-guest file sharing |
-| MMIO Bus | ✅ Working | Full virtio MMIO v2 device support |
-| IRQ Delivery | ✅ Working | Edge-triggered SPI injection via IRQ handler thread |
+| Feature            | Status     | Notes                                                        |
+| ------------------ | ---------- | ------------------------------------------------------------ |
+| HVF VM Creation    | ✅ Working | Creates VM using Hypervisor.framework                        |
+| Memory Mapping     | ✅ Working | Split low/high banks to avoid GIC region                     |
+| Kernel Loading     | ✅ Working | Loads ARM64 Linux kernel at 0x80000000                       |
+| Initrd Loading     | ✅ Working | Loads initramfs for module-based kernels                     |
+| FDT Generation     | ✅ Working | Generates device tree with memory, devices, initrd           |
+| VCPU Execution     | ✅ Working | Runs guest code in EL1                                       |
+| PSCI v1.1          | ✅ Working | VERSION, FEATURES, MIGRATE_INFO_TYPE, CPU_ON                 |
+| Serial Output      | ✅ Working | Earlycon via MMIO UART at 0x3f8                              |
+| HVC Handling       | ✅ Working | Returns PSCI results through the standard SMCCC register ABI |
+| GIC Emulation      | ✅ Working | Userspace GICv3 with HVF IRQ injection                       |
+| Virtual Timer      | ✅ Working | PPI 11 via GIC interrupt delivery                            |
+| Block Devices      | ✅ Working | virtio-blk via MMIO transport, async I/O                     |
+| Filesystem Sharing | ✅ Working | virtiofs via --shared-dir, host-guest file sharing           |
+| MMIO Bus           | ✅ Working | Full virtio MMIO v2 device support                           |
+| IRQ Delivery       | ✅ Working | Edge-triggered SPI injection via IRQ handler thread          |
+| GPU (virtio-gpu)   | ✅ Working | 2D framebuffer via MMIO, DRM/fb0 device in guest             |
+| Audio (virtio-snd) | ✅ Working | CoreAudio backend; guest kernel needs CONFIG_SND_VIRTIO      |
+| SMP Boot           | ✅ Working | PSCI CPU_ON, tested with up to 4 CPUs                        |
 
 ### Partially Working
 
-| Feature | Status | Notes |
-|---------|--------|-------|
+| Feature      | Status        | Notes                                               |
+| ------------ | ------------- | --------------------------------------------------- |
 | Serial Input | ⚠️ Workaround | Polling-based input, kqueue doesn't work with stdin |
-| Multiple VCPUs | ⚠️ Untested | Infrastructure exists, PSCI CPU_ON implemented |
-| Audio (virtio-snd) | ⚠️ Stub | Device registered, needs CoreAudio backend |
-| GPU (virtio-gpu) | ⚠️ Stub | 2D stub device registered, no rendering backend |
 
 ### Not Yet Implemented
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Network | ❌ Missing | No virtio-net yet |
-| SMP Boot | ❌ Untested | PSCI CPU_ON wired up but secondary VCPUs untested |
 
 ## Boot Progress
 
