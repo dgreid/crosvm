@@ -490,6 +490,13 @@ impl RedistributorState {
         }
     }
 
+    /// Set an SGI as pending (for IPI delivery)
+    pub fn set_sgi_pending(&self, sgi: u32) {
+        if sgi < GIC_NR_SGIS {
+            self.pending0.fetch_or(1 << sgi, Ordering::SeqCst);
+        }
+    }
+
     /// Set a PPI as pending
     pub fn set_ppi_pending(&self, ppi: u32) {
         if ppi < GIC_NR_PPIS {
@@ -1039,4 +1046,93 @@ fn write_le_u32(data: &mut [u8], value: u32) {
     let bytes = value.to_le_bytes();
     let len = std::cmp::min(data.len(), 4);
     data[..len].copy_from_slice(&bytes[..len]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sgi_pending_sets_correct_bit() {
+        let state = RedistributorState::new(0, false);
+        assert_eq!(state.pending0.load(Ordering::SeqCst), 0);
+
+        state.set_sgi_pending(0);
+        assert_eq!(state.pending0.load(Ordering::SeqCst), 1);
+
+        state.set_sgi_pending(5);
+        assert_eq!(state.pending0.load(Ordering::SeqCst), 1 | (1 << 5));
+    }
+
+    #[test]
+    fn sgi_pending_out_of_range_is_ignored() {
+        let state = RedistributorState::new(0, false);
+        state.set_sgi_pending(16);
+        state.set_sgi_pending(32);
+        assert_eq!(state.pending0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn sgi_deliverable_requires_enable() {
+        let state = RedistributorState::new(0, false);
+        state.set_sgi_pending(3);
+
+        assert!(!state.is_irq_deliverable(3));
+
+        state.enable0.store(1 << 3, Ordering::SeqCst);
+        assert!(state.is_irq_deliverable(3));
+    }
+
+    #[test]
+    fn sgi_highest_priority_pending() {
+        let state = RedistributorState::new(0, false);
+        state.enable0.store(0xFFFFFFFF, Ordering::SeqCst);
+
+        state.set_sgi_pending(2);
+        state.set_sgi_pending(5);
+
+        // INTID 2: reg_idx=0, byte_idx=2 → priority 0x80
+        state.priority[0].store(0x80 << 16, Ordering::SeqCst);
+        // INTID 5: reg_idx=1, byte_idx=1 → priority 0x40
+        state.priority[1].store(0x40 << 8, Ordering::SeqCst);
+
+        let (intid, prio) = state.get_highest_priority_pending().unwrap();
+        assert_eq!(intid, 5);
+        assert_eq!(prio, 0x40);
+    }
+
+    #[test]
+    fn ppi_pending_sets_correct_bit() {
+        let state = RedistributorState::new(0, false);
+        state.set_ppi_pending(0);
+        assert_eq!(state.pending0.load(Ordering::SeqCst), 1 << 16);
+
+        state.set_ppi_pending(11);
+        assert_eq!(
+            state.pending0.load(Ordering::SeqCst),
+            (1 << 16) | (1 << 27)
+        );
+    }
+
+    #[test]
+    fn ppi_clear_pending() {
+        let state = RedistributorState::new(0, false);
+        state.set_ppi_pending(11);
+        assert_ne!(state.pending0.load(Ordering::SeqCst), 0);
+
+        state.clear_ppi_pending(11);
+        assert_eq!(state.pending0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn sgi_and_ppi_coexist() {
+        let state = RedistributorState::new(0, false);
+        state.enable0.store(0xFFFFFFFF, Ordering::SeqCst);
+
+        state.set_sgi_pending(0);
+        state.set_ppi_pending(11);
+
+        assert!(state.is_irq_deliverable(0));
+        assert!(state.is_irq_deliverable(27));
+    }
 }
