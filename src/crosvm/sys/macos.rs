@@ -805,12 +805,14 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     #[cfg(feature = "audio")]
     let mut snd_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
     #[cfg(feature = "audio")]
+    let _snd_control_host_tube: Option<Tube>;
+    #[cfg(feature = "audio")]
     {
         let mut snd_params = SndParameters::default();
-        snd_params.backend =
-            StreamSourceBackend::Sys(SysStreamSourceBackend::COREAUDIO);
-        let (snd_control_tube, _snd_control_response) = Tube::pair()
-            .context("failed to create sound control tube")?;
+        snd_params.backend = StreamSourceBackend::Sys(SysStreamSourceBackend::COREAUDIO);
+        let (snd_control_tube, snd_host_tube) =
+            Tube::pair().context("failed to create sound control tube")?;
+        _snd_control_host_tube = Some(snd_host_tube);
 
         match VirtioSnd::new(
             base_features(ProtectionType::Unprotected),
@@ -1476,55 +1478,8 @@ fn run_vcpu_loop(
                 return Ok(ExitState::Stop);
             }
             Ok(VcpuExit::Hypercall) => {
-                let sp_el1 = vcpu.get_sp_el1().unwrap_or(0);
-                let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0)).unwrap_or(0);
-
-                debug!(
-                    "HVC trap: function_id={:#x} SP_EL1={:#x}",
-                    function_id,
-                    sp_el1,
-                );
-
-                // Translate SP_EL1 to guest physical address via page table walk
-                let sp_phys = translate_kernel_va(&vcpu, &guest_mem, sp_el1);
-
-                let hypercall_exit = if let Some(phys) = sp_phys {
-                    let gpa = GuestAddress(phys);
-                    let mut stack_data = [0u8; 8];
-                    if guest_mem.read_at_addr(&mut stack_data, gpa).is_ok() {
-                        // [sp+0] contains the result buffer address
-                        let result_buffer_addr = u64::from_le_bytes(stack_data);
-                        debug!(
-                            "HVC: result_buffer={:#x}",
-                            result_buffer_addr
-                        );
-
-                        // Handle PSCI call with workaround for HVF ldr issue
-                        match handle_hypercall_with_result_buffer(
-                            &mut vcpu as &mut dyn VcpuAArch64,
-                            &guest_mem,
-                            result_buffer_addr,
-                            coordinator,
-                        ) {
-                            Ok(exit) => exit,
-                            Err(e) => {
-                                error!("Failed to handle hypercall: {}", e);
-                                None
-                            }
-                        }
-                    } else {
-                        // Fallback if we can't read stack
-                        match handle_hypercall(&mut vcpu as &mut dyn VcpuAArch64, &guest_mem, coordinator) {
-                            Ok(exit) => exit,
-                            Err(e) => {
-                                error!("Failed to handle hypercall: {}", e);
-                                None
-                            }
-                        }
-                    }
-                } else {
-                    // Fallback for addresses outside linear map
-                    match handle_hypercall(&mut vcpu as &mut dyn VcpuAArch64, &guest_mem, coordinator) {
+                let hypercall_exit =
+                    match handle_hypercall(&mut vcpu as &mut dyn VcpuAArch64, coordinator) {
                         Ok(exit) => exit,
                         Err(e) => {
                             error!("Failed to handle hypercall: {}", e);
@@ -1555,7 +1510,7 @@ fn run_vcpu_loop(
                 if let Err(e) = handle_system_register_trap(
                     &mut vcpu,
                     vcpu_id,
-                    &coordinator.irq_chip,
+                    coordinator,
                     op0,
                     op1,
                     crn,
@@ -1825,7 +1780,7 @@ fn handle_hypercall(
 fn handle_system_register_trap(
     vcpu: &mut HvfVcpu,
     vcpu_id: usize,
-    irq_chip: &HvfIrqChip,
+    coordinator: &VcpuCoordinator,
     op0: u8,
     op1: u8,
     crn: u8,
@@ -1834,6 +1789,7 @@ fn handle_system_register_trap(
     rt: u8,
     is_write: bool,
 ) -> Result<()> {
+    let irq_chip = &coordinator.irq_chip;
     // Get the PC to advance it after handling
     let pc = vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap_or(0);
 
@@ -1967,6 +1923,42 @@ fn handle_system_register_trap(
                 }
             }
 
+            // ICC_SGI1_EL1: Software Generated Interrupt (Group 1)
+            // Used for IPIs between CPUs.
+            // NOTE: We assume flat affinity (Aff0=cpu_id, Aff1/2/3=0),
+            // so target_list bits map directly to CPU IDs 0-15.
+            (12, 11, 5, true) => {
+                let value = vcpu.get_one_reg(VcpuRegAArch64::X(rt)).unwrap_or(0);
+                let intid = ((value >> 24) & 0xF) as u32;
+                let irm = (value >> 40) & 1;
+                let target_list = (value & 0xFFFF) as u16;
+
+                if irm == 1 {
+                    // IRM=1: target all PEs except self
+                    for cpu in 0..irq_chip.num_vcpus() {
+                        if cpu != vcpu_id {
+                            irq_chip.set_sgi_pending(cpu, intid);
+                        }
+                    }
+                } else {
+                    // IRM=0: use target list (bit per CPU in affinity group)
+                    for cpu in 0..16usize {
+                        if target_list & (1 << cpu) != 0 {
+                            irq_chip.set_sgi_pending(cpu, intid);
+                        }
+                    }
+                }
+
+                coordinator.set_device_irq_pending();
+                coordinator.kick_vcpus();
+                trace!(
+                    "ICC_SGI1_EL1 write: INTID={} IRM={} targets={:#x}",
+                    intid,
+                    irm,
+                    target_list
+                );
+            }
+
             // ICC_IAR0_EL1: Group 0 Interrupt Acknowledge (CRn=12, CRm=8, Op2=0)
             (12, 8, 0, false) => {
                 // For Group 0, return spurious since we only support Group 1
@@ -2014,4 +2006,38 @@ fn handle_system_register_trap(
     vcpu.set_one_reg(VcpuRegAArch64::Pc, pc + 4)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify ICC_SGI1_EL1 register value parsing: target list, INTID, IRM.
+    #[test]
+    fn icc_sgi1_el1_parsing() {
+        // IRM=0, INTID=1, target CPUs 0 and 2
+        let value: u64 = (1u64 << 24) | 0b0101;
+        let intid = ((value >> 24) & 0xF) as u32;
+        let irm = (value >> 40) & 1;
+        let target_list = (value & 0xFFFF) as u16;
+
+        assert_eq!(intid, 1);
+        assert_eq!(irm, 0);
+        assert_eq!(target_list, 0b0101);
+        assert!(target_list & (1 << 0) != 0); // CPU 0 targeted
+        assert!(target_list & (1 << 1) == 0); // CPU 1 not targeted
+        assert!(target_list & (1 << 2) != 0); // CPU 2 targeted
+    }
+
+    /// Verify ICC_SGI1_EL1 IRM=1 (broadcast to all except self)
+    #[test]
+    fn icc_sgi1_el1_broadcast() {
+        // IRM=1, INTID=0 (SGI 0 to all PEs except self)
+        let value: u64 = 1u64 << 40;
+        let intid = ((value >> 24) & 0xF) as u32;
+        let irm = (value >> 40) & 1;
+
+        assert_eq!(intid, 0);
+        assert_eq!(irm, 1);
+    }
 }
