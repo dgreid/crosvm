@@ -189,6 +189,18 @@ impl HvfIrqChip {
         gic_redist_base(self.num_vcpus)
     }
 
+    /// Set an SGI as pending for a specific CPU (for IPI delivery).
+    pub fn set_sgi_pending(&self, cpu_id: usize, sgi: u32) {
+        if cpu_id < self.redistributors.len() {
+            self.redistributors[cpu_id].lock().state().set_sgi_pending(sgi);
+        }
+    }
+
+    /// Returns the number of VCPUs.
+    pub fn num_vcpus(&self) -> usize {
+        self.num_vcpus
+    }
+
     /// Set a PPI as pending for a specific CPU.
     ///
     /// This is called when a timer interrupt fires to mark the
@@ -582,5 +594,45 @@ impl IrqChipAArch64 for HvfIrqChip {
 
     fn finalize(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn irq_chip_sgi_pending() {
+        let chip = HvfIrqChip::new(4).unwrap();
+        chip.set_sgi_pending(1, 3);
+
+        let redist = chip.redistributors[1].lock();
+        let pending = redist.state().pending0.load(Ordering::SeqCst);
+        assert_ne!(pending & (1 << 3), 0, "SGI 3 should be pending on CPU 1");
+
+        let other = chip.redistributors[0].lock();
+        let other_pending = other.state().pending0.load(Ordering::SeqCst);
+        assert_eq!(
+            other_pending & (1 << 3),
+            0,
+            "SGI 3 should not be pending on CPU 0"
+        );
+    }
+
+    #[test]
+    fn irq_chip_sgi_pending_out_of_range_cpu() {
+        let chip = HvfIrqChip::new(2).unwrap();
+        chip.set_sgi_pending(5, 0);
+
+        for i in 0..2 {
+            let redist = chip.redistributors[i].lock();
+            assert_eq!(redist.state().pending0.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn irq_chip_num_vcpus() {
+        let chip = HvfIrqChip::new(4).unwrap();
+        assert_eq!(chip.num_vcpus(), 4);
     }
 }

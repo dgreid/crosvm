@@ -774,12 +774,15 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     #[cfg(feature = "audio")]
     let mut snd_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
     #[cfg(feature = "audio")]
+    let _snd_control_host_tube: Option<Tube>;
+    #[cfg(feature = "audio")]
     {
         let mut snd_params = SndParameters::default();
         snd_params.backend =
             StreamSourceBackend::Sys(SysStreamSourceBackend::COREAUDIO);
-        let (snd_control_tube, _snd_control_response) = Tube::pair()
+        let (snd_control_tube, snd_host_tube) = Tube::pair()
             .context("failed to create sound control tube")?;
+        _snd_control_host_tube = Some(snd_host_tube);
 
         match VirtioSnd::new(
             base_features(ProtectionType::Unprotected),
@@ -1440,13 +1443,15 @@ fn run_vcpu_loop(
                 );
 
                 // Translate SP_EL1 to guest physical address via page table walk
-                let sp_phys = translate_kernel_va(&vcpu, &guest_mem, sp_el1);
+                // The SMCCC macro does `stp x29, x30, [sp, #-16]!` before HVC,
+                // so SP_EL1 at HVC time has: [SP+0]=saved_x29, [SP+8]=saved_x30,
+                // [SP+16]=result_buffer (9th arg), [SP+24]=quirk (10th arg).
+                let sp_phys = translate_kernel_va(&vcpu, &guest_mem, sp_el1 + 16);
 
                 let hypercall_exit = if let Some(phys) = sp_phys {
                     let gpa = GuestAddress(phys);
                     let mut stack_data = [0u8; 8];
                     if guest_mem.read_at_addr(&mut stack_data, gpa).is_ok() {
-                        // [sp+0] contains the result buffer address
                         let result_buffer_addr = u64::from_le_bytes(stack_data);
                         debug!(
                             "HVC: result_buffer={:#x}",
@@ -1499,7 +1504,7 @@ fn run_vcpu_loop(
                 if let Err(e) = handle_system_register_trap(
                     &mut vcpu,
                     vcpu_id,
-                    &coordinator.irq_chip,
+                    coordinator,
                     op0, op1, crn, crm, op2, rt, is_write,
                 ) {
                     error!("Failed to handle system register trap: {}", e);
@@ -1966,7 +1971,7 @@ fn handle_hypercall_with_result_buffer(
 fn handle_system_register_trap(
     vcpu: &mut HvfVcpu,
     vcpu_id: usize,
-    irq_chip: &HvfIrqChip,
+    coordinator: &VcpuCoordinator,
     op0: u8,
     op1: u8,
     crn: u8,
@@ -1975,6 +1980,7 @@ fn handle_system_register_trap(
     rt: u8,
     is_write: bool,
 ) -> Result<()> {
+    let irq_chip = &coordinator.irq_chip;
     // Get the PC to advance it after handling
     let pc = vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap_or(0);
 
@@ -2107,6 +2113,40 @@ fn handle_system_register_trap(
                 }
             }
 
+            // ICC_SGI1_EL1: Software Generated Interrupt (Group 1)
+            // Used for IPIs between CPUs.
+            // NOTE: We assume flat affinity (Aff0=cpu_id, Aff1/2/3=0),
+            // so target_list bits map directly to CPU IDs 0-15.
+            (12, 11, 5, true) => {
+                let value = vcpu.get_one_reg(VcpuRegAArch64::X(rt)).unwrap_or(0);
+                let intid = ((value >> 24) & 0xF) as u32;
+                let irm = (value >> 40) & 1;
+                let target_list = (value & 0xFFFF) as u16;
+
+                if irm == 1 {
+                    // IRM=1: target all PEs except self
+                    for cpu in 0..irq_chip.num_vcpus() {
+                        if cpu != vcpu_id {
+                            irq_chip.set_sgi_pending(cpu, intid);
+                        }
+                    }
+                } else {
+                    // IRM=0: use target list (bit per CPU in affinity group)
+                    for cpu in 0..16usize {
+                        if target_list & (1 << cpu) != 0 {
+                            irq_chip.set_sgi_pending(cpu, intid);
+                        }
+                    }
+                }
+
+                coordinator.set_device_irq_pending();
+                coordinator.kick_vcpus();
+                trace!(
+                    "ICC_SGI1_EL1 write: INTID={} IRM={} targets={:#x}",
+                    intid, irm, target_list
+                );
+            }
+
             // ICC_IAR0_EL1: Group 0 Interrupt Acknowledge (CRn=12, CRm=8, Op2=0)
             (12, 8, 0, false) => {
                 // For Group 0, return spurious since we only support Group 1
@@ -2144,4 +2184,91 @@ fn handle_system_register_trap(
     vcpu.set_one_reg(VcpuRegAArch64::Pc, pc + 4)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify the SMCCC stack layout assumption: the result buffer address
+    /// is at SP+16, not SP+0, because the SMCCC macro executes
+    /// `stp x29, x30, [sp, #-16]!` before the HVC instruction.
+    #[test]
+    fn smccc_stack_offset_reads_result_buffer_not_saved_regs() {
+        let saved_x29: u64 = 0xDEAD_BEEF_DEAD_BEEF;
+        let saved_x30: u64 = 0xCAFE_BABE_CAFE_BABE;
+        let result_buffer_addr: u64 = 0xFFFF_8000_1234_5678;
+        let quirks_ptr: u64 = 0x0000_0000_0000_0000;
+
+        let sp_phys: u64 = 0x1000;
+
+        let guest_mem = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
+
+        guest_mem
+            .write_at_addr(&saved_x29.to_le_bytes(), GuestAddress(sp_phys))
+            .unwrap();
+        guest_mem
+            .write_at_addr(&saved_x30.to_le_bytes(), GuestAddress(sp_phys + 8))
+            .unwrap();
+        guest_mem
+            .write_at_addr(
+                &result_buffer_addr.to_le_bytes(),
+                GuestAddress(sp_phys + 16),
+            )
+            .unwrap();
+        guest_mem
+            .write_at_addr(&quirks_ptr.to_le_bytes(), GuestAddress(sp_phys + 24))
+            .unwrap();
+
+        // BUG (before fix): reading at sp_phys+0 would return saved_x29
+        let mut wrong_data = [0u8; 8];
+        guest_mem
+            .read_at_addr(&mut wrong_data, GuestAddress(sp_phys))
+            .unwrap();
+        let wrong_value = u64::from_le_bytes(wrong_data);
+        assert_eq!(
+            wrong_value, saved_x29,
+            "SP+0 should be saved x29, not the result buffer"
+        );
+
+        // FIX: reading at sp_phys+16 returns the actual result buffer address
+        let mut correct_data = [0u8; 8];
+        guest_mem
+            .read_at_addr(&mut correct_data, GuestAddress(sp_phys + 16))
+            .unwrap();
+        let correct_value = u64::from_le_bytes(correct_data);
+        assert_eq!(
+            correct_value, result_buffer_addr,
+            "SP+16 should be the result buffer address"
+        );
+    }
+
+    /// Verify ICC_SGI1_EL1 register value parsing: target list, INTID, IRM.
+    #[test]
+    fn icc_sgi1_el1_parsing() {
+        // IRM=0, INTID=1, target CPUs 0 and 2
+        let value: u64 = (1u64 << 24) | 0b0101;
+        let intid = ((value >> 24) & 0xF) as u32;
+        let irm = (value >> 40) & 1;
+        let target_list = (value & 0xFFFF) as u16;
+
+        assert_eq!(intid, 1);
+        assert_eq!(irm, 0);
+        assert_eq!(target_list, 0b0101);
+        assert!(target_list & (1 << 0) != 0); // CPU 0 targeted
+        assert!(target_list & (1 << 1) == 0); // CPU 1 not targeted
+        assert!(target_list & (1 << 2) != 0); // CPU 2 targeted
+    }
+
+    /// Verify ICC_SGI1_EL1 IRM=1 (broadcast to all except self)
+    #[test]
+    fn icc_sgi1_el1_broadcast() {
+        // IRM=1, INTID=0 (SGI 0 to all PEs except self)
+        let value: u64 = 1u64 << 40;
+        let intid = ((value >> 24) & 0xF) as u32;
+        let irm = (value >> 40) & 1;
+
+        assert_eq!(intid, 0);
+        assert_eq!(irm, 1);
+    }
 }
