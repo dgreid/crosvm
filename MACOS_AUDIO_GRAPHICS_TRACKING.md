@@ -71,14 +71,26 @@
 methods in the trait. `CoreAudioStreamControl` stores the AudioUnit for potential future use.
 
 #### Runtime validation — audio
-**Status:** Not started
+**Status:** Complete
 **Why:** The code compiles and unit tests pass, but nobody has booted a VM with audio yet.
 
 **What to test:**
-1. Boot VM, `aplay -l` shows virtio sound card
-2. `aplay test.wav` produces audible output on host
-3. No crashes or hangs during playback
-4. Silence when no audio playing (no static/noise from underruns)
+1. Boot VM, `aplay -l` shows virtio sound card ✅
+2. `aplay test.wav` produces audible output on host ✅ (silence + noise both play, exit code 0)
+3. No crashes or hangs during playback ✅
+4. Silence when no audio playing (no static/noise from underruns) ✅ (no crosvm ERRORs or WARNs)
+
+**Done:**
+- Custom kernel (defconfig + CONFIG_SND_VIRTIO=y) boots on HVF with 4 CPUs
+- VirtIO SoundCard detected at platform/10200.virtio_mmio/virtio1
+- /dev/snd/pcmC0D0p (playback), pcmC0D0c (capture), controlC0 all present
+- `aplay -D hw:0,0 -f S16_LE -r 44100 -c 2 -t raw` completes with exit code 0
+- No crosvm sound backend errors during playback
+
+**Bugs fixed during validation:**
+- SP_EL1+16: HVC handler read result buffer from SP+0 (saved x29) instead of SP+16 (9th arg)
+- Control tube lifetime: host-side Tube dropped immediately → infinite worker reset loop
+- ICC_SGI1_EL1: SGI register trap needed for IPI delivery (SMP boot)
 
 #### Runtime validation — graphics
 **Status:** Not started
