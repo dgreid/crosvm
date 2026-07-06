@@ -33,7 +33,7 @@ static macos_close_callback_t g_close_callback = NULL;
 static void *g_close_context = NULL;
 
 // Forward declarations.
-static uint16_t macos_keycode_to_linux(uint16_t mac_keycode);
+uint16_t macos_keycode_to_linux(uint16_t mac_keycode);
 @class HelperWindowDelegate;
 
 // ---------- FramebufferView ----------
@@ -202,7 +202,7 @@ static uint16_t macos_keycode_to_linux(uint16_t mac_keycode);
 // ---------- macOS keycode to Linux keycode ----------
 
 // Maps macOS virtual key codes (kVK_*) to Linux KEY_* codes.
-static uint16_t macos_keycode_to_linux(uint16_t mac_keycode) {
+uint16_t macos_keycode_to_linux(uint16_t mac_keycode) {
     // Table covers the most common keys. Returns 0 for unknown.
     static const uint16_t table[128] = {
         [0x00] = 30,   // kVK_ANSI_A -> KEY_A
@@ -378,4 +378,26 @@ void macos_helper_flip(void *handle) {
     NSWindow *window = (__bridge NSWindow *)handle;
     NSView *view = [window contentView];
     [view setNeedsDisplay:YES];
+}
+
+void macos_helper_inject_key(void *handle, uint16_t keycode, bool key_down) {
+    if (!handle) return;
+    NSWindow *window = (__bridge NSWindow *)handle;
+    NSView *view = [window contentView];
+    NSEventType type = key_down ? NSEventTypeKeyDown : NSEventTypeKeyUp;
+    NSEvent *event = [NSEvent keyEventWithType:type
+                                      location:NSZeroPoint
+                                 modifierFlags:0
+                                     timestamp:0
+                                  windowNumber:[window windowNumber]
+                                       context:nil
+                                    characters:@""
+                   charactersIgnoringModifiers:@""
+                                     isARepeat:NO
+                                       keyCode:keycode];
+    if (key_down) {
+        [view keyDown:event];
+    } else {
+        [view keyUp:event];
+    }
 }

@@ -63,6 +63,11 @@ pub(crate) mod protocol {
         Flip {
             surface_id: u32,
         },
+        InjectKey {
+            surface_id: u32,
+            keycode: u16,
+            pressed: bool,
+        },
         Shutdown,
     }
 
@@ -372,7 +377,11 @@ impl Drop for DisplayMacos {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
     use std::os::unix::io::FromRawFd;
+    use std::sync::Arc;
 
     use base::AsRawDescriptor;
     use base::FileSerdeWrapper;
@@ -381,6 +390,10 @@ mod tests {
     use base::SharedMemory;
     use base::Tube;
     use base::UnixSeqpacket;
+
+    use super::protocol::DisplayResponse;
+    use super::DisplayMacos;
+    use super::DisplayT;
 
     use super::protocol::*;
 
@@ -504,14 +517,6 @@ mod tests {
 
     #[test]
     fn flush_drains_tube_responses() {
-        use std::cell::RefCell;
-        use std::collections::HashSet;
-        use std::collections::VecDeque;
-        use std::sync::Arc;
-
-        use super::DisplayMacos;
-        use super::DisplayT;
-
         let (helper_tube, crosvm_tube) = make_tube_pair();
 
         helper_tube
@@ -548,13 +553,6 @@ mod tests {
 
     #[test]
     fn close_requested_sets_surface_flag() {
-        use std::cell::RefCell;
-        use std::collections::HashSet;
-        use std::collections::VecDeque;
-        use std::sync::Arc;
-
-        use super::DisplayMacos;
-        use super::DisplayT;
 
         let (_helper_tube, crosvm_tube) = make_tube_pair();
         let closed_surfaces = Arc::new(std::sync::Mutex::new(HashSet::new()));
@@ -596,5 +594,385 @@ mod tests {
         assert!(result.is_none());
         assert!(closed_surfaces.lock().unwrap().contains(&42));
         assert!(surface.close_requested());
+    }
+
+    fn make_test_display_and_surface(
+        responses: VecDeque<DisplayResponse>,
+    ) -> (DisplayMacos, Box<dyn crate::GpuDisplaySurface>) {
+        let (_helper_tube, crosvm_tube) = make_tube_pair();
+        let closed_surfaces = Arc::new(std::sync::Mutex::new(HashSet::new()));
+
+        let display = DisplayMacos {
+            tube: Arc::new(crosvm_tube),
+            child: std::process::Command::new("true").spawn().unwrap(),
+            pending_responses: RefCell::new(responses),
+            current_response: None,
+            closed_surfaces: Arc::clone(&closed_surfaces),
+        };
+
+        let shm = SharedMemory::new("test", 4096).unwrap();
+        let mmap = base::MemoryMappingBuilder::new(4096)
+            .from_shared_memory(&shm)
+            .build()
+            .unwrap();
+        let surface: Box<dyn crate::GpuDisplaySurface> = Box::new(super::MacosSurface {
+            surface_id: 1,
+            width: 32,
+            _height: 32,
+            _shm: shm,
+            mmap,
+            tube: Arc::clone(&display.tube),
+            closed_surfaces,
+        });
+
+        (display, surface)
+    }
+
+    #[test]
+    fn input_key_event_produces_virtio_key_event() {
+        let mut responses = VecDeque::new();
+        responses.push_back(DisplayResponse::InputEvent {
+            surface_id: 1,
+            type_: 1, // EV_KEY
+            code: 30, // KEY_A
+            value: 1, // press
+        });
+
+        let (mut display, mut surface) = make_test_display_and_surface(responses);
+
+        let descriptor = display.next_event().unwrap();
+        assert_eq!(descriptor, 1);
+
+        let events = display.handle_next_event(&mut surface);
+        let events = events.expect("should produce GpuDisplayEvents for key press");
+        assert_eq!(events.device_type, crate::EventDeviceKind::Keyboard);
+        assert_eq!(events.events.len(), 1);
+        let evt = &events.events[0];
+        assert_eq!(evt.type_.to_native(), 1); // EV_KEY
+        assert_eq!(evt.code.to_native(), 30); // KEY_A
+        assert_eq!(evt.value.to_native(), 1); // press
+    }
+
+    #[test]
+    fn input_mouse_button_classified_as_mouse() {
+        let mut responses = VecDeque::new();
+        responses.push_back(DisplayResponse::InputEvent {
+            surface_id: 1,
+            type_: 1,     // EV_KEY
+            code: 0x110,  // BTN_LEFT
+            value: 1,
+        });
+
+        let (mut display, mut surface) = make_test_display_and_surface(responses);
+        display.next_event().unwrap();
+
+        let events = display.handle_next_event(&mut surface)
+            .expect("should produce events for mouse button");
+        assert_eq!(events.device_type, crate::EventDeviceKind::Mouse);
+    }
+
+    #[test]
+    fn input_relative_motion_produces_rel_event() {
+        let mut responses = VecDeque::new();
+        responses.push_back(DisplayResponse::InputEvent {
+            surface_id: 1,
+            type_: 2,   // EV_REL
+            code: 8,    // REL_WHEEL
+            value: -3,
+        });
+
+        let (mut display, mut surface) = make_test_display_and_surface(responses);
+        display.next_event().unwrap();
+
+        let events = display.handle_next_event(&mut surface)
+            .expect("should produce events for scroll");
+        assert_eq!(events.device_type, crate::EventDeviceKind::Mouse);
+        assert_eq!(events.events[0].type_.to_native(), 2);
+        assert_eq!(events.events[0].code.to_native(), 8);
+        assert_eq!(events.events[0].value.to_native() as i32, -3);
+    }
+
+    #[test]
+    fn input_absolute_motion_produces_abs_event() {
+        let mut responses = VecDeque::new();
+        responses.push_back(DisplayResponse::InputEvent {
+            surface_id: 1,
+            type_: 3,    // EV_ABS
+            code: 0,     // ABS_X
+            value: 500,
+        });
+
+        let (mut display, mut surface) = make_test_display_and_surface(responses);
+        display.next_event().unwrap();
+
+        let events = display.handle_next_event(&mut surface)
+            .expect("should produce events for abs motion");
+        assert_eq!(events.device_type, crate::EventDeviceKind::Mouse);
+        assert_eq!(events.events[0].type_.to_native(), 3);
+        assert_eq!(events.events[0].code.to_native(), 0);
+        assert_eq!(events.events[0].value.to_native() as i32, 500);
+    }
+
+    extern "C" {
+        fn macos_keycode_to_linux(mac_keycode: u16) -> u16;
+    }
+
+    #[test]
+    fn keycode_table_letters() {
+        let expected: &[(u16, u16)] = &[
+            (0x00, 30),  // A
+            (0x01, 31),  // S
+            (0x02, 32),  // D
+            (0x03, 33),  // F
+            (0x04, 35),  // H
+            (0x05, 34),  // G
+            (0x06, 44),  // Z
+            (0x07, 45),  // X
+            (0x08, 46),  // C
+            (0x09, 47),  // V
+            (0x0B, 48),  // B
+            (0x0C, 16),  // Q
+            (0x0D, 17),  // W
+            (0x0E, 18),  // E
+            (0x0F, 19),  // R
+            (0x10, 21),  // Y
+            (0x11, 20),  // T
+            (0x1F, 24),  // O
+            (0x20, 22),  // U
+            (0x22, 23),  // I
+            (0x23, 25),  // P
+            (0x25, 38),  // L
+            (0x26, 36),  // J
+            (0x28, 37),  // K
+            (0x2D, 49),  // N
+            (0x2E, 50),  // M
+        ];
+        for &(mac, linux) in expected {
+            // SAFETY: macos_keycode_to_linux is a pure lookup function.
+            let result = unsafe { macos_keycode_to_linux(mac) };
+            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+        }
+    }
+
+    #[test]
+    fn keycode_table_modifiers_and_special() {
+        let expected: &[(u16, u16)] = &[
+            (0x24, 28),   // Return -> KEY_ENTER
+            (0x30, 15),   // Tab -> KEY_TAB
+            (0x31, 57),   // Space -> KEY_SPACE
+            (0x33, 14),   // Backspace -> KEY_BACKSPACE
+            (0x35, 1),    // Escape -> KEY_ESC
+            (0x38, 42),   // Shift -> KEY_LEFTSHIFT
+            (0x3C, 54),   // RightShift -> KEY_RIGHTSHIFT
+            (0x3A, 56),   // Option -> KEY_LEFTALT
+            (0x3D, 100),  // RightOption -> KEY_RIGHTALT
+            (0x3B, 29),   // Control -> KEY_LEFTCTRL
+            (0x3E, 97),   // RightControl -> KEY_RIGHTCTRL
+            (0x37, 125),  // Command -> KEY_LEFTMETA
+            (0x36, 126),  // RightCommand -> KEY_RIGHTMETA
+            (0x39, 58),   // CapsLock -> KEY_CAPSLOCK
+        ];
+        for &(mac, linux) in expected {
+            let result = unsafe { macos_keycode_to_linux(mac) };
+            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+        }
+    }
+
+    #[test]
+    fn keycode_table_arrows_and_navigation() {
+        let expected: &[(u16, u16)] = &[
+            (0x7B, 105),  // Left -> KEY_LEFT
+            (0x7C, 106),  // Right -> KEY_RIGHT
+            (0x7D, 108),  // Down -> KEY_DOWN
+            (0x7E, 103),  // Up -> KEY_UP
+            (0x73, 102),  // Home -> KEY_HOME
+            (0x77, 107),  // End -> KEY_END
+            (0x74, 104),  // PageUp -> KEY_PAGEUP
+            (0x79, 109),  // PageDown -> KEY_PAGEDOWN
+            (0x75, 111),  // ForwardDelete -> KEY_DELETE
+        ];
+        for &(mac, linux) in expected {
+            let result = unsafe { macos_keycode_to_linux(mac) };
+            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+        }
+    }
+
+    #[test]
+    fn keycode_table_function_keys() {
+        let expected: &[(u16, u16)] = &[
+            (0x7A, 59),   // F1
+            (0x78, 60),   // F2
+            (0x63, 61),   // F3
+            (0x76, 62),   // F4
+            (0x60, 63),   // F5
+            (0x61, 64),   // F6
+            (0x62, 65),   // F7
+            (0x64, 66),   // F8
+            (0x65, 67),   // F9
+            (0x6D, 68),   // F10
+            (0x67, 87),   // F11
+            (0x6F, 88),   // F12
+        ];
+        for &(mac, linux) in expected {
+            let result = unsafe { macos_keycode_to_linux(mac) };
+            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+        }
+    }
+
+    #[test]
+    fn keycode_unknown_returns_zero() {
+        // Keycodes >= 128 and unmapped entries should return 0.
+        let result = unsafe { macos_keycode_to_linux(200) };
+        assert_eq!(result, 0);
+        // 0x0A is not in the table (gap between V and B).
+        let result = unsafe { macos_keycode_to_linux(0x0A) };
+        assert_eq!(result, 0);
+    }
+
+    /// Integration test: spawn the real crosvm display-helper, create a
+    /// surface, inject synthetic key events via InjectKey protocol message,
+    /// verify the helper sends correct InputEvent back through the tube.
+    ///
+    /// Tests the full AppKit pipeline: InjectKey → dispatch_to_main →
+    /// NSEvent keyDown:/keyUp: → macos_keycode_to_linux → callback → tube.
+    ///
+    /// Requires: GUI access + signed crosvm binary at target/release/crosvm.
+    /// Run with:
+    ///   cargo test -p gpu_display --lib -- cgevent_key_injection --ignored
+    #[test]
+    #[ignore]
+    fn cgevent_key_injection() {
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        use std::time::Duration;
+
+        use super::protocol::DisplayRequest;
+
+        // Find the crosvm binary (which understands `display-helper`).
+        let crosvm_bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target/release/crosvm");
+        if !crosvm_bin.exists() {
+            panic!(
+                "crosvm binary not found at {:?}. Build with: cargo build --release && codesign ...",
+                crosvm_bin
+            );
+        }
+
+        // Create a socketpair for the tube.
+        let (sock_crosvm, sock_helper) =
+            std::os::unix::net::UnixStream::pair().expect("socketpair failed");
+        let helper_raw_fd = sock_helper.into_raw_fd();
+
+        // Spawn the display helper process.
+        // SAFETY: pre_exec clears CLOEXEC on the helper fd.
+        let mut child = unsafe {
+            Command::new(&crosvm_bin)
+                .arg("display-helper")
+                .arg(helper_raw_fd.to_string())
+                .pre_exec(move || {
+                    let flags = libc::fcntl(helper_raw_fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(helper_raw_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                    Ok(())
+                })
+                .spawn()
+        }
+        .expect("failed to spawn crosvm display-helper");
+
+        // Close the helper's fd in our process.
+        unsafe { libc::close(helper_raw_fd) };
+
+        let crosvm_raw_fd = sock_crosvm.into_raw_fd();
+        let seqpacket =
+            unsafe { base::UnixSeqpacket::from_raw_descriptor(crosvm_raw_fd) };
+        let tube: base::Tube = seqpacket.try_into().expect("Tube creation failed");
+        let tube = Arc::new(tube);
+
+        // Create a surface (which creates the window in the helper).
+        let fb_size: u64 = 1280 * 1024 * 4;
+        let shm = SharedMemory::new("test_inject", fb_size).unwrap();
+        let dup_fd = unsafe { libc::dup(shm.as_raw_descriptor()) };
+        assert!(dup_fd >= 0, "dup failed");
+        let shm_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+        tube.send(&DisplayRequest::CreateSurface {
+            surface_id: 1,
+            width: 1280,
+            height: 1024,
+            shm: base::FileSerdeWrapper(shm_file),
+            shm_size: fb_size,
+        })
+        .expect("failed to send CreateSurface");
+
+        // Wait for the window to be created.
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Read the SurfaceCreated response.
+        let resp: DisplayResponse = tube.recv().expect("no SurfaceCreated response");
+        assert!(
+            matches!(resp, DisplayResponse::SurfaceCreated { surface_id: 1 }),
+            "expected SurfaceCreated, got {:?}",
+            resp
+        );
+
+        // Inject key events. macOS keycode 0x00 = 'A' → Linux KEY_A = 30.
+        tube.send(&DisplayRequest::InjectKey {
+            surface_id: 1,
+            keycode: 0x00,
+            pressed: true,
+        })
+        .expect("failed to send InjectKey press");
+
+        tube.send(&DisplayRequest::InjectKey {
+            surface_id: 1,
+            keycode: 0x00,
+            pressed: false,
+        })
+        .expect("failed to send InjectKey release");
+
+        // Wait for events to propagate.
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Set the tube to non-blocking and drain responses.
+        let fd = base::AsRawDescriptor::as_raw_descriptor(&*tube);
+        let old_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if old_flags >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFL, old_flags | libc::O_NONBLOCK) };
+        }
+
+        let mut found_press = false;
+        let mut found_release = false;
+        loop {
+            match tube.recv::<DisplayResponse>() {
+                Ok(DisplayResponse::InputEvent {
+                    type_: 1,
+                    code: 30,
+                    value,
+                    ..
+                }) => {
+                    if value == 1 {
+                        found_press = true;
+                    }
+                    if value == 0 {
+                        found_release = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        // Restore blocking mode and shut down.
+        if old_flags >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFL, old_flags) };
+        }
+        let _ = tube.send(&DisplayRequest::Shutdown);
+        let _ = child.wait();
+
+        assert!(found_press, "did not receive KEY_A press event");
+        assert!(found_release, "did not receive KEY_A release event");
     }
 }
