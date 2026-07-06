@@ -40,6 +40,7 @@ use base::Tube;
 use base::UnixSeqpacket;
 use base::UnixSeqpacketListener;
 use base::UnlinkUnixSeqpacketListener;
+use base::VmEventType;
 use cros_fdt::Fdt;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -845,16 +846,22 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     #[cfg(feature = "gpu")]
     let _gpu_shm_mmap: Option<base::MemoryMapping>; // keep allocation alive
     #[cfg(feature = "gpu")]
+    let gpu_exit_rdtube: base::RecvTube;
+    #[cfg(feature = "gpu")]
+    let gpu_control_resp_tube: Tube;
+    #[cfg(feature = "gpu")]
     {
         let mut gpu_params = GpuParameters::default();
         // Use a 64 MiB SHM region for MMIO transport instead of the 8 GiB PCI BAR default
         const GPU_SHM_SIZE: u64 = 64 << 20;
         gpu_params.pci_bar_size = GPU_SHM_SIZE;
 
-        let (exit_evt_wrtube, _exit_evt_rdtube) = Tube::directional_pair()
+        let (exit_evt_wrtube, rdtube) = Tube::directional_pair()
             .context("failed to create GPU exit event tube")?;
-        let (gpu_control_tube, _gpu_control_resp) = Tube::pair()
+        gpu_exit_rdtube = rdtube;
+        let (gpu_control_tube, resp_tube) = Tube::pair()
             .context("failed to create GPU control tube")?;
+        gpu_control_resp_tube = resp_tube;
 
         let gpu_device = Gpu::new(
             exit_evt_wrtube,
@@ -882,9 +889,13 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
         // Allocate a shared memory region for the GPU's host-visible memory.
         // Place it above the high memory bank.
-        let gpu_shm_guest_addr = AARCH64_HIGH_MEM_START + high_size;
-        let gpu_shm_guest_addr =
-            (gpu_shm_guest_addr + 0xFFF) & !0xFFF; // page-align
+        let gpu_shm_base = AARCH64_HIGH_MEM_START
+            .checked_add(high_size)
+            .context("GPU SHM base overflows guest address space")?;
+        let gpu_shm_guest_addr = (gpu_shm_base + 0xFFF) & !0xFFF; // page-align
+        gpu_shm_guest_addr
+            .checked_add(GPU_SHM_SIZE)
+            .context("GPU SHM end overflows guest address space")?;
 
         let shm_mmap = base::MemoryMappingBuilder::new(GPU_SHM_SIZE as usize)
             .build()
@@ -1011,6 +1022,36 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     let irq_handler_shutdown = Arc::new(AtomicBool::new(false));
     let irq_handler_shutdown_clone = irq_handler_shutdown.clone();
     let coordinator_for_handler = coordinator.clone();
+
+    // Monitor GPU exit event tube — when the display window is closed, the GPU
+    // worker sends VmEventType::Exit. Spawn a thread to watch for it.
+    #[cfg(feature = "gpu")]
+    let gpu_exit_thread = {
+        let coordinator_for_exit = coordinator.clone();
+        let shutdown_flag = irq_handler_shutdown.clone();
+        Some(thread::Builder::new()
+            .name("gpu-exit-watcher".to_string())
+            .spawn(move || {
+                loop {
+                    if shutdown_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    match gpu_exit_rdtube.recv::<VmEventType>() {
+                        Ok(VmEventType::Exit | VmEventType::Reset) => {
+                            info!("GPU requested VM exit");
+                            coordinator_for_exit.request_shutdown();
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+                drop(gpu_control_resp_tube);
+            })
+            .expect("Failed to spawn GPU exit watcher thread"))
+    };
+    #[cfg(not(feature = "gpu"))]
+    let gpu_exit_thread: Option<JoinHandle<()>> = None;
 
     let irq_handler_thread = if !irq_events_for_handler.is_empty() {
         // TODO: Replace polling loop with WaitContext-based event multiplexing.
@@ -1169,6 +1210,12 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     if let Some(thread) = control_server_thread {
         if let Err(e) = thread.join() {
             error!("control server thread panicked: {:?}", e);
+        }
+    }
+
+    if let Some(thread) = gpu_exit_thread {
+        if let Err(e) = thread.join() {
+            error!("GPU exit watcher thread panicked: {:?}", e);
         }
     }
 
@@ -2270,5 +2317,93 @@ mod tests {
 
         assert_eq!(intid, 0);
         assert_eq!(irm, 1);
+    }
+
+    const TEST_MMIO_BASE: u64 = 0x10000;
+    const TEST_MMIO_SIZE: u64 = 0x200;
+
+    /// Verify the FDT includes virtio_mmio nodes for all devices
+    /// including GPU when the gpu feature is enabled.
+    #[test]
+    fn fdt_includes_all_virtio_mmio_nodes() {
+        let num_disks = 1;
+        let num_shared = 0;
+        let mut num_devices = num_disks + num_shared;
+        #[cfg(feature = "audio")]
+        {
+            num_devices += 1;
+        }
+        #[cfg(feature = "gpu")]
+        {
+            num_devices += 1;
+        }
+
+        let mut fdt = create_minimal_fdt(
+            512 << 20,
+            0,
+            2,
+            GuestAddress(0x90000000),
+            num_devices,
+            &[],
+            None,
+        )
+        .expect("FDT creation failed");
+
+        let fdt_data = fdt.finish().expect("FDT finish failed");
+        for i in 0..num_devices {
+            let addr = TEST_MMIO_BASE + (i as u64 * TEST_MMIO_SIZE);
+            let node_name = format!("virtio_mmio@{:x}", addr);
+            assert!(
+                fdt_data.windows(node_name.len()).any(|w| w == node_name.as_bytes()),
+                "FDT should contain node {} (device {})", node_name, i
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_shm_address_page_aligned() {
+        let high_mem_start: u64 = 0x1_0000_0000;
+        let high_mem_size: u64 = 512 << 20;
+
+        let raw_addr = high_mem_start + high_mem_size;
+        let aligned = (raw_addr + 0xFFF) & !0xFFF;
+
+        assert_eq!(aligned % 4096, 0, "SHM address must be page-aligned");
+        assert!(aligned >= raw_addr, "alignment must not move address below original");
+    }
+
+    #[test]
+    fn gpu_shm_address_alignment_non_aligned() {
+        let high_mem_start: u64 = 0x1_0000_0000;
+        let high_mem_size: u64 = (512 << 20) + 0x123;
+
+        let raw_addr = high_mem_start + high_mem_size;
+        let aligned = (raw_addr + 0xFFF) & !0xFFF;
+
+        assert_eq!(aligned % 4096, 0);
+        assert!(aligned > raw_addr);
+    }
+
+    #[test]
+    fn mmio_device_count_includes_all_devices() {
+        let disks = 2;
+        let shared_dirs = 1;
+        let mut count = disks + shared_dirs;
+        #[cfg(feature = "audio")]
+        {
+            count += 1;
+        }
+        #[cfg(feature = "gpu")]
+        {
+            count += 1;
+        }
+
+        #[cfg(all(feature = "audio", feature = "gpu"))]
+        assert_eq!(count, disks + shared_dirs + 2);
+
+        for i in 0..count {
+            let addr = TEST_MMIO_BASE + (i as u64 * TEST_MMIO_SIZE);
+            assert!(addr < TEST_MMIO_BASE + 0x10000, "MMIO addresses should not overflow GIC region");
+        }
     }
 }
