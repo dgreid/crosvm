@@ -56,6 +56,7 @@ extern "C" {
     ) -> *mut c_void;
     fn macos_helper_destroy_window(handle: *mut c_void);
     fn macos_helper_flip(handle: *mut c_void);
+    fn macos_helper_inject_key(handle: *mut c_void, keycode: u16, key_down: bool);
 
     static _dispatch_main_q: c_void;
 
@@ -122,6 +123,11 @@ enum MainThreadOp {
     },
     Flip {
         surface_id: u32,
+    },
+    InjectKey {
+        surface_id: u32,
+        keycode: u16,
+        pressed: bool,
     },
     Stop,
 }
@@ -197,6 +203,21 @@ extern "C" fn handle_op_on_main(context: *mut c_void) {
                 // SAFETY: window_handle is valid, called on main thread.
                 unsafe { macos_helper_flip(surface.window_handle) };
             }
+        }
+        MainThreadOp::InjectKey {
+            surface_id,
+            keycode,
+            pressed,
+        } => {
+            let handle = state.surfaces.get(&surface_id).map(|s| s.window_handle);
+            drop(guard);
+            if let Some(handle) = handle {
+                // SAFETY: window_handle is valid, called on main thread.
+                // Lock is dropped to avoid deadlock: inject_key triggers
+                // on_input_event which re-acquires HELPER_STATE.
+                unsafe { macos_helper_inject_key(handle, keycode, pressed) };
+            }
+            return;
         }
         MainThreadOp::Stop => {
             // Destroy all windows first.
@@ -282,6 +303,15 @@ fn bg_thread_fn(tube: Arc<Tube>) {
                     DisplayRequest::Flip { surface_id } => {
                         MainThreadOp::Flip { surface_id }
                     }
+                    DisplayRequest::InjectKey {
+                        surface_id,
+                        keycode,
+                        pressed,
+                    } => MainThreadOp::InjectKey {
+                        surface_id,
+                        keycode,
+                        pressed,
+                    },
                     DisplayRequest::Shutdown => MainThreadOp::Stop,
                 };
                 let is_stop = matches!(op, MainThreadOp::Stop);
