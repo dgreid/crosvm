@@ -93,14 +93,33 @@ methods in the trait. `CoreAudioStreamControl` stores the AudioUnit for potentia
 - ICC_SGI1_EL1: SGI register trap needed for IPI delivery (SMP boot)
 
 #### Runtime validation — graphics
-**Status:** Not started
+**Status:** Done (items 1-3 verified; item 4 requires interactive GUI testing)
 **Why:** Same — compiles but untested at runtime.
 
 **What to test:**
-1. Boot VM, `dmesg | grep virtio` shows GPU device detected
-2. Guest loads virtio-gpu DRM driver
-3. With display helper: window appears on host with console output visible
-4. Keyboard/mouse input works in guest
+1. Boot VM, `dmesg | grep virtio` shows GPU device detected ✅
+2. Guest loads virtio-gpu DRM driver ✅
+3. With display helper: window appears on host with console output visible ✅
+4. Keyboard/mouse input works in guest ⬜ (requires interactive GUI session)
+
+**Done:**
+- Custom kernel (defconfig + CONFIG_DRM_VIRTIO_GPU=y, KVM disabled) boots on HVF
+- virtio-gpu device detected: `[drm] Initialized virtio_gpu 0.1.0 0 for 10200.virtio_mmio on minor 0`
+- DRM features negotiated: `+edid +resource_blob +host_visible`
+- Host memory window mapped: `0x100000000 +0x4000000` (64 MiB SHM)
+- Framebuffer device created: `fb0: virtio_gpudrmfb frame buffer device`
+- Console switched to GPU framebuffer: `Console: switching to colour frame buffer device 160x64`
+- Display helper window opened on host: `created surface 1 (1280x1024)`
+- VirtIO SoundCard also detected alongside GPU (both devices coexist)
+
+**Bugs fixed during validation:**
+- GPU exit event tube: read end was dropped immediately, so closing the display window would not shut down the VM. Fixed by spawning a gpu-exit-watcher thread that monitors the tube and calls `request_shutdown()`.
+- GPU SHM address overflow: added checked arithmetic to prevent overflow when computing the SHM guest address with very large high memory sizes.
+
+**AI review findings addressed:**
+- Exit event tube lifetime (Important): Fixed — read tube kept alive, watcher thread added
+- SHM region overflow validation (Important): Fixed — checked_add guards added
+- Remaining items noted but not fixed (don't disturb generic code): flush() O_NONBLOCK toggling, mutex poisoning in helper, unnecessary `unsafe impl Send for MainThreadOp`
 
 ### P2 — Nice to have
 
