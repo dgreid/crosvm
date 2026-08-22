@@ -71,7 +71,9 @@ fn test_serial_create() {
 
     let serial = Serial::new(
         ProtectionType::Unprotected,
-        intr_evt.try_clone().expect("Failed to clone interrupt event"),
+        intr_evt
+            .try_clone()
+            .expect("Failed to clone interrupt event"),
         None, // No input
         Some(Box::new(serial_out)),
         None, // No sync
@@ -117,7 +119,11 @@ fn test_serial_write() {
 
     // Verify the output buffer contains the written bytes
     let buf = serial_out.buf.lock();
-    assert_eq!(buf.as_slice(), b"Hello", "Serial output should match written bytes");
+    assert_eq!(
+        buf.as_slice(),
+        b"Hello",
+        "Serial output should match written bytes"
+    );
 }
 
 /// Test 4.2 extended: Serial write with multiple bytes and special characters.
@@ -159,7 +165,9 @@ fn test_serial_read() {
 
     let mut serial = Serial::new(
         ProtectionType::Unprotected,
-        intr_evt.try_clone().expect("Failed to clone interrupt event"),
+        intr_evt
+            .try_clone()
+            .expect("Failed to clone interrupt event"),
         None,
         Some(Box::new(serial_out)),
         None,
@@ -203,7 +211,9 @@ fn test_serial_read_extended() {
 
     let mut serial = Serial::new(
         ProtectionType::Unprotected,
-        intr_evt.try_clone().expect("Failed to clone interrupt event"),
+        intr_evt
+            .try_clone()
+            .expect("Failed to clone interrupt event"),
         None,
         Some(Box::new(serial_out)),
         None,

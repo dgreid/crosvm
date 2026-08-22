@@ -10,8 +10,7 @@
 //!
 //! Architecture:
 //! - Main thread: runs `[NSApp run]`, handles all AppKit/UI operations
-//! - Background thread: reads from the Tube, dispatches to main thread via
-//!   `dispatch_async_f`
+//! - Background thread: reads from the Tube, dispatches to main thread via `dispatch_async_f`
 //!
 //! Invoked as `crosvm display-helper <fd>`.
 
@@ -60,11 +59,7 @@ extern "C" {
 
     static _dispatch_main_q: c_void;
 
-    fn dispatch_async_f(
-        queue: *mut c_void,
-        context: *mut c_void,
-        work: extern "C" fn(*mut c_void),
-    );
+    fn dispatch_async_f(queue: *mut c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
 }
 
 fn dispatch_get_main_queue() -> *mut c_void {
@@ -161,9 +156,8 @@ extern "C" fn handle_op_on_main(context: *mut c_void) {
                     let fb_ptr = mmap.as_ptr();
                     // SAFETY: macos_helper_create_window is called on the main
                     // thread and creates an NSWindow backed by the framebuffer.
-                    let handle = unsafe {
-                        macos_helper_create_window(surface_id, width, height, fb_ptr)
-                    };
+                    let handle =
+                        unsafe { macos_helper_create_window(surface_id, width, height, fb_ptr) };
                     info!(
                         "display helper: created surface {} ({}x{}) handle={:?}",
                         surface_id, width, height, handle
@@ -179,12 +173,15 @@ extern "C" fn handle_op_on_main(context: *mut c_void) {
                             window_handle: handle,
                         },
                     );
-                    let _ = state.tube.send(&DisplayResponse::SurfaceCreated {
-                        surface_id,
-                    });
+                    let _ = state
+                        .tube
+                        .send(&DisplayResponse::SurfaceCreated { surface_id });
                 }
                 Err(e) => {
-                    error!("display helper: mmap failed for surface {}: {}", surface_id, e);
+                    error!(
+                        "display helper: mmap failed for surface {}: {}",
+                        surface_id, e
+                    );
                     let _ = state.tube.send(&DisplayResponse::Error {
                         message: format!("mmap failed: {}", e),
                     });
@@ -263,7 +260,9 @@ extern "C" fn on_input_event(
 extern "C" fn on_close_requested(_context: *mut c_void, surface_id: u32) {
     let guard = HELPER_STATE.lock().unwrap();
     if let Some(state) = guard.as_ref() {
-        let _ = state.tube.send(&DisplayResponse::CloseRequested { surface_id });
+        let _ = state
+            .tube
+            .send(&DisplayResponse::CloseRequested { surface_id });
     }
 }
 
@@ -300,9 +299,7 @@ fn bg_thread_fn(tube: Arc<Tube>) {
                     DisplayRequest::DestroySurface { surface_id } => {
                         MainThreadOp::DestroySurface { surface_id }
                     }
-                    DisplayRequest::Flip { surface_id } => {
-                        MainThreadOp::Flip { surface_id }
-                    }
+                    DisplayRequest::Flip { surface_id } => MainThreadOp::Flip { surface_id },
                     DisplayRequest::InjectKey {
                         surface_id,
                         keycode,
@@ -409,7 +406,9 @@ mod tests {
     fn protocol_request_roundtrip() {
         let (sender, receiver) = make_tube_pair();
 
-        sender.send(&DisplayRequest::Flip { surface_id: 42 }).unwrap();
+        sender
+            .send(&DisplayRequest::Flip { surface_id: 42 })
+            .unwrap();
         let decoded: DisplayRequest = receiver.recv().unwrap();
         assert!(matches!(decoded, DisplayRequest::Flip { surface_id: 42 }));
 
@@ -507,9 +506,7 @@ mod tests {
 
         // Write pattern.
         // SAFETY: mmap is valid for its entire size.
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(mmap.as_ptr(), mmap.size())
-        };
+        let slice = unsafe { std::slice::from_raw_parts_mut(mmap.as_ptr(), mmap.size()) };
         for (i, byte) in slice.iter_mut().enumerate() {
             *byte = (i & 0xFF) as u8;
         }
@@ -520,9 +517,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let slice2 = unsafe {
-            std::slice::from_raw_parts(mmap2.as_ptr(), mmap2.size())
-        };
+        let slice2 = unsafe { std::slice::from_raw_parts(mmap2.as_ptr(), mmap2.size()) };
         for (i, byte) in slice2.iter().enumerate() {
             assert_eq!(*byte, (i & 0xFF) as u8, "mismatch at byte {}", i);
         }

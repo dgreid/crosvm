@@ -11,9 +11,9 @@ pub mod convert;
 pub mod ring_buffer;
 
 #[cfg(target_os = "macos")]
-mod coreaudio_sys;
-#[cfg(target_os = "macos")]
 mod capture;
+#[cfg(target_os = "macos")]
+mod coreaudio_sys;
 #[cfg(target_os = "macos")]
 mod playback;
 

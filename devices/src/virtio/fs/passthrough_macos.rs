@@ -108,8 +108,7 @@ fn fd_to_path(fd: RawDescriptor) -> io::Result<CString> {
         .iter()
         .position(|&b| b == 0)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "F_GETPATH missing nul"))?;
-    CString::new(&buf[..len])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    CString::new(&buf[..len]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Reopen an fd with the given flags using F_GETPATH + open.
@@ -199,11 +198,7 @@ impl PassthroughFs {
     }
 
     fn find_inode(&self, inode: Inode) -> io::Result<Arc<InodeData>> {
-        self.inodes
-            .lock()
-            .get(&inode)
-            .cloned()
-            .ok_or_else(ebadf)
+        self.inodes.lock().get(&inode).cloned().ok_or_else(ebadf)
     }
 
     fn find_handle(&self, handle: Handle, inode: Inode) -> io::Result<Arc<HandleData>> {
@@ -281,13 +276,7 @@ impl PassthroughFs {
         };
 
         // SAFETY: openat doesn't modify memory and we check the return value.
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_descriptor(),
-                name.as_ptr(),
-                flags,
-            )
-        };
+        let fd = unsafe { libc::openat(parent.as_raw_descriptor(), name.as_ptr(), flags) };
         if fd < 0 {
             // If we can't open (e.g., permission denied on a file), try opening
             // with just O_RDONLY (symlinks will fail with O_NOFOLLOW, which is expected).
@@ -696,8 +685,10 @@ impl FileSystem for PassthroughFs {
         let st = fstat(file.as_raw_fd())?;
         let entry = self.add_entry(file, st, create_flags);
 
-        let (handle, opts) =
-            self.do_open(entry.inode, flags & !((libc::O_CREAT | libc::O_EXCL | libc::O_NOCTTY) as u32))?;
+        let (handle, opts) = self.do_open(
+            entry.inode,
+            flags & !((libc::O_CREAT | libc::O_EXCL | libc::O_NOCTTY) as u32),
+        )?;
 
         Ok((entry, handle, opts))
     }
@@ -714,8 +705,13 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(parent)?;
 
         // SAFETY: mkdirat doesn't modify memory and we check the return value.
-        let ret =
-            unsafe { libc::mkdirat(data.as_raw_descriptor(), name.as_ptr(), (mode & !umask) as u16) };
+        let ret = unsafe {
+            libc::mkdirat(
+                data.as_raw_descriptor(),
+                name.as_ptr(),
+                (mode & !umask) as u16,
+            )
+        };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }

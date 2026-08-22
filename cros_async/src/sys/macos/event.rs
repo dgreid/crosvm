@@ -7,6 +7,7 @@ use base::Event;
 use crate::AsyncResult;
 use crate::EventAsync;
 use crate::Executor;
+use crate::IoOptions;
 
 impl EventAsync {
     /// Create a new EventAsync from an Event.
@@ -26,7 +27,7 @@ impl EventAsync {
         // Read whatever is available (each signal writes 1 byte)
         let (n, _) = self
             .io_source
-            .read_to_vec(None, vec![0u8; 64])
+            .read_to_vec(None, vec![0u8; 64], IoOptions::default())
             .await?;
 
         // Return the number of signals (bytes read)

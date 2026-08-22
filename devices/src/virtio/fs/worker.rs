@@ -294,12 +294,9 @@ impl<F: FileSystem + Sync> Worker<F> {
                     Token::QueueReady => {
                         self.queue.event().wait().map_err(Error::ReadQueueEvent)?;
                         #[cfg(any(target_os = "android", target_os = "linux"))]
-                        if let Err(e) = process_fs_queue(
-                            &mut self.queue,
-                            &self.server,
-                            &self.tube,
-                            self.slot,
-                        ) {
+                        if let Err(e) =
+                            process_fs_queue(&mut self.queue, &self.server, &self.tube, self.slot)
+                        {
                             error!("virtio-fs transport error: {}", e);
                             return Err(e);
                         }

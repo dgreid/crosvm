@@ -808,13 +808,16 @@ mod tests {
 
     #[test]
     fn sockaddr_un_long_input_err() {
-        let res = sockaddr_un(Path::new(&"a".repeat(108)));
+        let (addr, _) = sockaddr_un(Path::new("")).expect("sockaddr_un failed");
+        let res = sockaddr_un(Path::new(&"a".repeat(addr.sun_path.len())));
         assert!(res.is_err());
     }
 
     #[test]
     fn sockaddr_un_long_input_pass() {
-        let _res = sockaddr_un(Path::new(&"a".repeat(107))).expect("sockaddr_un failed");
+        let (addr, _) = sockaddr_un(Path::new("")).expect("sockaddr_un failed");
+        let _res = sockaddr_un(Path::new(&"a".repeat(addr.sun_path.len() - 1)))
+            .expect("sockaddr_un failed");
     }
 
     #[test]

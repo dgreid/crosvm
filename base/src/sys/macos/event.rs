@@ -164,9 +164,7 @@ impl PlatformEvent {
             let mut buf: [u8; 64] = [0; 64];
 
             // SAFETY: fd is the valid read end of our pipe and buf is a stack-allocated array.
-            let read_ret = unsafe {
-                libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len())
-            };
+            let read_ret = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
 
             if read_ret < 0 {
                 let err = io::Error::last_os_error();
@@ -287,9 +285,10 @@ impl From<SafeDescriptor> for PlatformEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread;
     use std::time::Instant;
+
+    use super::*;
 
     #[test]
     fn test_signal_and_wait() {

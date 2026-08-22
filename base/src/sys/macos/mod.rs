@@ -26,14 +26,13 @@ pub use net::UnixSeqpacketListener;
 pub use net::UnlinkUnixSeqpacketListener;
 mod timer;
 
-pub use terminal::read_raw_stdin;
-pub use terminal::Terminal;
-
 pub(crate) use event::PlatformEvent;
 pub(in crate::sys) use libc::sendmsg;
 pub(in crate::sys) use net::sockaddr_un;
 pub(in crate::sys) use net::sockaddrv4_to_lib_c;
 pub(in crate::sys) use net::sockaddrv6_to_lib_c;
+pub use terminal::read_raw_stdin;
+pub use terminal::Terminal;
 
 /// Sets the name of the current thread to `name`.
 ///
@@ -135,14 +134,13 @@ pub fn set_cpu_affinity<I: IntoIterator<Item = usize>>(_cpus: I) -> crate::errno
     Ok(())
 }
 
+use kqueue::Kqueue;
 use smallvec::SmallVec;
 
 use crate::AsRawDescriptor;
 use crate::EventToken;
 use crate::EventType;
 use crate::TriggeredEvent;
-
-use kqueue::Kqueue;
 
 const EVENT_CONTEXT_MAX_EVENTS: usize = 16;
 
@@ -168,7 +166,11 @@ impl<T: EventToken> EventContext<T> {
     ) -> crate::errno::Result<EventContext<T>> {
         let ctx = EventContext::new()?;
         for (fd, token) in fd_tokens {
-            ctx.add_for_event(*fd, EventType::Read, T::from_raw_token(token.as_raw_token()))?;
+            ctx.add_for_event(
+                *fd,
+                EventType::Read,
+                T::from_raw_token(token.as_raw_token()),
+            )?;
         }
         Ok(ctx)
     }
@@ -252,7 +254,9 @@ impl<T: EventToken> EventContext<T> {
         ];
 
         // Ignore errors since the fd may not have been registered for both read and write.
-        let _ = self.kqueue.kevent(&changes, &mut [], Some(std::time::Duration::ZERO));
+        let _ = self
+            .kqueue
+            .kevent(&changes, &mut [], Some(std::time::Duration::ZERO));
         Ok(())
     }
 
@@ -266,16 +270,16 @@ impl<T: EventToken> EventContext<T> {
         &self,
         timeout: std::time::Duration,
     ) -> crate::errno::Result<SmallVec<[TriggeredEvent<T>; 16]>> {
-        let mut events: [libc::kevent64_s; EVENT_CONTEXT_MAX_EVENTS] =
-            [libc::kevent64_s {
-                ident: 0,
-                filter: 0,
-                flags: 0,
-                fflags: 0,
-                data: 0,
-                udata: 0,
-                ext: [0, 0],
-            }; EVENT_CONTEXT_MAX_EVENTS];
+        let mut events: [libc::kevent64_s; EVENT_CONTEXT_MAX_EVENTS] = [libc::kevent64_s {
+            ident: 0,
+            filter: 0,
+            flags: 0,
+            fflags: 0,
+            data: 0,
+            udata: 0,
+            ext: [0, 0],
+        };
+            EVENT_CONTEXT_MAX_EVENTS];
 
         let timeout_opt = if timeout.as_secs() == i64::MAX as u64 {
             None // Infinite wait
@@ -287,13 +291,11 @@ impl<T: EventToken> EventContext<T> {
 
         let triggered: SmallVec<[TriggeredEvent<T>; 16]> = returned_events
             .iter()
-            .map(|e| {
-                TriggeredEvent {
-                    token: T::from_raw_token(e.udata),
-                    is_readable: e.filter == libc::EVFILT_READ,
-                    is_writable: e.filter == libc::EVFILT_WRITE,
-                    is_hungup: (e.flags & libc::EV_EOF) != 0,
-                }
+            .map(|e| TriggeredEvent {
+                token: T::from_raw_token(e.udata),
+                is_readable: e.filter == libc::EVFILT_READ,
+                is_writable: e.filter == libc::EVFILT_WRITE,
+                is_hungup: (e.flags & libc::EV_EOF) != 0,
             })
             .collect();
 
@@ -616,13 +618,7 @@ impl MemoryMapping {
     /// Calls msync with MS_SYNC on the mapping.
     pub fn msync(&self) -> Result<()> {
         // SAFETY: self.addr and self.size describe the region we obtained from mmap.
-        let ret = unsafe {
-            libc::msync(
-                self.addr as *mut libc::c_void,
-                self.size,
-                libc::MS_SYNC,
-            )
-        };
+        let ret = unsafe { libc::msync(self.addr as *mut libc::c_void, self.size, libc::MS_SYNC) };
         if ret == -1 {
             return Err(Error::SystemCallFailed(crate::errno::Error::last()));
         }
@@ -726,10 +722,7 @@ pub mod ioctl {
     ///
     /// The caller must ensure that the ioctl number is valid and that no
     /// argument is expected.
-    pub unsafe fn ioctl<F: crate::AsRawDescriptor>(
-        descriptor: &F,
-        nr: IoctlNr,
-    ) -> std::ffi::c_int {
+    pub unsafe fn ioctl<F: crate::AsRawDescriptor>(descriptor: &F, nr: IoctlNr) -> std::ffi::c_int {
         // SAFETY: The caller guarantees the ioctl is valid.
         libc::ioctl(descriptor.as_raw_descriptor(), nr as _)
     }
@@ -846,14 +839,10 @@ pub fn file_punch_hole(file: &File, offset: u64, length: u64) -> std::io::Result
 /// Writes zeroes to a file at the given offset and length.
 ///
 /// On MacOS, we try F_PUNCHHOLE first, then fall back to writing zeros.
-pub fn file_write_zeroes_at(
-    file: &File,
-    offset: u64,
-    length: usize,
-) -> std::io::Result<usize> {
-    use std::io::Write as _;
-    use std::io::Seek;
+pub fn file_write_zeroes_at(file: &File, offset: u64, length: usize) -> std::io::Result<usize> {
     use std::cmp::min;
+    use std::io::Seek;
+    use std::io::Write as _;
 
     // Try to punch hole first (which zeros the range)
     if file_punch_hole(file, offset, length as u64).is_ok() {
@@ -1021,7 +1010,11 @@ pub enum FlockOperation {
 /// * `file` - The file to lock/unlock
 /// * `op` - The lock operation to perform
 /// * `nonblocking` - If true, return an error instead of blocking when the lock is held
-pub fn flock(file: &dyn AsRawDescriptor, op: FlockOperation, nonblocking: bool) -> crate::errno::Result<()> {
+pub fn flock(
+    file: &dyn AsRawDescriptor,
+    op: FlockOperation,
+    nonblocking: bool,
+) -> crate::errno::Result<()> {
     let mut operation = match op {
         FlockOperation::LockShared => libc::LOCK_SH,
         FlockOperation::LockExclusive => libc::LOCK_EX,
@@ -1052,9 +1045,9 @@ impl crate::FileAllocate for File {
         // macOS doesn't have posix_fallocate, but we can use fcntl with F_PREALLOCATE
         // For simplicity, we just extend the file if needed using ftruncate
 
-        let required_size = offset.checked_add(len).ok_or_else(|| {
-            IoError::from_raw_os_error(libc::EINVAL)
-        })?;
+        let required_size = offset
+            .checked_add(len)
+            .ok_or_else(|| IoError::from_raw_os_error(libc::EINVAL))?;
 
         // Get current file size
         let metadata = self.metadata()?;
@@ -1063,9 +1056,7 @@ impl crate::FileAllocate for File {
         if required_size > current_size {
             // Extend the file to the required size
             // SAFETY: self provides a valid file descriptor via AsRawFd.
-            let ret = unsafe {
-                libc::ftruncate(self.as_raw_fd(), required_size as libc::off_t)
-            };
+            let ret = unsafe { libc::ftruncate(self.as_raw_fd(), required_size as libc::off_t) };
             if ret != 0 {
                 return Err(IoError::last_os_error());
             }

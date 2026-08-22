@@ -19,6 +19,7 @@ use crate::common_executor::RawExecutor;
 use crate::mem::BackingMemory;
 use crate::AsyncError;
 use crate::AsyncResult;
+use crate::IoOptions;
 use crate::MemRegion;
 
 #[sorted]
@@ -97,6 +98,7 @@ impl<F: AsRawDescriptor> KqueueSource<F> {
         &self,
         file_offset: Option<u64>,
         mut vec: Vec<u8>,
+        _options: IoOptions,
     ) -> AsyncResult<(usize, Vec<u8>)> {
         loop {
             let res = if let Some(offset) = file_offset {
@@ -145,6 +147,7 @@ impl<F: AsRawDescriptor> KqueueSource<F> {
         file_offset: Option<u64>,
         mem: Arc<dyn BackingMemory + Send + Sync>,
         mem_offsets: impl IntoIterator<Item = MemRegion>,
+        _options: IoOptions,
     ) -> AsyncResult<usize> {
         let mut iovecs = mem_offsets
             .into_iter()
@@ -207,6 +210,7 @@ impl<F: AsRawDescriptor> KqueueSource<F> {
         &self,
         file_offset: Option<u64>,
         vec: Vec<u8>,
+        _options: IoOptions,
     ) -> AsyncResult<(usize, Vec<u8>)> {
         loop {
             let res = if let Some(offset) = file_offset {
@@ -255,6 +259,7 @@ impl<F: AsRawDescriptor> KqueueSource<F> {
         file_offset: Option<u64>,
         mem: Arc<dyn BackingMemory + Send + Sync>,
         mem_offsets: impl IntoIterator<Item = MemRegion>,
+        _options: IoOptions,
     ) -> AsyncResult<usize> {
         let iovecs = mem_offsets
             .into_iter()

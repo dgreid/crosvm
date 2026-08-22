@@ -5,6 +5,7 @@
 use std::cmp::min;
 
 use anyhow::Context;
+use base::RawDescriptor;
 use cros_async::Executor;
 use disk::DiskFile;
 
@@ -22,6 +23,10 @@ pub fn get_seg_max(queue_size: u16) -> u32 {
     // number of segments must be smaller than the queue size.
     // In addition, the request header and status each consume a descriptor.
     min(seg_max, u32::from(queue_size) - 2)
+}
+
+pub fn check_dontcache_support(_fd: RawDescriptor, _write: bool) -> bool {
+    false
 }
 
 impl DiskOption {

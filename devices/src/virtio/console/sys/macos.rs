@@ -151,22 +151,20 @@ fn read_input(
                         }
                     }
                 }
-                Token::ConsoleEvent => {
-                    match input.read(&mut rx_buf) {
-                        Ok(0) => break 'wait,
-                        Ok(size) => {
-                            buffer.lock().extend(&rx_buf[0..size]);
-                            if let Err(e) = thread_in_avail_evt.signal() {
-                                error!("Failed to signal console input event: {}", e);
-                                break 'wait;
-                            }
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        Err(e) => {
-                            return Err(e).context("failed to read console input");
+                Token::ConsoleEvent => match input.read(&mut rx_buf) {
+                    Ok(0) => break 'wait,
+                    Ok(size) => {
+                        buffer.lock().extend(&rx_buf[0..size]);
+                        if let Err(e) = thread_in_avail_evt.signal() {
+                            error!("Failed to signal console input event: {}", e);
+                            break 'wait;
                         }
                     }
-                }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        return Err(e).context("failed to read console input");
+                    }
+                },
             }
         }
     }

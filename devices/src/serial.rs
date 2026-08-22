@@ -189,9 +189,10 @@ impl Serial {
             self.worker = Some(WorkerThread::start(
                 format!("{} input thread (polling)", self.debug_label()),
                 move |kill_evt| {
-                    use base::AsRawDescriptor;
                     use std::io::Read;
                     use std::thread;
+
+                    use base::AsRawDescriptor;
 
                     // Get the file descriptor from the read notifier
                     let fd = rx.get_read_notifier().as_raw_descriptor();
@@ -211,7 +212,10 @@ impl Serial {
 
                     loop {
                         // Check if we should exit
-                        if matches!(kill_evt.wait_timeout(Duration::ZERO), Ok(base::EventWaitResult::Signaled)) {
+                        if matches!(
+                            kill_evt.wait_timeout(Duration::ZERO),
+                            Ok(base::EventWaitResult::Signaled)
+                        ) {
                             // Restore blocking mode before returning
                             if flags >= 0 {
                                 // SAFETY: Restoring original flags on valid fd

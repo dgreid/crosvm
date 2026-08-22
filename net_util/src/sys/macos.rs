@@ -26,11 +26,10 @@ pub mod fakes {
     use base::RawDescriptor;
     use base::VolatileSlice;
 
+    use super::TapT;
     use crate::MacAddress;
     use crate::Result;
     use crate::TapTCommon;
-
-    use super::TapT;
 
     /// Fake TAP device for testing on macOS
     pub struct FakeTap {
@@ -45,13 +44,19 @@ pub mod fakes {
 
     impl Read for FakeTap {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "FakeTap not supported"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "FakeTap not supported",
+            ))
         }
     }
 
     impl Write for FakeTap {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "FakeTap not supported"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "FakeTap not supported",
+            ))
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -67,19 +72,31 @@ pub mod fakes {
 
     impl FileReadWriteVolatile for FakeTap {
         fn read_volatile(&mut self, _slice: VolatileSlice) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "FakeTap not supported"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "FakeTap not supported",
+            ))
         }
 
         fn read_vectored_volatile(&mut self, _bufs: &[VolatileSlice]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "FakeTap not supported"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "FakeTap not supported",
+            ))
         }
 
         fn write_volatile(&mut self, _slice: VolatileSlice) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "FakeTap not supported"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "FakeTap not supported",
+            ))
         }
 
         fn write_vectored_volatile(&mut self, _bufs: &[VolatileSlice]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "FakeTap not supported"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "FakeTap not supported",
+            ))
         }
     }
 

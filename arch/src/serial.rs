@@ -115,7 +115,9 @@ pub fn add_serial_devices(
     com_evt_1_3: (u32, &Event),
     com_evt_2_4: (u32, &Event),
     serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
-    #[cfg_attr(any(windows, target_os = "macos"), allow(unused_variables))] serial_jail: Option<Minijail>,
+    #[cfg_attr(any(windows, target_os = "macos"), allow(unused_variables))] serial_jail: Option<
+        Minijail,
+    >,
     #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
 ) -> std::result::Result<Vec<SerialDeviceInfo>, DeviceRegistrationError> {
     let mut devices = Vec::new();

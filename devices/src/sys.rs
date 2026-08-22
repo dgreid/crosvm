@@ -7,8 +7,8 @@ cfg_if::cfg_if! {
         pub mod linux;
         pub use linux::*;
     } else if #[cfg(target_os = "macos")] {
-        pub mod macos;
-        pub use macos::*;
+        pub(crate) mod macos;
+        pub(crate) use macos::*;
     } else if #[cfg(windows)] {
         pub mod windows;
         pub use windows::*;

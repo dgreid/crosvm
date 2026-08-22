@@ -22,7 +22,11 @@ fn test_guest_memory_new_single_region() {
     let size: u64 = 0x10000; // 64KB, page-aligned
 
     let result = GuestMemory::new(&[(start_addr, size)]);
-    assert!(result.is_ok(), "Failed to create GuestMemory: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to create GuestMemory: {:?}",
+        result.err()
+    );
 
     let guest_mem = result.unwrap();
     assert_eq!(guest_mem.memory_size(), size);
@@ -34,12 +38,16 @@ fn test_guest_memory_new_single_region() {
 #[test]
 fn test_guest_memory_new_multiple_regions() {
     let regions = &[
-        (GuestAddress(0x0), 0x10000),      // 64KB at 0
-        (GuestAddress(0x20000), 0x20000),  // 128KB at 128KB
+        (GuestAddress(0x0), 0x10000),     // 64KB at 0
+        (GuestAddress(0x20000), 0x20000), // 128KB at 128KB
     ];
 
     let result = GuestMemory::new(regions);
-    assert!(result.is_ok(), "Failed to create GuestMemory with multiple regions: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to create GuestMemory with multiple regions: {:?}",
+        result.err()
+    );
 
     let guest_mem = result.unwrap();
     assert_eq!(guest_mem.memory_size(), 0x10000 + 0x20000);
@@ -52,17 +60,29 @@ fn test_guest_memory_various_sizes() {
     // Test small size (1 page = 4KB on most systems, but we use 16KB for alignment safety)
     let small_size = 0x10000; // 64KB
     let small_result = GuestMemory::new(&[(GuestAddress(0), small_size)]);
-    assert!(small_result.is_ok(), "Failed to allocate small memory: {:?}", small_result.err());
+    assert!(
+        small_result.is_ok(),
+        "Failed to allocate small memory: {:?}",
+        small_result.err()
+    );
 
     // Test medium size (1MB)
     let medium_size = 0x100000;
     let medium_result = GuestMemory::new(&[(GuestAddress(0), medium_size)]);
-    assert!(medium_result.is_ok(), "Failed to allocate medium memory: {:?}", medium_result.err());
+    assert!(
+        medium_result.is_ok(),
+        "Failed to allocate medium memory: {:?}",
+        medium_result.err()
+    );
 
     // Test larger size (16MB) - typical for small VMs
     let large_size = 0x1000000;
     let large_result = GuestMemory::new(&[(GuestAddress(0), large_size)]);
-    assert!(large_result.is_ok(), "Failed to allocate larger memory: {:?}", large_result.err());
+    assert!(
+        large_result.is_ok(),
+        "Failed to allocate larger memory: {:?}",
+        large_result.err()
+    );
 }
 
 /// Test that overlapping memory regions are rejected.
@@ -98,12 +118,14 @@ fn test_guest_memory_read_write() {
     let write_data = b"Hello, macOS GuestMemory!";
     let write_addr = GuestAddress(0x1100);
 
-    let bytes_written = guest_mem.write_at_addr(write_data, write_addr)
+    let bytes_written = guest_mem
+        .write_at_addr(write_data, write_addr)
         .expect("Failed to write to guest memory");
     assert_eq!(bytes_written, write_data.len());
 
     let mut read_buf = vec![0u8; write_data.len()];
-    let bytes_read = guest_mem.read_at_addr(&mut read_buf, write_addr)
+    let bytes_read = guest_mem
+        .read_at_addr(&mut read_buf, write_addr)
         .expect("Failed to read from guest memory");
     assert_eq!(bytes_read, write_data.len());
     assert_eq!(&read_buf, write_data);
@@ -120,18 +142,26 @@ fn test_guest_memory_read_write_obj() {
     // Write a u64 value
     let test_value: u64 = 0xDEADBEEFCAFEBABE;
     let addr = GuestAddress(0x100);
-    guest_mem.write_obj_at_addr(test_value, addr).expect("Failed to write u64");
+    guest_mem
+        .write_obj_at_addr(test_value, addr)
+        .expect("Failed to write u64");
 
     // Read it back
-    let read_value: u64 = guest_mem.read_obj_from_addr(addr).expect("Failed to read u64");
+    let read_value: u64 = guest_mem
+        .read_obj_from_addr(addr)
+        .expect("Failed to read u64");
     assert_eq!(read_value, test_value);
 
     // Write a u32 value at a different location
     let test_u32: u32 = 0x12345678;
     let addr2 = GuestAddress(0x200);
-    guest_mem.write_obj_at_addr(test_u32, addr2).expect("Failed to write u32");
+    guest_mem
+        .write_obj_at_addr(test_u32, addr2)
+        .expect("Failed to write u32");
 
-    let read_u32: u32 = guest_mem.read_obj_from_addr(addr2).expect("Failed to read u32");
+    let read_u32: u32 = guest_mem
+        .read_obj_from_addr(addr2)
+        .expect("Failed to read u32");
     assert_eq!(read_u32, test_u32);
 }
 
@@ -147,15 +177,23 @@ fn test_guest_memory_read_write_multiple_regions() {
 
     // Write to first region
     let val1: u64 = 0x1111111111111111;
-    guest_mem.write_obj_at_addr(val1, GuestAddress(0x100)).expect("Failed to write to region 1");
+    guest_mem
+        .write_obj_at_addr(val1, GuestAddress(0x100))
+        .expect("Failed to write to region 1");
 
     // Write to second region
     let val2: u64 = 0x2222222222222222;
-    guest_mem.write_obj_at_addr(val2, GuestAddress(0x20100)).expect("Failed to write to region 2");
+    guest_mem
+        .write_obj_at_addr(val2, GuestAddress(0x20100))
+        .expect("Failed to write to region 2");
 
     // Read back from both regions
-    let read1: u64 = guest_mem.read_obj_from_addr(GuestAddress(0x100)).expect("Failed to read from region 1");
-    let read2: u64 = guest_mem.read_obj_from_addr(GuestAddress(0x20100)).expect("Failed to read from region 2");
+    let read1: u64 = guest_mem
+        .read_obj_from_addr(GuestAddress(0x100))
+        .expect("Failed to read from region 1");
+    let read2: u64 = guest_mem
+        .read_obj_from_addr(GuestAddress(0x20100))
+        .expect("Failed to read from region 2");
 
     assert_eq!(read1, val1);
     assert_eq!(read2, val2);
@@ -164,8 +202,8 @@ fn test_guest_memory_read_write_multiple_regions() {
 /// Test that reading/writing to invalid addresses fails.
 #[test]
 fn test_guest_memory_invalid_address() {
-    let guest_mem = GuestMemory::new(&[(GuestAddress(0x1000), 0x10000)])
-        .expect("Failed to create GuestMemory");
+    let guest_mem =
+        GuestMemory::new(&[(GuestAddress(0x1000), 0x10000)]).expect("Failed to create GuestMemory");
 
     // Try to write to an address outside the region
     let invalid_addr = GuestAddress(0x100000);
@@ -180,17 +218,19 @@ fn test_guest_memory_invalid_address() {
 /// Test write_all_at_addr and read_exact_at_addr.
 #[test]
 fn test_guest_memory_write_all_read_exact() {
-    let guest_mem = GuestMemory::new(&[(GuestAddress(0x0), 0x10000)])
-        .expect("Failed to create GuestMemory");
+    let guest_mem =
+        GuestMemory::new(&[(GuestAddress(0x0), 0x10000)]).expect("Failed to create GuestMemory");
 
     let test_data = b"Test data for write_all and read_exact";
     let addr = GuestAddress(0x500);
 
-    guest_mem.write_all_at_addr(test_data, addr)
+    guest_mem
+        .write_all_at_addr(test_data, addr)
         .expect("write_all_at_addr failed");
 
     let mut read_buf = vec![0u8; test_data.len()];
-    guest_mem.read_exact_at_addr(&mut read_buf, addr)
+    guest_mem
+        .read_exact_at_addr(&mut read_buf, addr)
         .expect("read_exact_at_addr failed");
 
     assert_eq!(&read_buf, test_data);
@@ -199,13 +239,14 @@ fn test_guest_memory_write_all_read_exact() {
 /// Test getting a volatile slice from guest memory.
 #[test]
 fn test_guest_memory_volatile_slice() {
-    let guest_mem = GuestMemory::new(&[(GuestAddress(0x0), 0x10000)])
-        .expect("Failed to create GuestMemory");
+    let guest_mem =
+        GuestMemory::new(&[(GuestAddress(0x0), 0x10000)]).expect("Failed to create GuestMemory");
 
     let addr = GuestAddress(0x100);
     let slice_len = 64;
 
-    let vslice = guest_mem.get_slice_at_addr(addr, slice_len)
+    let vslice = guest_mem
+        .get_slice_at_addr(addr, slice_len)
         .expect("Failed to get volatile slice");
 
     // Write pattern to the slice
@@ -213,10 +254,14 @@ fn test_guest_memory_volatile_slice() {
 
     // Read back via guest_memory to verify
     let mut read_buf = vec![0u8; slice_len];
-    guest_mem.read_exact_at_addr(&mut read_buf, addr)
+    guest_mem
+        .read_exact_at_addr(&mut read_buf, addr)
         .expect("Failed to read back data");
 
-    assert!(read_buf.iter().all(|&b| b == 0xAB), "Volatile slice write failed");
+    assert!(
+        read_buf.iter().all(|&b| b == 0xAB),
+        "Volatile slice write failed"
+    );
 }
 
 /// Test creating a basic MemoryMapping.
@@ -236,8 +281,7 @@ fn test_memory_mapping_create() {
 fn test_memory_mapping_from_shared_memory() {
     let size: u64 = 0x10000;
 
-    let shm = SharedMemory::new("test_shm", size)
-        .expect("Failed to create SharedMemory");
+    let shm = SharedMemory::new("test_shm", size).expect("Failed to create SharedMemory");
 
     let mapping = MemoryMappingBuilder::new(size as usize)
         .from_shared_memory(&shm)
@@ -252,8 +296,7 @@ fn test_memory_mapping_from_shared_memory() {
 fn test_memory_mapping_read_write() {
     let size = 0x10000;
 
-    let shm = SharedMemory::new("test_rw_shm", size as u64)
-        .expect("Failed to create SharedMemory");
+    let shm = SharedMemory::new("test_rw_shm", size as u64).expect("Failed to create SharedMemory");
 
     let mapping = MemoryMappingBuilder::new(size)
         .from_shared_memory(&shm)
@@ -263,11 +306,13 @@ fn test_memory_mapping_read_write() {
     // Write a u64 value
     let test_value: u64 = 0xCAFEBABEDEADBEEF;
     let offset = 0x100;
-    mapping.write_obj(test_value, offset)
+    mapping
+        .write_obj(test_value, offset)
         .expect("Failed to write to MemoryMapping");
 
     // Read it back
-    let read_value: u64 = mapping.read_obj(offset)
+    let read_value: u64 = mapping
+        .read_obj(offset)
         .expect("Failed to read from MemoryMapping");
 
     assert_eq!(read_value, test_value);
@@ -278,8 +323,8 @@ fn test_memory_mapping_read_write() {
 fn test_memory_mapping_read_write_slice() {
     let size = 0x10000;
 
-    let shm = SharedMemory::new("test_slice_shm", size as u64)
-        .expect("Failed to create SharedMemory");
+    let shm =
+        SharedMemory::new("test_slice_shm", size as u64).expect("Failed to create SharedMemory");
 
     let mapping = MemoryMappingBuilder::new(size)
         .from_shared_memory(&shm)
@@ -289,12 +334,14 @@ fn test_memory_mapping_read_write_slice() {
     let write_data = b"Hello from MemoryMapping slice test!";
     let offset = 0x200;
 
-    let bytes_written = mapping.write_slice(write_data, offset)
+    let bytes_written = mapping
+        .write_slice(write_data, offset)
         .expect("Failed to write slice to MemoryMapping");
     assert_eq!(bytes_written, write_data.len());
 
     let mut read_buf = vec![0u8; write_data.len()];
-    let bytes_read = mapping.read_slice(&mut read_buf, offset)
+    let bytes_read = mapping
+        .read_slice(&mut read_buf, offset)
         .expect("Failed to read slice from MemoryMapping");
     assert_eq!(bytes_read, write_data.len());
     assert_eq!(&read_buf, write_data);
@@ -305,10 +352,10 @@ fn test_memory_mapping_read_write_slice() {
 fn test_memory_mapping_with_offset() {
     let shm_size: u64 = 0x20000; // 128KB shared memory
     let mapping_size = 0x10000; // 64KB mapping
-    let offset: u64 = 0x10000;  // Start at 64KB offset
+    let offset: u64 = 0x10000; // Start at 64KB offset
 
-    let shm = SharedMemory::new("test_offset_shm", shm_size)
-        .expect("Failed to create SharedMemory");
+    let shm =
+        SharedMemory::new("test_offset_shm", shm_size).expect("Failed to create SharedMemory");
 
     let mapping = MemoryMappingBuilder::new(mapping_size)
         .from_shared_memory(&shm)
@@ -320,10 +367,12 @@ fn test_memory_mapping_with_offset() {
 
     // Write to the mapping
     let test_value: u32 = 0x12345678;
-    mapping.write_obj(test_value, 0)
+    mapping
+        .write_obj(test_value, 0)
         .expect("Failed to write to offset mapping");
 
-    let read_value: u32 = mapping.read_obj(0)
+    let read_value: u32 = mapping
+        .read_obj(0)
         .expect("Failed to read from offset mapping");
     assert_eq!(read_value, test_value);
 }
@@ -338,7 +387,12 @@ fn test_memory_mapping_size() {
             .build()
             .expect("Failed to create MemoryMapping");
 
-        assert_eq!(mapping.size(), size, "MemoryMapping size mismatch for size {}", size);
+        assert_eq!(
+            mapping.size(),
+            size,
+            "MemoryMapping size mismatch for size {}",
+            size
+        );
     }
 }
 
@@ -352,7 +406,10 @@ fn test_memory_mapping_mapped_region() {
         .expect("Failed to create MemoryMapping");
 
     // Test MappedRegion trait methods
-    assert!(!mapping.as_ptr().is_null(), "MemoryMapping pointer should not be null");
+    assert!(
+        !mapping.as_ptr().is_null(),
+        "MemoryMapping pointer should not be null"
+    );
     assert_eq!(mapping.size(), size);
 }
 
@@ -362,7 +419,8 @@ fn test_guest_memory_address_in_range() {
     let guest_mem = GuestMemory::new(&[
         (GuestAddress(0x1000), 0x10000),
         (GuestAddress(0x30000), 0x10000),
-    ]).expect("Failed to create GuestMemory");
+    ])
+    .expect("Failed to create GuestMemory");
 
     // Addresses in first region
     assert!(guest_mem.address_in_range(GuestAddress(0x1000)));
@@ -386,7 +444,8 @@ fn test_guest_memory_is_valid_range() {
     let guest_mem = GuestMemory::new(&[
         (GuestAddress(0x0), 0x10000),
         (GuestAddress(0x20000), 0x10000),
-    ]).expect("Failed to create GuestMemory");
+    ])
+    .expect("Failed to create GuestMemory");
 
     // Valid range within first region
     assert!(guest_mem.is_valid_range(GuestAddress(0x0), 0x1000));
@@ -405,16 +464,18 @@ fn test_guest_memory_is_valid_range() {
 /// Test get_host_address functionality.
 #[test]
 fn test_guest_memory_get_host_address() {
-    let guest_mem = GuestMemory::new(&[(GuestAddress(0x1000), 0x10000)])
-        .expect("Failed to create GuestMemory");
+    let guest_mem =
+        GuestMemory::new(&[(GuestAddress(0x1000), 0x10000)]).expect("Failed to create GuestMemory");
 
-    let host_addr = guest_mem.get_host_address(GuestAddress(0x1000))
+    let host_addr = guest_mem
+        .get_host_address(GuestAddress(0x1000))
         .expect("Failed to get host address");
 
     assert!(!host_addr.is_null(), "Host address should not be null");
 
     // Getting address for different offset in same region should give different pointer
-    let host_addr2 = guest_mem.get_host_address(GuestAddress(0x2000))
+    let host_addr2 = guest_mem
+        .get_host_address(GuestAddress(0x2000))
         .expect("Failed to get host address at offset");
 
     assert_ne!(host_addr, host_addr2);
@@ -425,8 +486,8 @@ fn test_guest_memory_get_host_address() {
 /// Test get_host_address_range functionality.
 #[test]
 fn test_guest_memory_get_host_address_range() {
-    let guest_mem = GuestMemory::new(&[(GuestAddress(0x0), 0x10000)])
-        .expect("Failed to create GuestMemory");
+    let guest_mem =
+        GuestMemory::new(&[(GuestAddress(0x0), 0x10000)]).expect("Failed to create GuestMemory");
 
     // Valid range
     let result = guest_mem.get_host_address_range(GuestAddress(0x0), 0x1000);

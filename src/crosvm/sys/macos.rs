@@ -12,8 +12,8 @@ pub mod config;
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Seek;
 use std::io::stdin;
+use std::io::Seek;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -29,12 +29,12 @@ use anyhow::Result;
 use base::debug;
 use base::error;
 use base::info;
-use base::MappedRegion;
 use base::open_file_or_duplicate;
 use base::trace;
 use base::warn;
 use base::AsRawDescriptor;
 use base::Event;
+use base::MappedRegion;
 use base::Terminal;
 use base::Tube;
 use base::UnixSeqpacket;
@@ -42,24 +42,18 @@ use base::UnixSeqpacketListener;
 use base::UnlinkUnixSeqpacketListener;
 use base::VmEventType;
 use cros_fdt::Fdt;
-use devices::serial_device::SerialHardware;
-use devices::serial_device::SerialParameters;
-use devices::Bus;
-use devices::BusDevice;
-use devices::BusType;
-use devices::IrqEdgeEvent;
-use devices::Serial;
-use devices::VirtioMmioDevice;
+use devices::irqchip::gic_redist_base;
+use devices::irqchip::GicCpuInterface;
 use devices::irqchip::HvfIrqChip;
 use devices::irqchip::AARCH64_GIC_DIST_BASE;
 use devices::irqchip::AARCH64_GIC_DIST_SIZE;
 use devices::irqchip::AARCH64_GIC_REDIST_SIZE;
-use devices::irqchip::HVF_GIC_REDIST_REGION_SIZE;
-use devices::irqchip::gic_redist_base;
-use devices::irqchip::GicCpuInterface;
 use devices::irqchip::GIC_SPI_BASE;
 use devices::irqchip::GIC_SPURIOUS_INTID;
+use devices::irqchip::HVF_GIC_REDIST_REGION_SIZE;
 use devices::irqchip::VTIMER_PPI;
+use devices::serial_device::SerialHardware;
+use devices::serial_device::SerialParameters;
 use devices::virtio::base_features;
 use devices::virtio::block::BlockAsync;
 use devices::virtio::fs::Fs;
@@ -77,6 +71,12 @@ use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::snd::parameters::StreamSourceBackend;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::sys::StreamSourceBackend as SysStreamSourceBackend;
+use devices::Bus;
+use devices::BusDevice;
+use devices::BusType;
+use devices::IrqEdgeEvent;
+use devices::Serial;
+use devices::VirtioMmioDevice;
 use hypervisor::hvf::hv_interrupt_type_t;
 use hypervisor::hvf::hv_result;
 use hypervisor::hvf::hv_vm_map;
@@ -93,8 +93,6 @@ use hypervisor::VcpuAArch64;
 use hypervisor::VcpuExit;
 use hypervisor::VcpuRegAArch64;
 use hypervisor::VmAArch64;
-use rand::rngs::OsRng;
-use rand::RngCore;
 use sync::Mutex;
 use vm_control::VmRequest;
 use vm_control::VmResponse;
@@ -111,7 +109,7 @@ const AARCH64_FDT_ALIGN: u64 = 0x200000;
 
 // GIC is at 0xC0000000, so low memory bank can only go up to there.
 const AARCH64_LOW_MEM_MAX: u64 = 0xC0000000 - AARCH64_PHYS_MEM_START; // 1 GiB
-// High memory bank starts above 4 GiB device space.
+                                                                      // High memory bank starts above 4 GiB device space.
 const AARCH64_HIGH_MEM_START: u64 = 0x1_0000_0000;
 
 // Serial device constants
@@ -251,7 +249,10 @@ impl VcpuCoordinator {
     fn kick_vcpus(&self) {
         use hypervisor::hvf::hv_vcpus_exit;
 
-        let vcpus = self.active_vcpus.lock().expect("VcpuCoordinator mutex poisoned");
+        let vcpus = self
+            .active_vcpus
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned");
         for (&_cpu_id, &vcpu_handle) in vcpus.iter() {
             // SAFETY: vcpu_handle is a valid HVF handle stored by register_vcpu.
             let ret = unsafe { hv_vcpus_exit(&vcpu_handle, 1) };
@@ -273,14 +274,26 @@ impl VcpuCoordinator {
 
     /// Request a CPU to start (called from boot CPU handling PSCI CPU_ON)
     fn request_cpu_start(&self, vcpu_id: usize, entry_point: u64, context_id: u64) {
-        let mut requests = self.startup_requests.lock().expect("VcpuCoordinator mutex poisoned");
-        requests.insert(vcpu_id, CpuStartupRequest { entry_point, context_id });
+        let mut requests = self
+            .startup_requests
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned");
+        requests.insert(
+            vcpu_id,
+            CpuStartupRequest {
+                entry_point,
+                context_id,
+            },
+        );
         self.startup_signal.notify_all();
     }
 
     /// Wait for a startup request for this VCPU (called from secondary VCPUs)
     fn wait_for_startup(&self, vcpu_id: usize) -> Option<CpuStartupRequest> {
-        let mut requests = self.startup_requests.lock().expect("VcpuCoordinator mutex poisoned");
+        let mut requests = self
+            .startup_requests
+            .lock()
+            .expect("VcpuCoordinator mutex poisoned");
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 return None;
@@ -288,7 +301,10 @@ impl VcpuCoordinator {
             if let Some(request) = requests.remove(&vcpu_id) {
                 return Some(request);
             }
-            requests = self.startup_signal.wait(requests).expect("VcpuCoordinator mutex poisoned");
+            requests = self
+                .startup_signal
+                .wait(requests)
+                .expect("VcpuCoordinator mutex poisoned");
         }
     }
 
@@ -440,7 +456,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     let guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
         .context("failed to create guest memory")?;
-    debug!("Guest memory created: {} bytes at {:#x}", memory_size, AARCH64_PHYS_MEM_START);
+    debug!(
+        "Guest memory created: {} bytes at {:#x}",
+        memory_size, AARCH64_PHYS_MEM_START
+    );
 
     // Create the VM - HvfVm::new calls hv_vm_create()
     let vm = Arc::new(HvfVm::new(&hvf, guest_mem.clone()).context("failed to create HVF VM")?);
@@ -467,8 +486,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     // Create the userspace GIC emulation
     // This provides GICv3 emulation that works with HVF's interrupt injection
-    let irq_chip = Arc::new(HvfIrqChip::new(vcpu_count)
-        .context("failed to create userspace GIC")?);
+    let irq_chip = Arc::new(HvfIrqChip::new(vcpu_count).context("failed to create userspace GIC")?);
     let redist_base = gic_redist_base(vcpu_count);
 
     // Query HVF's expected GIC sizes for diagnostics
@@ -479,7 +497,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         info!("HVF GIC redistributor size (per CPU): {:#x}", redist_size);
     }
     if let Ok(redist_region_size) = HvfVm::gic_get_redistributor_region_size() {
-        info!("HVF GIC redistributor region size: {:#x}", redist_region_size);
+        info!(
+            "HVF GIC redistributor region size: {:#x}",
+            redist_region_size
+        );
     }
 
     // For now, skip in-kernel GIC and use userspace GIC only
@@ -494,8 +515,9 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     // Load the kernel
     let kernel_start = GuestAddress(AARCH64_PHYS_MEM_START);
-    let loaded_kernel = kernel_loader::load_arm64_kernel(&guest_mem, kernel_start, &mut kernel_image)
-        .context("failed to load kernel")?;
+    let loaded_kernel =
+        kernel_loader::load_arm64_kernel(&guest_mem, kernel_start, &mut kernel_image)
+            .context("failed to load kernel")?;
 
     info!(
         "Kernel loaded at {:#x}, entry={:#x}, size={}",
@@ -506,14 +528,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     // Load initrd if specified
     let initrd_range = if let Some(ref initrd_path) = cfg.initrd_path {
-        let mut initrd_file =
-            open_file_or_duplicate(initrd_path, OpenOptions::new().read(true))
-                .with_context(|| {
-                    format!("failed to open initrd {}", initrd_path.display())
-                })?;
+        let mut initrd_file = open_file_or_duplicate(initrd_path, OpenOptions::new().read(true))
+            .with_context(|| format!("failed to open initrd {}", initrd_path.display()))?;
         let initrd_start = GuestAddress(
-            ((loaded_kernel.address_range.end + AARCH64_FDT_ALIGN)
-                / AARCH64_FDT_ALIGN)
+            ((loaded_kernel.address_range.end + AARCH64_FDT_ALIGN) / AARCH64_FDT_ALIGN)
                 * AARCH64_FDT_ALIGN,
         );
         let initrd_size = std::io::Read::read_to_end(&mut initrd_file, &mut Vec::new())
@@ -532,7 +550,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
             initrd_start.offset(),
             initrd_size
         );
-        Some((initrd_start.offset(), initrd_start.offset() + initrd_size as u64))
+        Some((
+            initrd_start.offset(),
+            initrd_start.offset() + initrd_size as u64,
+        ))
     } else {
         None
     };
@@ -582,7 +603,8 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     // Only register userspace GIC on MMIO bus if in-kernel GIC is NOT available
     // When in-kernel GIC is available, HVF handles GIC MMIO accesses directly
     if !has_in_kernel_gic {
-        irq_chip.register_devices(&mmio_bus)
+        irq_chip
+            .register_devices(&mmio_bus)
             .context("failed to register GIC devices on MMIO bus")?;
         debug!("Userspace GIC devices registered on MMIO bus");
     } else {
@@ -644,13 +666,14 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         };
 
         // Wrap in VirtioMmioDevice
-        let mut mmio_device = match VirtioMmioDevice::new(guest_mem.clone(), Box::new(block_device), false) {
-            Ok(device) => device,
-            Err(e) => {
-                error!("Failed to create VirtioMmioDevice for block {}: {}", i, e);
-                continue;
-            }
-        };
+        let mut mmio_device =
+            match VirtioMmioDevice::new(guest_mem.clone(), Box::new(block_device), false) {
+                Ok(device) => device,
+                Err(e) => {
+                    error!("Failed to create VirtioMmioDevice for block {}: {}", i, e);
+                    continue;
+                }
+            };
 
         // Create and assign interrupt event
         let mmio_addr = next_mmio_addr;
@@ -685,7 +708,11 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
         // Add to MMIO bus
         mmio_bus
-            .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+            .insert(
+                Arc::new(Mutex::new(mmio_device)),
+                mmio_addr,
+                VIRTIO_MMIO_SIZE,
+            )
             .context("failed to insert block device into MMIO bus")?;
 
         info!(
@@ -723,17 +750,17 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         };
 
         // Wrap in VirtioMmioDevice
-        let mut mmio_device = match VirtioMmioDevice::new(
-            guest_mem.clone(),
-            Box::new(fs_device),
-            false,
-        ) {
-            Ok(device) => device,
-            Err(e) => {
-                error!("Failed to create VirtioMmioDevice for virtiofs {}: {}", i, e);
-                continue;
-            }
-        };
+        let mut mmio_device =
+            match VirtioMmioDevice::new(guest_mem.clone(), Box::new(fs_device), false) {
+                Ok(device) => device,
+                Err(e) => {
+                    error!(
+                        "Failed to create VirtioMmioDevice for virtiofs {}: {}",
+                        i, e
+                    );
+                    continue;
+                }
+            };
 
         let mmio_addr = next_mmio_addr;
         let irq = next_irq;
@@ -759,7 +786,11 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         mmio_device.assign_irq(&irq_evt, irq);
 
         mmio_bus
-            .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+            .insert(
+                Arc::new(Mutex::new(mmio_device)),
+                mmio_addr,
+                VIRTIO_MMIO_SIZE,
+            )
             .context("failed to insert virtiofs device into MMIO bus")?;
 
         info!(
@@ -779,10 +810,9 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     #[cfg(feature = "audio")]
     {
         let mut snd_params = SndParameters::default();
-        snd_params.backend =
-            StreamSourceBackend::Sys(SysStreamSourceBackend::COREAUDIO);
-        let (snd_control_tube, snd_host_tube) = Tube::pair()
-            .context("failed to create sound control tube")?;
+        snd_params.backend = StreamSourceBackend::Sys(SysStreamSourceBackend::COREAUDIO);
+        let (snd_control_tube, snd_host_tube) =
+            Tube::pair().context("failed to create sound control tube")?;
         _snd_control_host_tube = Some(snd_host_tube);
 
         match VirtioSnd::new(
@@ -791,25 +821,22 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
             snd_control_tube,
         ) {
             Ok(snd_device) => {
-                let mut mmio_device = match VirtioMmioDevice::new(
-                    guest_mem.clone(),
-                    Box::new(snd_device),
-                    false,
-                ) {
-                    Ok(device) => device,
-                    Err(e) => {
-                        error!("Failed to create VirtioMmioDevice for sound: {}", e);
-                        info!("Starting VM execution with {} VCPUs", vcpu_count);
-                        // Fall through to rest of setup
-                        return Err(anyhow::anyhow!("sound device setup failed: {}", e));
-                    }
-                };
+                let mut mmio_device =
+                    match VirtioMmioDevice::new(guest_mem.clone(), Box::new(snd_device), false) {
+                        Ok(device) => device,
+                        Err(e) => {
+                            error!("Failed to create VirtioMmioDevice for sound: {}", e);
+                            info!("Starting VM execution with {} VCPUs", vcpu_count);
+                            // Fall through to rest of setup
+                            return Err(anyhow::anyhow!("sound device setup failed: {}", e));
+                        }
+                    };
 
                 let mmio_addr = next_mmio_addr;
                 let irq = next_irq;
 
-                let irq_evt = IrqEdgeEvent::new()
-                    .context("failed to create IrqEdgeEvent for sound")?;
+                let irq_evt =
+                    IrqEdgeEvent::new().context("failed to create IrqEdgeEvent for sound")?;
 
                 match irq_evt.try_clone() {
                     Ok(cloned_evt) => {
@@ -823,7 +850,11 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                 mmio_device.assign_irq(&irq_evt, irq);
 
                 mmio_bus
-                    .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+                    .insert(
+                        Arc::new(Mutex::new(mmio_device)),
+                        mmio_addr,
+                        VIRTIO_MMIO_SIZE,
+                    )
                     .context("failed to insert sound device into MMIO bus")?;
 
                 info!(
@@ -835,7 +866,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                 next_irq += 1;
             }
             Err(e) => {
-                warn!("Failed to create sound device, continuing without audio: {}", e);
+                warn!(
+                    "Failed to create sound device, continuing without audio: {}",
+                    e
+                );
             }
         }
     }
@@ -856,11 +890,11 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         const GPU_SHM_SIZE: u64 = 64 << 20;
         gpu_params.pci_bar_size = GPU_SHM_SIZE;
 
-        let (exit_evt_wrtube, rdtube) = Tube::directional_pair()
-            .context("failed to create GPU exit event tube")?;
+        let (exit_evt_wrtube, rdtube) =
+            Tube::directional_pair().context("failed to create GPU exit event tube")?;
         gpu_exit_rdtube = rdtube;
-        let (gpu_control_tube, resp_tube) = Tube::pair()
-            .context("failed to create GPU control tube")?;
+        let (gpu_control_tube, resp_tube) =
+            Tube::pair().context("failed to create GPU control tube")?;
         gpu_control_resp_tube = resp_tube;
 
         let gpu_device = Gpu::new(
@@ -869,23 +903,20 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
             Vec::new(), // resource_bridges
             vec![DisplayBackend::MacOs, DisplayBackend::Stub],
             &gpu_params,
-            None, // rutabaga_server_descriptor
+            None,       // rutabaga_server_descriptor
             Vec::new(), // event_devices
             base_features(ProtectionType::Unprotected),
             &std::collections::BTreeMap::new(), // paths
         );
 
-        let mut mmio_device = match VirtioMmioDevice::new(
-            guest_mem.clone(),
-            Box::new(gpu_device),
-            false,
-        ) {
-            Ok(device) => device,
-            Err(e) => {
-                error!("Failed to create VirtioMmioDevice for GPU: {}", e);
-                return Err(anyhow::anyhow!("GPU device setup failed: {}", e));
-            }
-        };
+        let mut mmio_device =
+            match VirtioMmioDevice::new(guest_mem.clone(), Box::new(gpu_device), false) {
+                Ok(device) => device,
+                Err(e) => {
+                    error!("Failed to create VirtioMmioDevice for GPU: {}", e);
+                    return Err(anyhow::anyhow!("GPU device setup failed: {}", e));
+                }
+            };
 
         // Allocate a shared memory region for the GPU's host-visible memory.
         // Place it above the high memory bank.
@@ -932,8 +963,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         let mmio_addr = next_mmio_addr;
         let irq = next_irq;
 
-        let irq_evt = IrqEdgeEvent::new()
-            .context("failed to create IrqEdgeEvent for GPU")?;
+        let irq_evt = IrqEdgeEvent::new().context("failed to create IrqEdgeEvent for GPU")?;
 
         match irq_evt.try_clone() {
             Ok(cloned_evt) => {
@@ -947,7 +977,11 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         mmio_device.assign_irq(&irq_evt, irq);
 
         mmio_bus
-            .insert(Arc::new(Mutex::new(mmio_device)), mmio_addr, VIRTIO_MMIO_SIZE)
+            .insert(
+                Arc::new(Mutex::new(mmio_device)),
+                mmio_addr,
+                VIRTIO_MMIO_SIZE,
+            )
             .context("failed to insert GPU device into MMIO bus")?;
 
         info!(
@@ -984,7 +1018,8 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     // 5. Guest takes IRQ exception and reads ICC_IAR1_EL1 (which is trapped)
     // 6. Trap handler calls into userspace GIC to acknowledge and get the INTID
     // 7. Guest writes ICC_EOIR1_EL1 when done (also trapped, clears active state)
-    let mut irq_events_for_handler = block_irq_events.iter()
+    let mut irq_events_for_handler = block_irq_events
+        .iter()
         .filter_map(|(evt, irq)| evt.try_clone().ok().map(|e| (e, *irq)))
         .collect::<Vec<_>>();
 
@@ -1029,26 +1064,28 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     let gpu_exit_thread = {
         let coordinator_for_exit = coordinator.clone();
         let shutdown_flag = irq_handler_shutdown.clone();
-        Some(thread::Builder::new()
-            .name("gpu-exit-watcher".to_string())
-            .spawn(move || {
-                loop {
-                    if shutdown_flag.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match gpu_exit_rdtube.recv::<VmEventType>() {
-                        Ok(VmEventType::Exit | VmEventType::Reset) => {
-                            info!("GPU requested VM exit");
-                            coordinator_for_exit.request_shutdown();
+        Some(
+            thread::Builder::new()
+                .name("gpu-exit-watcher".to_string())
+                .spawn(move || {
+                    loop {
+                        if shutdown_flag.load(Ordering::Relaxed) {
                             break;
                         }
-                        Ok(_) => {}
-                        Err(_) => break,
+                        match gpu_exit_rdtube.recv::<VmEventType>() {
+                            Ok(VmEventType::Exit | VmEventType::Reset) => {
+                                info!("GPU requested VM exit");
+                                coordinator_for_exit.request_shutdown();
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
                     }
-                }
-                drop(gpu_control_resp_tube);
-            })
-            .expect("Failed to spawn GPU exit watcher thread"))
+                    drop(gpu_control_resp_tube);
+                })
+                .expect("Failed to spawn GPU exit watcher thread"),
+        )
     };
     #[cfg(not(feature = "gpu"))]
     let gpu_exit_thread: Option<JoinHandle<()>> = None;
@@ -1167,7 +1204,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
                     }
                     // Register the boot VCPU handle for IRQ handler to kick
                     coordinator.register_vcpu(vcpu_id, vcpu.vcpu_handle());
-                    debug!("Boot VCPU initialized: PC={:#x}, X0={:#x}", kernel_entry, fdt_addr);
+                    debug!(
+                        "Boot VCPU initialized: PC={:#x}, X0={:#x}",
+                        kernel_entry, fdt_addr
+                    );
                     // Boot CPU - run immediately
                     run_vcpu_loop(vcpu, vcpu_id, mmio_bus, &guest_mem, &coordinator)
                         .unwrap_or(ExitState::Crash)
@@ -1280,15 +1320,6 @@ fn create_minimal_fdt(
         chosen_node.set_prop("linux,initrd-end", initrd_end)?;
     }
 
-    // TODO: Adding kaslr-seed here would enable kernel ASLR. The HVC
-    // workaround in handle_hypercall_with_result_buffer now uses page table
-    // walking which handles KASLR, but this hasn't been tested with KASLR
-    // enabled yet. Uncomment once verified:
-    //   chosen_node.set_prop("kaslr-seed", rand::random::<u64>())?;
-    //   let mut rng_seed = [0u8; 256];
-    //   OsRng.fill_bytes(&mut rng_seed);
-    //   chosen_node.set_prop("rng-seed", &rng_seed)?;
-
     // Memory node(s) — low bank always present, high bank if memory > 1 GiB.
     let memory_node = root_node.subnode_mut("memory@80000000")?;
     memory_node.set_prop("device_type", "memory")?;
@@ -1296,8 +1327,10 @@ fn create_minimal_fdt(
         memory_node.set_prop(
             "reg",
             &[
-                AARCH64_PHYS_MEM_START, low_mem_size,
-                AARCH64_HIGH_MEM_START, high_mem_size,
+                AARCH64_PHYS_MEM_START,
+                low_mem_size,
+                AARCH64_HIGH_MEM_START,
+                high_mem_size,
             ],
         )?;
     } else {
@@ -1328,8 +1361,10 @@ fn create_minimal_fdt(
     // For userspace GIC, use per-CPU redistributor size
     let redist_size = AARCH64_GIC_REDIST_SIZE * vcpu_count as u64;
     let gic_reg_prop = [
-        AARCH64_GIC_DIST_BASE, AARCH64_GIC_DIST_SIZE, // Distributor
-        redist_base, redist_size,                      // Redistributor
+        AARCH64_GIC_DIST_BASE,
+        AARCH64_GIC_DIST_SIZE, // Distributor
+        redist_base,
+        redist_size, // Redistributor
     ];
 
     let intc_node = root_node.subnode_mut("intc")?;
@@ -1353,10 +1388,18 @@ fn create_minimal_fdt(
     timer_node.set_prop(
         "interrupts",
         &[
-            GIC_FDT_IRQ_TYPE_PPI, 13, cpu_mask | IRQ_TYPE_LEVEL_LOW, // Secure Physical Timer
-            GIC_FDT_IRQ_TYPE_PPI, 14, cpu_mask | IRQ_TYPE_LEVEL_LOW, // Non-secure Physical Timer
-            GIC_FDT_IRQ_TYPE_PPI, 11, cpu_mask | IRQ_TYPE_LEVEL_LOW, // Virtual Timer (PPI 11)
-            GIC_FDT_IRQ_TYPE_PPI, 10, cpu_mask | IRQ_TYPE_LEVEL_LOW, // Hypervisor Timer
+            GIC_FDT_IRQ_TYPE_PPI,
+            13,
+            cpu_mask | IRQ_TYPE_LEVEL_LOW, // Secure Physical Timer
+            GIC_FDT_IRQ_TYPE_PPI,
+            14,
+            cpu_mask | IRQ_TYPE_LEVEL_LOW, // Non-secure Physical Timer
+            GIC_FDT_IRQ_TYPE_PPI,
+            11,
+            cpu_mask | IRQ_TYPE_LEVEL_LOW, // Virtual Timer (PPI 11)
+            GIC_FDT_IRQ_TYPE_PPI,
+            10,
+            cpu_mask | IRQ_TYPE_LEVEL_LOW, // Hypervisor Timer
         ],
     )?;
 
@@ -1365,7 +1408,14 @@ fn create_minimal_fdt(
     uart_node.set_prop("compatible", "ns16550a")?;
     uart_node.set_prop("reg", &[AARCH64_SERIAL_ADDR, AARCH64_SERIAL_SIZE])?;
     uart_node.set_prop("clock-frequency", 1843200u32)?;
-    uart_node.set_prop("interrupts", &[GIC_FDT_IRQ_TYPE_SPI, AARCH64_SERIAL_IRQ, IRQ_TYPE_EDGE_RISING])?;
+    uart_node.set_prop(
+        "interrupts",
+        &[
+            GIC_FDT_IRQ_TYPE_SPI,
+            AARCH64_SERIAL_IRQ,
+            IRQ_TYPE_EDGE_RISING,
+        ],
+    )?;
 
     // Virtio-MMIO device nodes (block devices + virtiofs devices)
     // Each device gets its own SPI, starting after serial IRQ (0)
@@ -1377,7 +1427,10 @@ fn create_minimal_fdt(
         let virtio_node = root_node.subnode_mut(&node_name)?;
         virtio_node.set_prop("compatible", "virtio,mmio")?;
         virtio_node.set_prop("reg", &[mmio_addr, VIRTIO_MMIO_SIZE])?;
-        virtio_node.set_prop("interrupts", &[GIC_FDT_IRQ_TYPE_SPI, irq, IRQ_TYPE_LEVEL_HIGH])?;
+        virtio_node.set_prop(
+            "interrupts",
+            &[GIC_FDT_IRQ_TYPE_SPI, irq, IRQ_TYPE_LEVEL_HIGH],
+        )?;
         virtio_node.set_prop("dma-coherent", ())?;
     }
 
@@ -1409,11 +1462,7 @@ fn create_serial_device(cfg: &Config, evt: &Event) -> Result<Serial> {
 
     let mut preserved_fds = Vec::new();
     serial_params
-        .create_serial_device::<Serial>(
-            ProtectionType::Unprotected,
-            evt,
-            &mut preserved_fds,
-        )
+        .create_serial_device::<Serial>(ProtectionType::Unprotected, evt, &mut preserved_fds)
         .context("failed to create serial device")
 }
 
@@ -1434,16 +1483,14 @@ fn run_vcpu_loop(
     loop {
         iteration += 1;
 
-
         // Before running the VCPU, check if we need to signal an interrupt
         // Check pending interrupts and signal via hv_vcpu_set_pending_interrupt()
         // before entering the guest.
         if coordinator.irq_chip.should_signal_irq(vcpu_id) {
             trace!("VCPU {}: Signaling pending IRQ before run", vcpu_id);
-            if let Err(e) = vcpu.set_pending_interrupt(
-                hv_interrupt_type_t::HV_INTERRUPT_TYPE_IRQ,
-                true,
-            ) {
+            if let Err(e) =
+                vcpu.set_pending_interrupt(hv_interrupt_type_t::HV_INTERRUPT_TYPE_IRQ, true)
+            {
                 error!("Failed to signal pending IRQ: {}", e);
             }
         }
@@ -1451,8 +1498,8 @@ fn run_vcpu_loop(
         let exit_result = vcpu.run();
         match exit_result {
             Ok(VcpuExit::Mmio) => {
-                if let Err(e) = vcpu.handle_mmio(&mut |IoParams { address, operation }| {
-                    match operation {
+                if let Err(e) =
+                    vcpu.handle_mmio(&mut |IoParams { address, operation }| match operation {
                         IoOperation::Read(data) => {
                             if !mmio_bus.read(address, data) {
                                 trace!("Unmapped MMIO read: {:#x}", address);
@@ -1465,8 +1512,8 @@ fn run_vcpu_loop(
                             }
                             Ok(())
                         }
-                    }
-                }) {
+                    })
+                {
                     error!("Failed to handle MMIO: {}", e);
                 }
             }
@@ -1480,71 +1527,32 @@ fn run_vcpu_loop(
                 return Ok(ExitState::Stop);
             }
             Ok(VcpuExit::Hypercall) => {
-                let sp_el1 = vcpu.get_sp_el1().unwrap_or(0);
-                let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0)).unwrap_or(0);
-
-                debug!(
-                    "HVC trap: function_id={:#x} SP_EL1={:#x}",
-                    function_id,
-                    sp_el1,
-                );
-
-                // Translate SP_EL1 to guest physical address via page table walk
-                // The SMCCC macro does `stp x29, x30, [sp, #-16]!` before HVC,
-                // so SP_EL1 at HVC time has: [SP+0]=saved_x29, [SP+8]=saved_x30,
-                // [SP+16]=result_buffer (9th arg), [SP+24]=quirk (10th arg).
-                let sp_phys = translate_kernel_va(&vcpu, &guest_mem, sp_el1 + 16);
-
-                let hypercall_exit = if let Some(phys) = sp_phys {
-                    let gpa = GuestAddress(phys);
-                    let mut stack_data = [0u8; 8];
-                    if guest_mem.read_at_addr(&mut stack_data, gpa).is_ok() {
-                        let result_buffer_addr = u64::from_le_bytes(stack_data);
-                        debug!(
-                            "HVC: result_buffer={:#x}",
-                            result_buffer_addr
-                        );
-
-                        // Handle PSCI call with workaround for HVF ldr issue
-                        match handle_hypercall_with_result_buffer(
-                            &mut vcpu as &mut dyn VcpuAArch64,
-                            &guest_mem,
-                            result_buffer_addr,
-                            coordinator,
-                        ) {
-                            Ok(exit) => exit,
-                            Err(e) => {
-                                error!("Failed to handle hypercall: {}", e);
-                                None
-                            }
-                        }
-                    } else {
-                        // Fallback if we can't read stack
-                        match handle_hypercall(&mut vcpu as &mut dyn VcpuAArch64, &guest_mem, coordinator) {
-                            Ok(exit) => exit,
-                            Err(e) => {
-                                error!("Failed to handle hypercall: {}", e);
-                                None
-                            }
-                        }
-                    }
-                } else {
-                    // Fallback for addresses outside linear map
-                    match handle_hypercall(&mut vcpu as &mut dyn VcpuAArch64, &guest_mem, coordinator) {
+                let hypercall_exit =
+                    match handle_hypercall(&mut vcpu as &mut dyn VcpuAArch64, coordinator) {
                         Ok(exit) => exit,
                         Err(e) => {
                             error!("Failed to handle hypercall: {}", e);
                             None
                         }
-                    }
-                };
+                    };
 
                 if let Some(exit_state) = hypercall_exit {
-                    info!("VCPU {} exiting due to PSCI request: {:?}", vcpu_id, exit_state);
+                    info!(
+                        "VCPU {} exiting due to PSCI request: {:?}",
+                        vcpu_id, exit_state
+                    );
                     return Ok(exit_state);
                 }
             }
-            Ok(VcpuExit::SystemRegisterTrap { op0, op1, crn, crm, op2, rt, is_write }) => {
+            Ok(VcpuExit::SystemRegisterTrap {
+                op0,
+                op1,
+                crn,
+                crm,
+                op2,
+                rt,
+                is_write,
+            }) => {
                 // Handle system register access traps
                 // For GICv3, we need to handle ICC_* registers
 
@@ -1552,7 +1560,13 @@ fn run_vcpu_loop(
                     &mut vcpu,
                     vcpu_id,
                     coordinator,
-                    op0, op1, crn, crm, op2, rt, is_write,
+                    op0,
+                    op1,
+                    crn,
+                    crm,
+                    op2,
+                    rt,
+                    is_write,
                 ) {
                     error!("Failed to handle system register trap: {}", e);
                 }
@@ -1580,10 +1594,9 @@ fn run_vcpu_loop(
                 coordinator.irq_chip.set_ppi_pending(vcpu_id, VTIMER_PPI);
 
                 // Inject IRQ to the guest
-                if let Err(e) = vcpu.set_pending_interrupt(
-                    hv_interrupt_type_t::HV_INTERRUPT_TYPE_IRQ,
-                    true,
-                ) {
+                if let Err(e) =
+                    vcpu.set_pending_interrupt(hv_interrupt_type_t::HV_INTERRUPT_TYPE_IRQ, true)
+                {
                     error!("Failed to inject timer IRQ: {}", e);
                 }
 
@@ -1619,10 +1632,10 @@ fn run_vcpu_loop(
         // After handling any exit (except timer exits which continue above),
         // unmask the virtual timer so we can receive new timer interrupts.
         // This is safe because:
-        // 1. If the timer already fired and the guest hasn't acknowledged it,
-        //    we'll get another VTIMER_ACTIVATED exit immediately
-        // 2. If the guest has set up a new timer value, HVF will wait until
-        //    that time to generate the next exit
+        // 1. If the timer already fired and the guest hasn't acknowledged it, we'll get another
+        //    VTIMER_ACTIVATED exit immediately
+        // 2. If the guest has set up a new timer value, HVF will wait until that time to generate
+        //    the next exit
         let _ = vcpu.set_vtimer_mask(false);
 
         // Check for shutdown
@@ -1649,7 +1662,10 @@ fn run_secondary_vcpu(
     let startup_request = match coordinator.wait_for_startup(vcpu_id) {
         Some(request) => request,
         None => {
-            info!("Secondary VCPU {} shutting down (no startup request)", vcpu_id);
+            info!(
+                "Secondary VCPU {} shutting down (no startup request)",
+                vcpu_id
+            );
             return Ok(ExitState::Stop);
         }
     };
@@ -1679,100 +1695,20 @@ fn run_secondary_vcpu(
     result
 }
 
-/// Walk ARM64 page tables to translate a kernel virtual address to a guest
-/// physical address. Uses TTBR1_EL1 as the page table root and TCR_EL1 to
-/// determine the translation granule and number of levels.
-fn translate_kernel_va(vcpu: &HvfVcpu, guest_mem: &GuestMemory, va: u64) -> Option<u64> {
-    let ttbr1 = vcpu.get_ttbr1_el1().ok()?;
-    let tcr = vcpu.get_tcr_el1().ok()?;
-
-    let t1sz = ((tcr >> 16) & 0x3F) as u32;
-    let va_bits = 64 - t1sz;
-
-    // TG1 field [31:30]: 01=16KB, 10=4KB, 11=64KB
-    let tg1 = ((tcr >> 30) & 0x3) as u32;
-    let granule_bits: u32 = match tg1 {
-        1 => 14,
-        3 => 16,
-        _ => 12, // 4KB (value 2 or default)
-    };
-    let bits_per_level = granule_bits - 3; // entries per table = 2^bits_per_level
-
-    let table_base = ttbr1 & 0x0000_FFFF_FFFF_F000;
-
-    // Number of levels needed to cover va_bits
-    let levels =
-        (va_bits.saturating_sub(granule_bits) + bits_per_level - 1) / bits_per_level;
-    let start_level = 4u32.saturating_sub(levels);
-    let level_mask = (1u64 << bits_per_level) - 1;
-
-    let mut table_pa = table_base;
-
-    for level in start_level..4 {
-        let shift = granule_bits + bits_per_level * (3 - level);
-        let index = (va >> shift) & level_mask;
-
-        let entry_pa = table_pa + index * 8;
-        let mut entry_bytes = [0u8; 8];
-        guest_mem
-            .read_at_addr(&mut entry_bytes, GuestAddress(entry_pa))
-            .ok()?;
-        let entry = u64::from_le_bytes(entry_bytes);
-
-        if entry & 1 == 0 {
-            return None;
-        }
-
-        if level < 3 && (entry & 0b10) == 0 {
-            // Block descriptor
-            let block_mask = (1u64 << shift) - 1;
-            let output_addr = entry & 0x0000_FFFF_FFFF_F000 & !block_mask;
-            return Some(output_addr | (va & block_mask));
-        }
-
-        if level == 3 {
-            let page_mask = (1u64 << granule_bits) - 1;
-            let output_addr = entry & 0x0000_FFFF_FFFF_F000;
-            return Some(output_addr | (va & page_mask));
-        }
-
-        table_pa = entry & 0x0000_FFFF_FFFF_F000;
-    }
-
-    None
-}
-
 /// Handle PSCI hypercalls.
-fn handle_hypercall(vcpu: &mut dyn VcpuAArch64, _guest_mem: &GuestMemory, coordinator: &VcpuCoordinator) -> Result<Option<ExitState>> {
-    // CRITICAL: Per ARM SMCCC specification, X4-X17 are callee-saved registers
-    // and MUST be preserved across HVC/SMC calls. The Linux kernel's SMCCC
-    // wrapper (__arm_smccc_hvc) passes the result buffer address in X4 and
-    // expects it to be unchanged after the hypercall returns.
-    //
-    // Save X4-X17 before any modifications to ensure we can restore them later.
-    let saved_regs: Vec<u64> = (4..=17)
-        .map(|i| vcpu.get_one_reg(VcpuRegAArch64::X(i)).unwrap_or(0))
-        .collect();
-
-    debug!(
-        "HVC saved X4-X7: {:#x} {:#x} {:#x} {:#x}",
-        saved_regs[0], saved_regs[1], saved_regs[2], saved_regs[3]
-    );
-    info!(
-        "SMCCC: Saving X4={:#x} before PSCI handling",
-        saved_regs[0]
-    );
-
+fn handle_hypercall(
+    vcpu: &mut dyn VcpuAArch64,
+    coordinator: &VcpuCoordinator,
+) -> Result<Option<ExitState>> {
     // Get the function ID from X0
-    let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0)).unwrap_or(0);
-    let pc = vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap_or(0);
+    let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0))? & u64::from(u32::MAX);
 
     info!(
         "PSCI call: function_id={:#x}, X1={:#x}, X2={:#x}, X3={:#x}",
         function_id,
-        vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0),
-        vcpu.get_one_reg(VcpuRegAArch64::X(2)).unwrap_or(0),
-        vcpu.get_one_reg(VcpuRegAArch64::X(3)).unwrap_or(0),
+        vcpu.get_one_reg(VcpuRegAArch64::X(1))?,
+        vcpu.get_one_reg(VcpuRegAArch64::X(2))?,
+        vcpu.get_one_reg(VcpuRegAArch64::X(3))?,
     );
 
     let (result, exit_state) = match function_id {
@@ -1787,9 +1723,9 @@ fn handle_hypercall(vcpu: &mut dyn VcpuAArch64, _guest_mem: &GuestMemory, coordi
         }
         PSCI_CPU_ON_32 | PSCI_CPU_ON_64 => {
             // CPU_ON: X1 = target_cpu MPIDR, X2 = entry_point, X3 = context_id
-            let target_mpidr = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
-            let entry_point = vcpu.get_one_reg(VcpuRegAArch64::X(2)).unwrap_or(0);
-            let context_id = vcpu.get_one_reg(VcpuRegAArch64::X(3)).unwrap_or(0);
+            let target_mpidr = vcpu.get_one_reg(VcpuRegAArch64::X(1))?;
+            let entry_point = vcpu.get_one_reg(VcpuRegAArch64::X(2))?;
+            let context_id = vcpu.get_one_reg(VcpuRegAArch64::X(3))?;
 
             // For now, assume MPIDR affinity level 0 directly maps to VCPU ID
             // (MPIDR format: Aff2.Aff1.Aff0 - we use Aff0 as VCPU ID)
@@ -1815,12 +1751,12 @@ fn handle_hypercall(vcpu: &mut dyn VcpuAArch64, _guest_mem: &GuestMemory, coordi
             (PSCI_SUCCESS, Some(ExitState::Reset))
         }
         PSCI_FEATURES => {
-            let feature_id = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
+            let feature_id = vcpu.get_one_reg(VcpuRegAArch64::X(1))?;
             debug!("PSCI FEATURES query for {:#x}", feature_id);
             // Return 0 (supported) for basic functions, -1 for others
             let r = match feature_id {
-                PSCI_VERSION | PSCI_CPU_OFF | PSCI_CPU_ON_32 | PSCI_CPU_ON_64
-                    | PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => PSCI_SUCCESS,
+                PSCI_VERSION | PSCI_CPU_OFF | PSCI_CPU_ON_32 | PSCI_CPU_ON_64 | PSCI_SYSTEM_OFF
+                | PSCI_SYSTEM_RESET => PSCI_SUCCESS,
                 PSCI_MIGRATE_INFO_TYPE => PSCI_SUCCESS,
                 _ => PSCI_NOT_SUPPORTED,
             };
@@ -1832,9 +1768,10 @@ fn handle_hypercall(vcpu: &mut dyn VcpuAArch64, _guest_mem: &GuestMemory, coordi
             (PSCI_MIGRATE_INFO_TYPE_NOT_SUPPORTED, None)
         }
         PSCI_AFFINITY_INFO_32 | PSCI_AFFINITY_INFO_64 => {
-            let target_affinity = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
+            let target_affinity = vcpu.get_one_reg(VcpuRegAArch64::X(1))?;
             let target_cpu = (target_affinity & 0xFF) as usize;
-            let is_on = coordinator.active_vcpus
+            let is_on = coordinator
+                .active_vcpus
                 .lock()
                 .expect("VcpuCoordinator mutex poisoned")
                 .contains_key(&target_cpu);
@@ -1858,136 +1795,10 @@ fn handle_hypercall(vcpu: &mut dyn VcpuAArch64, _guest_mem: &GuestMemory, coordi
     // Set return value in X0 (per SMCCC convention)
     vcpu.set_one_reg(VcpuRegAArch64::X(0), result)?;
 
-    // For HVF, we MUST advance PC past the HVC instruction.
-    // Note: This fallback path may not work correctly due to HVF ldr issue.
-    // The preferred path is handle_hypercall_with_result_buffer which works around this.
-    vcpu.set_one_reg(VcpuRegAArch64::Pc, pc + 4)?;
-
-    debug!("PSCI returned: result={:#x}, new_PC={:#x}", result, pc + 4);
-
-    // Restore callee-saved registers (X4-X17) per ARM SMCCC specification
-    for (i, &value) in saved_regs.iter().enumerate() {
-        let reg_num = (i + 4) as u8;
-        if let Err(e) = vcpu.set_one_reg(VcpuRegAArch64::X(reg_num), value) {
-            error!("Failed to restore X{}: {:?}", reg_num, e);
-        }
-    }
-
-    Ok(exit_state)
-}
-
-/// Handle PSCI hypercalls with explicit result buffer address.
-/// This version skips the problematic `ldr x4, [sp]` instruction by:
-/// 1. Setting X4 to the result buffer address ourselves
-/// 2. Advancing PC by 4 to skip the ldr instruction (HVF already advanced past HVC)
-fn handle_hypercall_with_result_buffer(
-    vcpu: &mut dyn VcpuAArch64,
-    _guest_mem: &GuestMemory,
-    result_buffer_addr: u64,
-    coordinator: &VcpuCoordinator,
-) -> Result<Option<ExitState>> {
-    // Get the function ID from X0
-    let function_id = vcpu.get_one_reg(VcpuRegAArch64::X(0)).unwrap_or(0);
-    let pc = vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap_or(0);
-
-    info!(
-        "PSCI call: function_id={:#x}, result_buf={:#x}",
-        function_id, result_buffer_addr
-    );
-
-    let (result, exit_state) = match function_id {
-        PSCI_VERSION => {
-            info!("PSCI VERSION called, returning 1.1");
-            (0x00010001u64, None)
-        }
-        PSCI_CPU_OFF => {
-            info!("PSCI CPU_OFF requested - halting VCPU");
-            (PSCI_SUCCESS, Some(ExitState::Stop))
-        }
-        PSCI_CPU_ON_32 | PSCI_CPU_ON_64 => {
-            // CPU_ON: X1 = target_cpu MPIDR, X2 = entry_point, X3 = context_id
-            let target_mpidr = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
-            let entry_point = vcpu.get_one_reg(VcpuRegAArch64::X(2)).unwrap_or(0);
-            let context_id = vcpu.get_one_reg(VcpuRegAArch64::X(3)).unwrap_or(0);
-
-            // For now, assume MPIDR affinity level 0 directly maps to VCPU ID
-            let target_vcpu_id = (target_mpidr & 0xFF) as usize;
-
-            info!(
-                "PSCI CPU_ON: target_mpidr={:#x} (vcpu_id={}), entry_point={:#x}, context_id={:#x}",
-                target_mpidr, target_vcpu_id, entry_point, context_id
-            );
-
-            // Request the target VCPU to start
-            coordinator.request_cpu_start(target_vcpu_id, entry_point, context_id);
-            (PSCI_SUCCESS, None)
-        }
-        PSCI_SYSTEM_OFF => {
-            info!("PSCI SYSTEM_OFF requested - shutting down");
-            coordinator.signal_shutdown();
-            (PSCI_SUCCESS, Some(ExitState::Stop))
-        }
-        PSCI_SYSTEM_RESET => {
-            info!("PSCI SYSTEM_RESET requested - resetting");
-            coordinator.signal_shutdown();
-            (PSCI_SUCCESS, Some(ExitState::Reset))
-        }
-        PSCI_FEATURES => {
-            let feature_id = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
-            debug!("PSCI FEATURES query for {:#x}", feature_id);
-            let r = match feature_id {
-                PSCI_VERSION | PSCI_CPU_OFF | PSCI_CPU_ON_32 | PSCI_CPU_ON_64
-                    | PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => PSCI_SUCCESS,
-                PSCI_MIGRATE_INFO_TYPE => PSCI_SUCCESS,
-                _ => PSCI_NOT_SUPPORTED,
-            };
-            (r, None)
-        }
-        PSCI_MIGRATE_INFO_TYPE => {
-            debug!("PSCI MIGRATE_INFO_TYPE called");
-            (PSCI_MIGRATE_INFO_TYPE_NOT_SUPPORTED, None)
-        }
-        PSCI_AFFINITY_INFO_32 | PSCI_AFFINITY_INFO_64 => {
-            let target_affinity = vcpu.get_one_reg(VcpuRegAArch64::X(1)).unwrap_or(0);
-            let target_cpu = (target_affinity & 0xFF) as usize;
-            let is_on = coordinator.active_vcpus
-                .lock()
-                .expect("VcpuCoordinator mutex poisoned")
-                .contains_key(&target_cpu);
-            debug!("PSCI AFFINITY_INFO cpu={} is_on={}", target_cpu, is_on);
-            (if is_on { 0 } else { 1 }, None)
-        }
-        PSCI_CPU_SUSPEND_32 | PSCI_CPU_SUSPEND_64 => {
-            debug!("PSCI CPU_SUSPEND requested");
-            (PSCI_NOT_SUPPORTED, None)
-        }
-        PSCI_SYSTEM_SUSPEND_32 | PSCI_SYSTEM_SUSPEND_64 => {
-            debug!("PSCI SYSTEM_SUSPEND requested");
-            (PSCI_NOT_SUPPORTED, None)
-        }
-        _ => {
-            debug!("Unknown PSCI function: {:#x}", function_id);
-            (PSCI_NOT_SUPPORTED, None)
-        }
-    };
-
-    // Set return value in X0 (per SMCCC convention)
-    vcpu.set_one_reg(VcpuRegAArch64::X(0), result)?;
-
-    // Set X4 to the result buffer address and skip the ldr instruction
-    // This works around an HVF issue where ldr x4, [sp] doesn't properly load from SP_EL1
-    vcpu.set_one_reg(VcpuRegAArch64::X(4), result_buffer_addr)?;
-
-    // Advance PC by 4 to skip the ldr instruction
-    // HVF already advances PC past HVC, so PC now points to ldr x4, [sp]
-    // We skip to stp x0, x1, [x4] which stores the result
-    let new_pc = pc + 4;
-    vcpu.set_one_reg(VcpuRegAArch64::Pc, new_pc)?;
-
-    debug!(
-        "PSCI: result={:#x}, PC advanced to {:#x}",
-        result, new_pc
-    );
+    // Hypervisor.framework reports the PC at the instruction following HVC.
+    // Leave it untouched so the guest's version-specific SMCCC wrapper can store
+    // the result and restore its own registers.
+    debug!("PSCI returned: result={:#x}", result);
 
     Ok(exit_state)
 }
@@ -2067,7 +1878,8 @@ fn handle_system_register_trap(
             // ICC_HPPIR1_EL1: Highest Priority Pending Interrupt (CRn=12, CRm=12, Op2=2)
             (12, 12, 2, false) => {
                 // Read - get highest priority pending interrupt ID
-                let intid = irq_chip.get_highest_priority_pending(vcpu_id)
+                let intid = irq_chip
+                    .get_highest_priority_pending(vcpu_id)
                     .map(|(id, _)| id)
                     .unwrap_or(GIC_SPURIOUS_INTID);
                 vcpu.set_one_reg(VcpuRegAArch64::X(rt), intid as u64)?;
@@ -2190,7 +2002,9 @@ fn handle_system_register_trap(
                 coordinator.kick_vcpus();
                 trace!(
                     "ICC_SGI1_EL1 write: INTID={} IRM={} targets={:#x}",
-                    intid, irm, target_list
+                    intid,
+                    irm,
+                    target_list
                 );
             }
 
@@ -2206,7 +2020,12 @@ fn handle_system_register_trap(
                 debug!(
                     "Unhandled ICC register: {} Op0={} Op1={} CRn={} CRm={} Op2={} Rt={}",
                     if is_write { "MSR" } else { "MRS" },
-                    op0, op1, crn, crm, op2, rt
+                    op0,
+                    op1,
+                    crn,
+                    crm,
+                    op2,
+                    rt
                 );
                 // For reads, return 0; for writes, ignore
                 if !is_write && rt < 31 {
@@ -2219,7 +2038,12 @@ fn handle_system_register_trap(
         debug!(
             "Unhandled system register: {} Op0={} Op1={} CRn={} CRm={} Op2={} Rt={}",
             if is_write { "MSR" } else { "MRS" },
-            op0, op1, crn, crm, op2, rt
+            op0,
+            op1,
+            crn,
+            crm,
+            op2,
+            rt
         );
         // For reads, return 0; for writes, ignore
         if !is_write && rt < 31 {
@@ -2236,59 +2060,6 @@ fn handle_system_register_trap(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Verify the SMCCC stack layout assumption: the result buffer address
-    /// is at SP+16, not SP+0, because the SMCCC macro executes
-    /// `stp x29, x30, [sp, #-16]!` before the HVC instruction.
-    #[test]
-    fn smccc_stack_offset_reads_result_buffer_not_saved_regs() {
-        let saved_x29: u64 = 0xDEAD_BEEF_DEAD_BEEF;
-        let saved_x30: u64 = 0xCAFE_BABE_CAFE_BABE;
-        let result_buffer_addr: u64 = 0xFFFF_8000_1234_5678;
-        let quirks_ptr: u64 = 0x0000_0000_0000_0000;
-
-        let sp_phys: u64 = 0x1000;
-
-        let guest_mem = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
-
-        guest_mem
-            .write_at_addr(&saved_x29.to_le_bytes(), GuestAddress(sp_phys))
-            .unwrap();
-        guest_mem
-            .write_at_addr(&saved_x30.to_le_bytes(), GuestAddress(sp_phys + 8))
-            .unwrap();
-        guest_mem
-            .write_at_addr(
-                &result_buffer_addr.to_le_bytes(),
-                GuestAddress(sp_phys + 16),
-            )
-            .unwrap();
-        guest_mem
-            .write_at_addr(&quirks_ptr.to_le_bytes(), GuestAddress(sp_phys + 24))
-            .unwrap();
-
-        // BUG (before fix): reading at sp_phys+0 would return saved_x29
-        let mut wrong_data = [0u8; 8];
-        guest_mem
-            .read_at_addr(&mut wrong_data, GuestAddress(sp_phys))
-            .unwrap();
-        let wrong_value = u64::from_le_bytes(wrong_data);
-        assert_eq!(
-            wrong_value, saved_x29,
-            "SP+0 should be saved x29, not the result buffer"
-        );
-
-        // FIX: reading at sp_phys+16 returns the actual result buffer address
-        let mut correct_data = [0u8; 8];
-        guest_mem
-            .read_at_addr(&mut correct_data, GuestAddress(sp_phys + 16))
-            .unwrap();
-        let correct_value = u64::from_le_bytes(correct_data);
-        assert_eq!(
-            correct_value, result_buffer_addr,
-            "SP+16 should be the result buffer address"
-        );
-    }
 
     /// Verify ICC_SGI1_EL1 register value parsing: target list, INTID, IRM.
     #[test]
@@ -2354,8 +2125,12 @@ mod tests {
             let addr = TEST_MMIO_BASE + (i as u64 * TEST_MMIO_SIZE);
             let node_name = format!("virtio_mmio@{:x}", addr);
             assert!(
-                fdt_data.windows(node_name.len()).any(|w| w == node_name.as_bytes()),
-                "FDT should contain node {} (device {})", node_name, i
+                fdt_data
+                    .windows(node_name.len())
+                    .any(|w| w == node_name.as_bytes()),
+                "FDT should contain node {} (device {})",
+                node_name,
+                i
             );
         }
     }
@@ -2369,7 +2144,10 @@ mod tests {
         let aligned = (raw_addr + 0xFFF) & !0xFFF;
 
         assert_eq!(aligned % 4096, 0, "SHM address must be page-aligned");
-        assert!(aligned >= raw_addr, "alignment must not move address below original");
+        assert!(
+            aligned >= raw_addr,
+            "alignment must not move address below original"
+        );
     }
 
     #[test]
@@ -2403,7 +2181,10 @@ mod tests {
 
         for i in 0..count {
             let addr = TEST_MMIO_BASE + (i as u64 * TEST_MMIO_SIZE);
-            assert!(addr < TEST_MMIO_BASE + 0x10000, "MMIO addresses should not overflow GIC region");
+            assert!(
+                addr < TEST_MMIO_BASE + 0x10000,
+                "MMIO addresses should not overflow GIC region"
+            );
         }
     }
 }

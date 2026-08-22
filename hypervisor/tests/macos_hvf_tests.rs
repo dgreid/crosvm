@@ -13,14 +13,21 @@
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
+use std::sync::Arc;
+use std::sync::Barrier;
+
 use base::pagesize;
 use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use hypervisor::hvf::hv_result;
 use hypervisor::hvf::hv_vm_create;
 use hypervisor::hvf::hv_vm_destroy;
+use hypervisor::hvf::hv_vm_map;
 use hypervisor::hvf::Hvf;
 use hypervisor::hvf::HvfVm;
+use hypervisor::hvf::HV_MEMORY_EXEC;
+use hypervisor::hvf::HV_MEMORY_READ;
+use hypervisor::hvf::HV_MEMORY_WRITE;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorCap;
 use hypervisor::MemCacheType::CacheCoherent;
@@ -66,6 +73,22 @@ macro_rules! skip_if_no_hvf {
 fn page_aligned_size(min_size: u64) -> u64 {
     let page = pagesize() as u64;
     ((min_size + page - 1) / page) * page
+}
+
+fn map_guest_memory(vm: &HvfVm) {
+    for region in vm.get_memory().regions() {
+        // SAFETY: Each host address and size comes from the GuestMemory owned by `vm`, which
+        // remains alive for the duration of the mapping.
+        let ret = unsafe {
+            hv_vm_map(
+                region.host_addr as *mut std::ffi::c_void,
+                region.guest_addr.0,
+                region.size,
+                HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
+            )
+        };
+        hv_result(ret).expect("Failed to map guest memory into HVF");
+    }
 }
 
 /// Test that HVF is available on this macOS system.
@@ -255,6 +278,7 @@ fn test_hvf_vcpu_run() {
         GuestMemory::new(&[(GuestAddress(0), mem_size)]).expect("Failed to create guest memory");
 
     let vm = HvfVm::new(&hvf, guest_mem).expect("Failed to create HVF VM");
+    map_guest_memory(&vm);
 
     // ARM64 instructions (little-endian):
     // WFI (Wait For Interrupt) - causes HLT exit in HVF
@@ -322,6 +346,67 @@ fn test_hvf_vcpu_run() {
     );
 }
 
+/// Test that HVF advances PC past an HVC without changing guest registers.
+#[test]
+fn test_hvf_hvc_exit_state() {
+    skip_if_no_hvf!();
+
+    let hvf = Hvf::new().expect("Failed to create Hvf instance");
+    let mem_size = page_aligned_size(0x10000);
+    let load_addr = GuestAddress(pagesize() as u64);
+    let guest_mem =
+        GuestMemory::new(&[(GuestAddress(0), mem_size)]).expect("Failed to create guest memory");
+    let vm = HvfVm::new(&hvf, guest_mem).expect("Failed to create HVF VM");
+    map_guest_memory(&vm);
+
+    // HVC #0 followed by WFI, both encoded little-endian.
+    let code = [0x02, 0x00, 0x00, 0xD4, 0x7F, 0x20, 0x03, 0xD5];
+    vm.get_memory()
+        .write_at_addr(&code, load_addr)
+        .expect("Failed to write guest code");
+
+    let mut vcpu = vm.create_vcpu(0).expect("Failed to create vCPU");
+    vcpu.init(&[]).expect("Failed to initialize vCPU");
+    vcpu.set_one_reg(VcpuRegAArch64::Pc, load_addr.0)
+        .expect("Failed to set PC");
+    vcpu.set_one_reg(VcpuRegAArch64::Pstate, 0x3C5)
+        .expect("Failed to set PSTATE");
+
+    let x4_sentinel = 0x4444_4444_4444_4444;
+    let x30_sentinel = 0x3030_3030_3030_3030;
+    vcpu.set_one_reg(VcpuRegAArch64::X(4), x4_sentinel)
+        .expect("Failed to set X4");
+    vcpu.set_one_reg(VcpuRegAArch64::X(30), x30_sentinel)
+        .expect("Failed to set X30");
+
+    assert!(matches!(
+        vcpu.run().expect("Failed to run HVC instruction"),
+        VcpuExit::Hypercall
+    ));
+    assert_eq!(
+        vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap(),
+        load_addr.0 + 4,
+        "HVF should report PC at the instruction following HVC"
+    );
+    assert_eq!(vcpu.get_one_reg(VcpuRegAArch64::X(4)).unwrap(), x4_sentinel);
+    assert_eq!(
+        vcpu.get_one_reg(VcpuRegAArch64::X(30)).unwrap(),
+        x30_sentinel
+    );
+
+    vcpu.set_one_reg(VcpuRegAArch64::X(0), 0x0001_0001)
+        .expect("Failed to set hypercall result");
+    assert!(matches!(
+        vcpu.run().expect("Failed to resume after HVC"),
+        VcpuExit::Hlt
+    ));
+    assert_eq!(
+        vcpu.get_one_reg(VcpuRegAArch64::Pc).unwrap(),
+        load_addr.0 + 4,
+        "WFI should leave PC at the instruction after HVC"
+    );
+}
+
 /// Test that we can create multiple vCPUs.
 #[test]
 fn test_hvf_multiple_vcpus() {
@@ -333,38 +418,38 @@ fn test_hvf_multiple_vcpus() {
     let guest_mem =
         GuestMemory::new(&[(GuestAddress(0), mem_size)]).expect("Failed to create guest memory");
 
-    let vm = HvfVm::new(&hvf, guest_mem).expect("Failed to create HVF VM");
+    let vm = Arc::new(HvfVm::new(&hvf, guest_mem).expect("Failed to create HVF VM"));
+    let barrier = Arc::new(Barrier::new(2));
 
-    // Create multiple vCPUs
-    let vcpu0 = vm.create_vcpu(0).expect("Failed to create vCPU 0");
-    let vcpu1 = vm.create_vcpu(1).expect("Failed to create vCPU 1");
+    let workers: Vec<_> = [(0, 0x1111), (1, 0x2222)]
+        .into_iter()
+        .map(|(id, value)| {
+            let vm = Arc::clone(&vm);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                // Hypervisor.framework associates each vCPU with the thread that creates it.
+                // Keep creation, access, and destruction on this worker thread.
+                let vcpu = vm.create_vcpu(id);
+                barrier.wait();
+                let vcpu = vcpu.unwrap_or_else(|e| panic!("Failed to create vCPU {id}: {e}"));
 
-    // Verify IDs
-    assert_eq!(vcpu0.id(), 0);
-    assert_eq!(vcpu1.id(), 1);
+                assert_eq!(vcpu.id(), id);
+                vcpu.init(&[])
+                    .unwrap_or_else(|e| panic!("Failed to init vCPU {id}: {e}"));
+                vcpu.set_one_reg(VcpuRegAArch64::X(0), value)
+                    .unwrap_or_else(|e| panic!("Failed to set X0 on vCPU {id}: {e}"));
 
-    // Initialize both
-    vcpu0.init(&[]).expect("Failed to init vCPU 0");
-    vcpu1.init(&[]).expect("Failed to init vCPU 1");
+                vcpu.get_one_reg(VcpuRegAArch64::X(0))
+                    .unwrap_or_else(|e| panic!("Failed to get X0 from vCPU {id}: {e}"))
+            })
+        })
+        .collect();
 
-    // Set different register values on each
-    vcpu0
-        .set_one_reg(VcpuRegAArch64::X(0), 0x1111)
-        .expect("Failed to set X0 on vCPU 0");
-    vcpu1
-        .set_one_reg(VcpuRegAArch64::X(0), 0x2222)
-        .expect("Failed to set X0 on vCPU 1");
-
-    // Verify the values are independent
-    let x0_vcpu0 = vcpu0
-        .get_one_reg(VcpuRegAArch64::X(0))
-        .expect("Failed to get X0 from vCPU 0");
-    let x0_vcpu1 = vcpu1
-        .get_one_reg(VcpuRegAArch64::X(0))
-        .expect("Failed to get X0 from vCPU 1");
-
-    assert_eq!(x0_vcpu0, 0x1111, "vCPU 0 X0 should be 0x1111");
-    assert_eq!(x0_vcpu1, 0x2222, "vCPU 1 X0 should be 0x2222");
+    let values: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("vCPU worker panicked"))
+        .collect();
+    assert_eq!(values, [0x1111, 0x2222]);
 }
 
 /// Test vector register access (SIMD/FP registers V0-V31).

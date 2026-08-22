@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright 2026 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
 # Boot and device test script for macOS ARM64
 #
 # Runs five test tiers:
@@ -39,20 +43,21 @@ SKIPPED=0
 check_output() {
     local pattern="$1"
     local description="$2"
-    if grep -q "$pattern" "$BOOT_LOG" 2>/dev/null; then
+    if grep -Fq "$pattern" "$BOOT_LOG" 2>/dev/null; then
         echo -e "${GREEN}[PASS]${NC} $description"
-        ((PASSED++))
+        ((++PASSED))
         return 0
     else
         echo -e "${RED}[FAIL]${NC} $description"
-        ((FAILED++))
-        return 1
+        ((++FAILED))
+        return 0
     fi
 }
 
 skip() {
     echo -e "${YELLOW}[SKIP]${NC} $1"
-    ((SKIPPED++))
+    ((++SKIPPED))
+    return 0
 }
 
 ensure_signed() {
@@ -113,7 +118,8 @@ run_boot_test() {
     timeout 15 "$CROSVM_BIN" run "$CROSVM_KERNEL" < /dev/null > "$BOOT_LOG" 2>&1 || true
 
     check_output "Booting Linux" "Kernel starts booting"
-    check_output "psci:" "PSCI detected"
+    check_output "psci: PSCIv1.1 detected in firmware." "PSCI 1.1 detected"
+    check_output "smp: Brought up 1 node, 1 CPU" "Kernel reaches SMP initialization"
     echo ""
 }
 

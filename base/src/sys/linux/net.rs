@@ -35,6 +35,7 @@ use crate::unix::net::socketpair;
 use crate::unix::net::sun_path_offset;
 use crate::unix::net::InetVersion;
 use crate::unix::net::TcpSocket;
+use crate::unix::ScmSocketTransport;
 use crate::SafeDescriptor;
 use crate::ScmSocket;
 use crate::UnixSeqpacket;
@@ -166,6 +167,8 @@ impl UnixSeqpacketListener {
 
 macro_rules! ScmSocketTryFrom {
     ($name:ident) => {
+        impl ScmSocketTransport for $name {}
+
         impl TryFrom<$name> for ScmSocket<$name> {
             type Error = io::Error;
 

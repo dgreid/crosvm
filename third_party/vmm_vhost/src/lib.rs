@@ -160,6 +160,8 @@ mod test_backend;
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
+    #[cfg(target_os = "macos")]
+    use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::sync::Barrier;
     use std::thread;
@@ -403,8 +405,11 @@ mod tests {
             // Safe because we will be importing the Tube in the other thread.
             unsafe { tube_transporter::packed_tube::pack(tubes.0, std::process::id()).unwrap() };
 
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         let descriptor = base::Event::new().unwrap();
+        // macOS Event is pipe-backed, but a backend request descriptor must be a socket.
+        #[cfg(target_os = "macos")]
+        let (_backend_req_peer, descriptor) = UnixStream::pair().unwrap();
 
         backend_client.set_backend_req_fd(&descriptor).unwrap();
         backend_client.set_vring_enable(0, true).unwrap();
