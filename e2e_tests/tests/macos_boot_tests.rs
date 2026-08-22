@@ -21,8 +21,11 @@
 use std::env;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Child;
+use std::process::ChildStdin;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -35,6 +38,9 @@ const DEFAULT_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Short timeout for minimal boot tests
 const MINIMAL_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Marker printed by a shell command after the guest has entered userspace.
+const USERSPACE_READY_PATTERN: &str = "CROSVM_USERSPACE_READY";
 
 /// Get the path to the test kernel from environment variable
 fn get_kernel_path() -> Option<PathBuf> {
@@ -126,8 +132,10 @@ impl TestVmConfig {
 /// A running test VM with serial output capture
 struct TestVm {
     process: Child,
+    serial_tx: ChildStdin,
     serial_rx: mpsc::Receiver<String>,
     _serial_thread: thread::JoinHandle<()>,
+    stopped: bool,
 }
 
 impl TestVm {
@@ -145,7 +153,8 @@ impl TestVm {
         cmd.arg("--cpus").arg(config.cpus.to_string());
 
         // Serial output to stdout for capture
-        cmd.arg("--serial").arg("type=stdout,hardware=serial,console");
+        cmd.arg("--serial")
+            .arg("type=stdout,hardware=serial,console,stdin=true");
 
         // Disable sandbox on macOS (not supported)
         cmd.arg("--disable-sandbox");
@@ -165,7 +174,8 @@ impl TestVm {
 
         println!("Starting VM: {:?}", cmd);
 
-        // Capture stdout for serial output
+        // Capture stdin/stdout for serial input and output.
+        cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -173,6 +183,7 @@ impl TestVm {
 
         // Set up channel for serial output
         let (tx, rx) = mpsc::channel();
+        let serial_tx = process.stdin.take().expect("Failed to capture stdin");
         let stdout = process.stdout.take().expect("Failed to capture stdout");
 
         let serial_thread = thread::spawn(move || {
@@ -195,8 +206,10 @@ impl TestVm {
 
         Ok(Self {
             process,
+            serial_tx,
             serial_rx: rx,
             _serial_thread: serial_thread,
+            stopped: false,
         })
     }
 
@@ -269,6 +282,24 @@ impl TestVm {
         );
     }
 
+    /// Send input to the guest's serial console.
+    fn send_serial_input(&mut self, input: &str) -> anyhow::Result<()> {
+        self.serial_tx.write_all(input.as_bytes())?;
+        self.serial_tx.flush()?;
+        Ok(())
+    }
+
+    /// Verify that the init process reached an interactive userspace shell.
+    fn wait_for_userspace_shell(&mut self) -> anyhow::Result<String> {
+        self.wait_for_serial_pattern("Run /init as init process", DEFAULT_BOOT_TIMEOUT)?;
+
+        // The kernel prints the line above before execve(), so it cannot prove that /init ran.
+        // Send a command whose input does not contain the expected output literally; this avoids
+        // accepting terminal echo as a successful userspace probe.
+        self.send_serial_input("printf 'CROSVM_%s_READY\\n' USERSPACE\n")?;
+        self.wait_for_serial_pattern(USERSPACE_READY_PATTERN, DEFAULT_BOOT_TIMEOUT)
+    }
+
     /// Stop the VM
     fn stop(&mut self) -> anyhow::Result<std::process::ExitStatus> {
         // Send SIGTERM for graceful shutdown
@@ -277,19 +308,27 @@ impl TestVm {
             libc::kill(self.process.id() as i32, libc::SIGTERM);
         }
 
-        // Wait a bit for graceful shutdown
-        thread::sleep(Duration::from_secs(2));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Some(status) = self.process.try_wait()? {
+                self.stopped = true;
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
 
-        // Kill if still running
-        let _ = self.process.kill();
+        self.process.kill()?;
         let status = self.process.wait()?;
-        Ok(status)
+        self.stopped = true;
+        anyhow::bail!("VM ignored SIGTERM and required SIGKILL: {status:?}")
     }
 }
 
 impl Drop for TestVm {
     fn drop(&mut self) {
-        let _ = self.stop();
+        if !self.stopped {
+            let _ = self.stop();
+        }
     }
 }
 
@@ -304,9 +343,8 @@ impl Drop for TestVm {
 #[test]
 #[ignore = "requires external kernel image: set CROSVM_TEST_KERNEL_IMAGE"]
 fn test_minimal_boot() {
-    let kernel_path = get_kernel_path().expect(
-        "CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test",
-    );
+    let kernel_path = get_kernel_path()
+        .expect("CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test");
 
     let config = TestVmConfig::new(kernel_path);
     let vm = TestVm::start(config).expect("Failed to start VM");
@@ -336,65 +374,45 @@ fn test_minimal_boot() {
 #[test]
 #[ignore = "requires external kernel and initrd: set CROSVM_TEST_KERNEL_IMAGE and CROSVM_TEST_INITRD"]
 fn test_boot_to_userspace() {
-    let kernel_path = get_kernel_path().expect(
-        "CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test",
-    );
-    let initrd_path = get_initrd_path().expect(
-        "CROSVM_TEST_INITRD must be set to a valid initrd path for this test",
-    );
+    let kernel_path = get_kernel_path()
+        .expect("CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test");
+    let initrd_path = get_initrd_path()
+        .expect("CROSVM_TEST_INITRD must be set to a valid initrd path for this test");
 
     let config = TestVmConfig::new(kernel_path).with_initrd(initrd_path);
-    let vm = TestVm::start(config).expect("Failed to start VM");
+    let mut vm = TestVm::start(config).expect("Failed to start VM");
 
     // First verify kernel boot
     vm.wait_for_serial_pattern("Linux version", MINIMAL_BOOT_TIMEOUT)
         .expect("Kernel did not boot");
 
-    // Then verify init runs - look for common init messages
-    let init_patterns = [
-        "Run /init",
-        "Run /sbin/init",
-        "Freeing unused kernel",
-        "Welcome",
-        "Starting init",
-    ];
-
-    let result = vm.wait_for_any_pattern(&init_patterns, DEFAULT_BOOT_TIMEOUT);
-
-    match result {
-        Ok((idx, line)) => {
-            println!(
-                "Userspace boot successful! Found init indicator '{}': {}",
-                init_patterns[idx], line
-            );
-        }
-        Err(e) => {
-            panic!("Userspace boot test failed: {}", e);
-        }
-    }
+    let line = vm
+        .wait_for_userspace_shell()
+        .expect("Userspace shell probe failed");
+    println!("Userspace boot successful: {}", line);
 }
 
-/// Test graceful VM shutdown
+/// Test host-requested VM shutdown
 ///
 /// Verifies that:
 /// - VM boots successfully
-/// - VM can be stopped cleanly
-/// - Process exits without error
+/// - VM exits promptly after SIGTERM
+/// - A forced SIGKILL is not required
 ///
-/// Requires: CROSVM_TEST_KERNEL_IMAGE environment variable
+/// Requires: CROSVM_TEST_KERNEL_IMAGE and CROSVM_TEST_INITRD environment variables
 #[test]
-#[ignore = "requires external kernel image: set CROSVM_TEST_KERNEL_IMAGE"]
-fn test_graceful_shutdown() {
-    let kernel_path = get_kernel_path().expect(
-        "CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test",
-    );
+#[ignore = "requires external kernel and initrd: set CROSVM_TEST_KERNEL_IMAGE and CROSVM_TEST_INITRD"]
+fn test_host_requested_shutdown() {
+    let kernel_path = get_kernel_path()
+        .expect("CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test");
+    let initrd_path = get_initrd_path()
+        .expect("CROSVM_TEST_INITRD must be set to a valid initrd path for this test");
 
-    let config = TestVmConfig::new(kernel_path);
+    let config = TestVmConfig::new(kernel_path).with_initrd(initrd_path);
     let mut vm = TestVm::start(config).expect("Failed to start VM");
 
-    // Wait for kernel to start booting
-    vm.wait_for_serial_pattern("Linux version", MINIMAL_BOOT_TIMEOUT)
-        .expect("Kernel did not boot");
+    vm.wait_for_userspace_shell()
+        .expect("Guest did not reach a userspace shell");
 
     // Give it a moment to stabilize
     thread::sleep(Duration::from_secs(2));
@@ -402,12 +420,11 @@ fn test_graceful_shutdown() {
     // Stop the VM
     let status = vm.stop().expect("Failed to stop VM");
 
-    // On graceful shutdown with SIGTERM, the exit status should be clean
-    // (either 0 or killed by signal which is expected)
     println!("VM exit status: {:?}", status);
-
-    // The test passes if we get here without hanging
-    // We don't strictly require exit code 0 since SIGTERM handling varies
+    assert!(
+        status.success() || status.signal() == Some(libc::SIGTERM),
+        "unexpected exit status after SIGTERM: {status:?}"
+    );
 }
 
 /// Test multi-vCPU boot
@@ -421,9 +438,8 @@ fn test_graceful_shutdown() {
 #[test]
 #[ignore = "requires external kernel image: set CROSVM_TEST_KERNEL_IMAGE"]
 fn test_multi_vcpu() {
-    let kernel_path = get_kernel_path().expect(
-        "CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test",
-    );
+    let kernel_path = get_kernel_path()
+        .expect("CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test");
 
     // Test with 2 vCPUs
     let config = TestVmConfig::new(kernel_path).with_cpus(2);
@@ -433,32 +449,10 @@ fn test_multi_vcpu() {
     vm.wait_for_serial_pattern("Linux version", MINIMAL_BOOT_TIMEOUT)
         .expect("Kernel did not boot");
 
-    // Look for SMP detection messages
-    // Different kernels report this differently, so check for common patterns
-    let smp_patterns = [
-        "SMP",            // Generic SMP indication
-        "CPU1",           // Secondary CPU
-        "Brought up",     // CPU bring-up message
-        "smp: Bringing",  // Kernel SMP message
-        "2 CPUs",         // Direct CPU count
-        "cpus=2",         // Command line or config
-    ];
-
-    let result = vm.wait_for_any_pattern(&smp_patterns, DEFAULT_BOOT_TIMEOUT);
-
-    match result {
-        Ok((idx, line)) => {
-            println!(
-                "SMP detection successful! Found pattern '{}': {}",
-                smp_patterns[idx], line
-            );
-        }
-        Err(e) => {
-            // Even if we don't see explicit SMP messages, the boot itself with 2 CPUs
-            // is a success. Some minimal kernels don't print verbose SMP info.
-            println!("Note: No explicit SMP message found, but boot succeeded: {}", e);
-        }
-    }
+    let line = vm
+        .wait_for_serial_pattern("smp: Brought up 1 node, 2 CPUs", DEFAULT_BOOT_TIMEOUT)
+        .expect("Guest did not bring up both configured CPUs");
+    println!("SMP detection successful: {}", line);
 }
 
 /// Test various memory sizes
@@ -471,9 +465,8 @@ fn test_multi_vcpu() {
 #[test]
 #[ignore = "requires external kernel image: set CROSVM_TEST_KERNEL_IMAGE"]
 fn test_various_memory_sizes() {
-    let kernel_path = get_kernel_path().expect(
-        "CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test",
-    );
+    let kernel_path = get_kernel_path()
+        .expect("CROSVM_TEST_KERNEL_IMAGE must be set to a valid kernel path for this test");
 
     // Test different memory configurations
     let memory_sizes_mb = [256, 512, 1024];
@@ -543,7 +536,10 @@ mod helpers {
         println!("  cargo test -p e2e_tests macos_boot -- --ignored\n");
 
         if check_prerequisites() {
-            println!("Current status: Kernel image found at {:?}", get_kernel_path());
+            println!(
+                "Current status: Kernel image found at {:?}",
+                get_kernel_path()
+            );
             if let Some(initrd) = get_initrd_path() {
                 println!("               Initrd found at {:?}", initrd);
             } else {

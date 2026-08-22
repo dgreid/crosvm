@@ -42,9 +42,7 @@ impl ReadDir {
             unsafe { libc::seekdir(dirp, offset as libc::c_long) };
         }
 
-        Ok(ReadDir {
-            dirp,
-        })
+        Ok(ReadDir { dirp })
     }
 }
 

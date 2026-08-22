@@ -33,11 +33,11 @@ mod event_device;
 mod gpu_display_android;
 #[cfg(feature = "android_display_stub")]
 mod gpu_display_android_stub;
-mod gpu_display_stub;
 #[cfg(target_os = "macos")]
 mod gpu_display_macos;
 #[cfg(target_os = "macos")]
 mod gpu_display_macos_helper;
+mod gpu_display_stub;
 #[cfg(windows)]
 mod gpu_display_win;
 #[cfg(any(target_os = "android", target_os = "linux"))]

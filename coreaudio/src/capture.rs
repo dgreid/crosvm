@@ -185,10 +185,8 @@ fn create_input_audio_unit(
         }
 
         // Set the format we want to receive on bus 1's output scope.
-        let asbd = AudioStreamBasicDescription::float32_interleaved(
-            sample_rate as f64,
-            channels as u32,
-        );
+        let asbd =
+            AudioStreamBasicDescription::float32_interleaved(sample_rate as f64, channels as u32);
 
         let status = AudioUnitSetProperty(
             audio_unit,
@@ -250,12 +248,9 @@ pub fn make_capture_stream(
     let ring_capacity = 4 * num_channels * buffer_size * 4;
     let ring_buffer = Arc::new(RingBuffer::new(ring_capacity));
 
-    let (device, callback_data) =
-        create_input_audio_unit(frame_rate, num_channels, &ring_buffer)?;
+    let (device, callback_data) = create_input_audio_unit(frame_rate, num_channels, &ring_buffer)?;
 
-    let interval = Duration::from_millis(
-        (buffer_size as u64) * 1000 / (frame_rate as u64),
-    );
+    let interval = Duration::from_nanos((buffer_size as u64) * 1_000_000_000 / (frame_rate as u64));
 
     let max_samples = buffer_size * num_channels;
 

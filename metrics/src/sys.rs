@@ -13,4 +13,3 @@ cfg_if::cfg_if! {
         pub(crate) mod macos;
     }
 }
-

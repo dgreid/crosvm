@@ -112,15 +112,16 @@ impl GpuDisplaySurface for MacosSurface {
     fn framebuffer(&mut self) -> Option<GpuDisplayFramebuffer> {
         let size = self.mmap.size();
         // SAFETY: mmap is valid for its entire size and lives as long as this surface.
-        let slice = unsafe {
-            VolatileSlice::from_raw_parts(self.mmap.as_ptr(), size)
-        };
+        let slice = unsafe { VolatileSlice::from_raw_parts(self.mmap.as_ptr(), size) };
         let stride = self.width * 4;
         Some(GpuDisplayFramebuffer::new(slice, stride, 4))
     }
 
     fn close_requested(&self) -> bool {
-        self.closed_surfaces.lock().unwrap().contains(&self.surface_id)
+        self.closed_surfaces
+            .lock()
+            .unwrap()
+            .contains(&self.surface_id)
     }
 
     fn flip(&mut self) {
@@ -147,8 +148,8 @@ unsafe impl Send for DisplayMacos {}
 
 impl DisplayMacos {
     pub fn new() -> GpuDisplayResult<DisplayMacos> {
-        let (sock_crosvm, sock_helper) = std::os::unix::net::UnixStream::pair()
-            .map_err(|_| GpuDisplayError::Connect)?;
+        let (sock_crosvm, sock_helper) =
+            std::os::unix::net::UnixStream::pair().map_err(|_| GpuDisplayError::Connect)?;
 
         let helper_raw_fd = sock_helper.into_raw_fd();
 
@@ -175,16 +176,21 @@ impl DisplayMacos {
                     Ok(())
                 })
                 .spawn()
-        }.map_err(|e| {
+        }
+        .map_err(|e| {
             error!("failed to spawn display helper: {}", e);
             // SAFETY: we still own the fd if spawn failed.
-            unsafe { libc::close(helper_raw_fd); }
+            unsafe {
+                libc::close(helper_raw_fd);
+            }
             GpuDisplayError::Connect
         })?;
 
         // Close the helper's socketpair end in the parent.
         // SAFETY: helper_raw_fd is valid; child got its own copy via fork.
-        unsafe { libc::close(helper_raw_fd); }
+        unsafe {
+            libc::close(helper_raw_fd);
+        }
 
         let crosvm_raw_fd = sock_crosvm.into_raw_fd();
         // SAFETY: crosvm_raw_fd is a valid fd from UnixStream::pair().
@@ -392,10 +398,9 @@ mod tests {
     use base::UnixSeqpacket;
 
     use super::protocol::DisplayResponse;
+    use super::protocol::*;
     use super::DisplayMacos;
     use super::DisplayT;
-
-    use super::protocol::*;
 
     fn make_tube_pair() -> (Tube, Tube) {
         let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -415,7 +420,9 @@ mod tests {
     fn request_roundtrip_via_tube() {
         let (sender, receiver) = make_tube_pair();
 
-        sender.send(&DisplayRequest::Flip { surface_id: 42 }).unwrap();
+        sender
+            .send(&DisplayRequest::Flip { surface_id: 42 })
+            .unwrap();
         let decoded: DisplayRequest = receiver.recv().unwrap();
         assert!(matches!(decoded, DisplayRequest::Flip { surface_id: 42 }));
 
@@ -489,7 +496,11 @@ mod tests {
         let decoded: DisplayRequest = receiver.recv().unwrap();
         match decoded {
             DisplayRequest::CreateSurface {
-                surface_id, width, height, shm_size, ..
+                surface_id,
+                width,
+                height,
+                shm_size,
+                ..
             } => {
                 assert_eq!(surface_id, 1);
                 assert_eq!(width, 32);
@@ -553,7 +564,6 @@ mod tests {
 
     #[test]
     fn close_requested_sets_surface_flag() {
-
         let (_helper_tube, crosvm_tube) = make_tube_pair();
         let closed_surfaces = Arc::new(std::sync::Mutex::new(HashSet::new()));
 
@@ -658,15 +668,16 @@ mod tests {
         let mut responses = VecDeque::new();
         responses.push_back(DisplayResponse::InputEvent {
             surface_id: 1,
-            type_: 1,     // EV_KEY
-            code: 0x110,  // BTN_LEFT
+            type_: 1,    // EV_KEY
+            code: 0x110, // BTN_LEFT
             value: 1,
         });
 
         let (mut display, mut surface) = make_test_display_and_surface(responses);
         display.next_event().unwrap();
 
-        let events = display.handle_next_event(&mut surface)
+        let events = display
+            .handle_next_event(&mut surface)
             .expect("should produce events for mouse button");
         assert_eq!(events.device_type, crate::EventDeviceKind::Mouse);
     }
@@ -676,15 +687,16 @@ mod tests {
         let mut responses = VecDeque::new();
         responses.push_back(DisplayResponse::InputEvent {
             surface_id: 1,
-            type_: 2,   // EV_REL
-            code: 8,    // REL_WHEEL
+            type_: 2, // EV_REL
+            code: 8,  // REL_WHEEL
             value: -3,
         });
 
         let (mut display, mut surface) = make_test_display_and_surface(responses);
         display.next_event().unwrap();
 
-        let events = display.handle_next_event(&mut surface)
+        let events = display
+            .handle_next_event(&mut surface)
             .expect("should produce events for scroll");
         assert_eq!(events.device_type, crate::EventDeviceKind::Mouse);
         assert_eq!(events.events[0].type_.to_native(), 2);
@@ -697,15 +709,16 @@ mod tests {
         let mut responses = VecDeque::new();
         responses.push_back(DisplayResponse::InputEvent {
             surface_id: 1,
-            type_: 3,    // EV_ABS
-            code: 0,     // ABS_X
+            type_: 3, // EV_ABS
+            code: 0,  // ABS_X
             value: 500,
         });
 
         let (mut display, mut surface) = make_test_display_and_surface(responses);
         display.next_event().unwrap();
 
-        let events = display.handle_next_event(&mut surface)
+        let events = display
+            .handle_next_event(&mut surface)
             .expect("should produce events for abs motion");
         assert_eq!(events.device_type, crate::EventDeviceKind::Mouse);
         assert_eq!(events.events[0].type_.to_native(), 3);
@@ -720,102 +733,118 @@ mod tests {
     #[test]
     fn keycode_table_letters() {
         let expected: &[(u16, u16)] = &[
-            (0x00, 30),  // A
-            (0x01, 31),  // S
-            (0x02, 32),  // D
-            (0x03, 33),  // F
-            (0x04, 35),  // H
-            (0x05, 34),  // G
-            (0x06, 44),  // Z
-            (0x07, 45),  // X
-            (0x08, 46),  // C
-            (0x09, 47),  // V
-            (0x0B, 48),  // B
-            (0x0C, 16),  // Q
-            (0x0D, 17),  // W
-            (0x0E, 18),  // E
-            (0x0F, 19),  // R
-            (0x10, 21),  // Y
-            (0x11, 20),  // T
-            (0x1F, 24),  // O
-            (0x20, 22),  // U
-            (0x22, 23),  // I
-            (0x23, 25),  // P
-            (0x25, 38),  // L
-            (0x26, 36),  // J
-            (0x28, 37),  // K
-            (0x2D, 49),  // N
-            (0x2E, 50),  // M
+            (0x00, 30), // A
+            (0x01, 31), // S
+            (0x02, 32), // D
+            (0x03, 33), // F
+            (0x04, 35), // H
+            (0x05, 34), // G
+            (0x06, 44), // Z
+            (0x07, 45), // X
+            (0x08, 46), // C
+            (0x09, 47), // V
+            (0x0B, 48), // B
+            (0x0C, 16), // Q
+            (0x0D, 17), // W
+            (0x0E, 18), // E
+            (0x0F, 19), // R
+            (0x10, 21), // Y
+            (0x11, 20), // T
+            (0x1F, 24), // O
+            (0x20, 22), // U
+            (0x22, 23), // I
+            (0x23, 25), // P
+            (0x25, 38), // L
+            (0x26, 36), // J
+            (0x28, 37), // K
+            (0x2D, 49), // N
+            (0x2E, 50), // M
         ];
         for &(mac, linux) in expected {
             // SAFETY: macos_keycode_to_linux is a pure lookup function.
             let result = unsafe { macos_keycode_to_linux(mac) };
-            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+            assert_eq!(
+                result, linux,
+                "mac keycode {:#x} should map to linux {}",
+                mac, linux
+            );
         }
     }
 
     #[test]
     fn keycode_table_modifiers_and_special() {
         let expected: &[(u16, u16)] = &[
-            (0x24, 28),   // Return -> KEY_ENTER
-            (0x30, 15),   // Tab -> KEY_TAB
-            (0x31, 57),   // Space -> KEY_SPACE
-            (0x33, 14),   // Backspace -> KEY_BACKSPACE
-            (0x35, 1),    // Escape -> KEY_ESC
-            (0x38, 42),   // Shift -> KEY_LEFTSHIFT
-            (0x3C, 54),   // RightShift -> KEY_RIGHTSHIFT
-            (0x3A, 56),   // Option -> KEY_LEFTALT
-            (0x3D, 100),  // RightOption -> KEY_RIGHTALT
-            (0x3B, 29),   // Control -> KEY_LEFTCTRL
-            (0x3E, 97),   // RightControl -> KEY_RIGHTCTRL
-            (0x37, 125),  // Command -> KEY_LEFTMETA
-            (0x36, 126),  // RightCommand -> KEY_RIGHTMETA
-            (0x39, 58),   // CapsLock -> KEY_CAPSLOCK
+            (0x24, 28),  // Return -> KEY_ENTER
+            (0x30, 15),  // Tab -> KEY_TAB
+            (0x31, 57),  // Space -> KEY_SPACE
+            (0x33, 14),  // Backspace -> KEY_BACKSPACE
+            (0x35, 1),   // Escape -> KEY_ESC
+            (0x38, 42),  // Shift -> KEY_LEFTSHIFT
+            (0x3C, 54),  // RightShift -> KEY_RIGHTSHIFT
+            (0x3A, 56),  // Option -> KEY_LEFTALT
+            (0x3D, 100), // RightOption -> KEY_RIGHTALT
+            (0x3B, 29),  // Control -> KEY_LEFTCTRL
+            (0x3E, 97),  // RightControl -> KEY_RIGHTCTRL
+            (0x37, 125), // Command -> KEY_LEFTMETA
+            (0x36, 126), // RightCommand -> KEY_RIGHTMETA
+            (0x39, 58),  // CapsLock -> KEY_CAPSLOCK
         ];
         for &(mac, linux) in expected {
             let result = unsafe { macos_keycode_to_linux(mac) };
-            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+            assert_eq!(
+                result, linux,
+                "mac keycode {:#x} should map to linux {}",
+                mac, linux
+            );
         }
     }
 
     #[test]
     fn keycode_table_arrows_and_navigation() {
         let expected: &[(u16, u16)] = &[
-            (0x7B, 105),  // Left -> KEY_LEFT
-            (0x7C, 106),  // Right -> KEY_RIGHT
-            (0x7D, 108),  // Down -> KEY_DOWN
-            (0x7E, 103),  // Up -> KEY_UP
-            (0x73, 102),  // Home -> KEY_HOME
-            (0x77, 107),  // End -> KEY_END
-            (0x74, 104),  // PageUp -> KEY_PAGEUP
-            (0x79, 109),  // PageDown -> KEY_PAGEDOWN
-            (0x75, 111),  // ForwardDelete -> KEY_DELETE
+            (0x7B, 105), // Left -> KEY_LEFT
+            (0x7C, 106), // Right -> KEY_RIGHT
+            (0x7D, 108), // Down -> KEY_DOWN
+            (0x7E, 103), // Up -> KEY_UP
+            (0x73, 102), // Home -> KEY_HOME
+            (0x77, 107), // End -> KEY_END
+            (0x74, 104), // PageUp -> KEY_PAGEUP
+            (0x79, 109), // PageDown -> KEY_PAGEDOWN
+            (0x75, 111), // ForwardDelete -> KEY_DELETE
         ];
         for &(mac, linux) in expected {
             let result = unsafe { macos_keycode_to_linux(mac) };
-            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+            assert_eq!(
+                result, linux,
+                "mac keycode {:#x} should map to linux {}",
+                mac, linux
+            );
         }
     }
 
     #[test]
     fn keycode_table_function_keys() {
         let expected: &[(u16, u16)] = &[
-            (0x7A, 59),   // F1
-            (0x78, 60),   // F2
-            (0x63, 61),   // F3
-            (0x76, 62),   // F4
-            (0x60, 63),   // F5
-            (0x61, 64),   // F6
-            (0x62, 65),   // F7
-            (0x64, 66),   // F8
-            (0x65, 67),   // F9
-            (0x6D, 68),   // F10
-            (0x67, 87),   // F11
-            (0x6F, 88),   // F12
+            (0x7A, 59), // F1
+            (0x78, 60), // F2
+            (0x63, 61), // F3
+            (0x76, 62), // F4
+            (0x60, 63), // F5
+            (0x61, 64), // F6
+            (0x62, 65), // F7
+            (0x64, 66), // F8
+            (0x65, 67), // F9
+            (0x6D, 68), // F10
+            (0x67, 87), // F11
+            (0x6F, 88), // F12
         ];
         for &(mac, linux) in expected {
             let result = unsafe { macos_keycode_to_linux(mac) };
-            assert_eq!(result, linux, "mac keycode {:#x} should map to linux {}", mac, linux);
+            assert_eq!(
+                result, linux,
+                "mac keycode {:#x} should map to linux {}",
+                mac, linux
+            );
         }
     }
 
@@ -887,8 +916,7 @@ mod tests {
         unsafe { libc::close(helper_raw_fd) };
 
         let crosvm_raw_fd = sock_crosvm.into_raw_fd();
-        let seqpacket =
-            unsafe { base::UnixSeqpacket::from_raw_descriptor(crosvm_raw_fd) };
+        let seqpacket = unsafe { base::UnixSeqpacket::from_raw_descriptor(crosvm_raw_fd) };
         let tube: base::Tube = seqpacket.try_into().expect("Tube creation failed");
         let tube = Arc::new(tube);
 

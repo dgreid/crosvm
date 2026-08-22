@@ -18,6 +18,10 @@ fn all_kinds() -> Vec<ExecutorKind> {
 fn all_kinds() -> Vec<ExecutorKind> {
     vec![ExecutorKindSys::Handle.into()]
 }
+#[cfg(target_os = "macos")]
+fn all_kinds() -> Vec<ExecutorKind> {
+    vec![ExecutorKindSys::Kqueue.into()]
+}
 
 #[test]
 fn cancel_pending_task() {

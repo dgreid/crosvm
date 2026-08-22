@@ -93,8 +93,6 @@ pub(crate) use executor::ExecutorTrait;
 pub use executor::TaskHandle;
 #[cfg(any(windows, target_os = "macos"))]
 pub use futures::executor::block_on;
-#[cfg(any(target_os = "android", target_os = "linux"))]
-pub use blocking::sys::linux::block_on::block_on;
 use futures::stream::FuturesUnordered;
 pub use io_ext::AsyncError;
 pub use io_ext::AsyncResult;

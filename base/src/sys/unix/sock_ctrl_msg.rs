@@ -157,7 +157,12 @@ impl CmsgBuffer {
 // Musl requires a try_into when assigning to msg_iovlen and msg_controllen
 // that is unnecessary when compiling for glibc.
 #[allow(clippy::useless_conversion)]
-fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usize> {
+fn raw_sendmsg(
+    fd: RawFd,
+    iovec: &[iovec],
+    out_fds: &[RawFd],
+    use_length_prefix: bool,
+) -> io::Result<usize> {
     if out_fds.len() > SCM_MAX_FD {
         error!(
             "too many fds to send: {} > SCM_MAX_FD (SCM_MAX_FD)",
@@ -169,11 +174,8 @@ fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usiz
     let cmsg_capacity = CMSG_SPACE(size_of_val(out_fds));
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
-    // On macOS with SOCK_STREAM, we need to prepend a length prefix because
-    // there are no message boundaries. Calculate total data length.
-    // NOTE: This framing is independent of UnixSeqpacket::send()/recv() which use
-    // their own 4-byte length prefix. Do not mix raw_sendmsg and UnixSeqpacket
-    // methods on the same socket.
+    // The macOS UnixSeqpacket emulation uses a SOCK_STREAM socket, so prepend
+    // its length prefix when requested by the transport type.
     #[cfg(target_os = "macos")]
     let total_data_len: u32 = iovec.iter().map(|v| v.iov_len as u32).sum();
     #[cfg(target_os = "macos")]
@@ -181,14 +183,15 @@ fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usiz
 
     // Create the iovec array. On macOS, prepend the length prefix.
     #[cfg(target_os = "macos")]
-    let len_iov = iovec {
-        iov_base: len_prefix.as_ptr() as *mut c_void,
-        iov_len: 4,
-    };
-    #[cfg(target_os = "macos")]
-    let mut full_iovec: Vec<iovec> = std::iter::once(len_iov)
-        .chain(iovec.iter().copied())
-        .collect();
+    let mut full_iovec = use_length_prefix.then(|| {
+        let len_iov = iovec {
+            iov_base: len_prefix.as_ptr() as *mut c_void,
+            iov_len: 4,
+        };
+        std::iter::once(len_iov)
+            .chain(iovec.iter().copied())
+            .collect::<Vec<_>>()
+    });
 
     // SAFETY:
     // msghdr on musl has private __pad1 and __pad2 fields that cannot be initialized.
@@ -198,11 +201,17 @@ fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usiz
 
     #[cfg(target_os = "macos")]
     {
-        msg.msg_iov = full_iovec.as_mut_ptr();
-        msg.msg_iovlen = full_iovec.len().try_into().unwrap();
+        if let Some(full_iovec) = full_iovec.as_mut() {
+            msg.msg_iov = full_iovec.as_mut_ptr();
+            msg.msg_iovlen = full_iovec.len().try_into().unwrap();
+        } else {
+            msg.msg_iov = iovec.as_ptr() as *mut iovec;
+            msg.msg_iovlen = iovec.len().try_into().unwrap();
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = use_length_prefix;
         msg.msg_iov = iovec.as_ptr() as *mut iovec;
         msg.msg_iovlen = iovec.len().try_into().unwrap();
     }
@@ -243,10 +252,14 @@ fn raw_sendmsg(fd: RawFd, iovec: &[iovec], out_fds: &[RawFd]) -> io::Result<usiz
     if write_count == -1 {
         Err(io::Error::last_os_error())
     } else {
-        // On macOS, subtract the length prefix from the reported count
+        // On macOS, subtract the UnixSeqpacket framing prefix when present.
         #[cfg(target_os = "macos")]
         {
-            Ok((write_count as usize).saturating_sub(4))
+            if use_length_prefix {
+                Ok((write_count as usize).saturating_sub(4))
+            } else {
+                Ok(write_count as usize)
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -262,6 +275,7 @@ fn raw_recvmsg(
     fd: RawFd,
     iovs: &mut [iovec],
     max_fds: usize,
+    use_length_prefix: bool,
 ) -> io::Result<(usize, Vec<SafeDescriptor>)> {
     if max_fds > SCM_MAX_FD {
         error!("too many fds to recieve: {max_fds} > SCM_MAX_FD (SCM_MAX_FD)");
@@ -271,21 +285,22 @@ fn raw_recvmsg(
     let cmsg_capacity = CMSG_SPACE(max_fds * size_of::<RawFd>());
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
-    // On macOS, we need to first read the 4-byte length prefix that was prepended by sendmsg.
+    // The macOS UnixSeqpacket emulation prepends a 4-byte length prefix.
     #[cfg(target_os = "macos")]
     let mut len_prefix_buf = [0u8; 4];
     #[cfg(target_os = "macos")]
-    let len_iov = iovec {
-        iov_base: len_prefix_buf.as_mut_ptr() as *mut c_void,
-        iov_len: 4,
-    };
-    #[cfg(target_os = "macos")]
-    let mut full_iovs: Vec<iovec> = std::iter::once(len_iov)
-        .chain(iovs.iter().map(|v| iovec {
-            iov_base: v.iov_base,
-            iov_len: v.iov_len,
-        }))
-        .collect();
+    let mut full_iovs = use_length_prefix.then(|| {
+        let len_iov = iovec {
+            iov_base: len_prefix_buf.as_mut_ptr() as *mut c_void,
+            iov_len: 4,
+        };
+        std::iter::once(len_iov)
+            .chain(iovs.iter().map(|v| iovec {
+                iov_base: v.iov_base,
+                iov_len: v.iov_len,
+            }))
+            .collect::<Vec<_>>()
+    });
 
     // SAFETY:
     // msghdr on musl has private __pad1 and __pad2 fields that cannot be initialized.
@@ -295,11 +310,17 @@ fn raw_recvmsg(
 
     #[cfg(target_os = "macos")]
     {
-        msg.msg_iov = full_iovs.as_mut_ptr();
-        msg.msg_iovlen = full_iovs.len().try_into().unwrap();
+        if let Some(full_iovs) = full_iovs.as_mut() {
+            msg.msg_iov = full_iovs.as_mut_ptr();
+            msg.msg_iovlen = full_iovs.len().try_into().unwrap();
+        } else {
+            msg.msg_iov = iovs.as_mut_ptr();
+            msg.msg_iovlen = iovs.len().try_into().unwrap();
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = use_length_prefix;
         msg.msg_iov = iovs.as_mut_ptr() as *mut iovec;
         msg.msg_iovlen = iovs.len().try_into().unwrap();
     }
@@ -345,9 +366,13 @@ fn raw_recvmsg(
         cmsg_ptr = get_next_cmsg(&msg, &cmsg, cmsg_ptr);
     }
 
-    // On macOS, subtract the length prefix from the total read
+    // On macOS, subtract the UnixSeqpacket framing prefix when present.
     #[cfg(target_os = "macos")]
-    let data_read = (total_read as usize).saturating_sub(4);
+    let data_read = if use_length_prefix {
+        (total_read as usize).saturating_sub(4)
+    } else {
+        total_read as usize
+    };
     #[cfg(not(target_os = "macos"))]
     let data_read = total_read as usize;
 
@@ -356,6 +381,14 @@ fn raw_recvmsg(
 
 /// The maximum number of FDs that can be sent in a single send.
 pub const SCM_SOCKET_MAX_FD_COUNT: usize = 253;
+
+/// Describes whether an [`ScmSocket`] transport needs userspace message framing.
+#[doc(hidden)]
+pub trait ScmSocketTransport: AsRawDescriptor {
+    fn uses_length_prefix() -> bool {
+        false
+    }
+}
 
 /// Trait for file descriptors can send and receive socket control messages via `sendmsg` and
 /// `recvmsg`.
@@ -367,7 +400,7 @@ pub struct ScmSocket<T: AsRawDescriptor> {
     pub(in crate::sys) socket: T,
 }
 
-impl<T: AsRawDescriptor> ScmSocket<T> {
+impl<T: ScmSocketTransport> ScmSocket<T> {
     /// Sends the given data and file descriptors over the socket.
     ///
     /// On success, returns the number of bytes sent.
@@ -401,6 +434,7 @@ impl<T: AsRawDescriptor> ScmSocket<T> {
             self.socket.as_raw_descriptor(),
             AsIobuf::as_iobuf_slice(bufs),
             fds,
+            T::uses_length_prefix(),
         )
     }
 
@@ -443,6 +477,7 @@ impl<T: AsRawDescriptor> ScmSocket<T> {
             self.socket.as_raw_descriptor(),
             IoSliceMut::as_iobuf_mut_slice(bufs),
             max_descriptors,
+            T::uses_length_prefix(),
         )
     }
 
@@ -567,6 +602,57 @@ unsafe impl AsIobuf for VolatileSlice<'_> {
 
     fn as_iobuf_mut_slice(bufs: &mut [Self]) -> &mut [iovec] {
         IoBufMut::as_iobufs_mut(VolatileSlice::as_iobufs_mut(bufs))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::io::IoSlice;
+    use std::os::unix::net::UnixStream;
+
+    use tempfile::tempfile;
+
+    use super::*;
+
+    fn recv_exact(socket: &ScmSocket<UnixStream>, mut buf: &mut [u8]) {
+        while !buf.is_empty() {
+            let (count, files) = socket
+                .recv_with_fds(buf, 0)
+                .expect("failed to receive stream data");
+            assert!(count > 0, "unexpected EOF");
+            assert!(files.is_empty());
+            buf = &mut buf[count..];
+        }
+    }
+
+    #[test]
+    fn unix_stream_header_and_body_are_unframed() {
+        let (client, server) = UnixStream::pair().expect("failed to create socket pair");
+        let client = ScmSocket::try_from(client).expect("failed to create client ScmSocket");
+        let server = ScmSocket::try_from(server).expect("failed to create server ScmSocket");
+        let file = tempfile().expect("failed to create descriptor payload");
+        let header = [0x11; 12];
+        let body = [0x22; 8];
+
+        let count = client
+            .send_vectored_with_fds(
+                &[IoSlice::new(&header), IoSlice::new(&body)],
+                &[file.as_raw_descriptor()],
+            )
+            .expect("failed to send stream message");
+        assert_eq!(count, header.len() + body.len());
+
+        let mut received_header = [0; 12];
+        let (count, files) = server
+            .recv_with_fds(&mut received_header, 1)
+            .expect("failed to receive stream header");
+        assert_eq!(count, received_header.len());
+        assert_eq!(files.len(), 1);
+        assert_eq!(received_header, header);
+
+        let mut received_body = [0; 8];
+        recv_exact(&server, &mut received_body);
+        assert_eq!(received_body, body);
     }
 }
 

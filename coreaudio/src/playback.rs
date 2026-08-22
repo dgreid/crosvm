@@ -168,10 +168,8 @@ fn create_output_audio_unit(
 
         let device = CoreAudioDevice { audio_unit };
 
-        let asbd = AudioStreamBasicDescription::float32_interleaved(
-            sample_rate as f64,
-            channels as u32,
-        );
+        let asbd =
+            AudioStreamBasicDescription::float32_interleaved(sample_rate as f64, channels as u32);
 
         let status = AudioUnitSetProperty(
             audio_unit,
@@ -232,14 +230,11 @@ fn make_stream(
     let ring_capacity = 4 * num_channels * buffer_size * 4;
     let ring_buffer = Arc::new(RingBuffer::new(ring_capacity));
 
-    let (device, callback_data) =
-        create_output_audio_unit(frame_rate, num_channels, &ring_buffer)?;
+    let (device, callback_data) = create_output_audio_unit(frame_rate, num_channels, &ring_buffer)?;
 
     let au = device.audio_unit;
 
-    let interval = Duration::from_millis(
-        (buffer_size as u64) * 1000 / (frame_rate as u64),
-    );
+    let interval = Duration::from_nanos((buffer_size as u64) * 1_000_000_000 / (frame_rate as u64));
 
     let max_samples = buffer_size * num_channels;
 
@@ -279,13 +274,7 @@ impl StreamSource for CoreAudioStreamSource {
         frame_rate: u32,
         buffer_size: usize,
         _ex: &dyn audio_streams::AudioStreamsExecutor,
-    ) -> Result<
-        (
-            Box<dyn StreamControl>,
-            Box<dyn AsyncPlaybackBufferStream>,
-        ),
-        BoxError,
-    > {
+    ) -> Result<(Box<dyn StreamControl>, Box<dyn AsyncPlaybackBufferStream>), BoxError> {
         let (control, stream) = make_stream(num_channels, format, frame_rate, buffer_size)?;
         Ok((Box::new(control), Box::new(stream)))
     }
@@ -331,9 +320,7 @@ impl StreamSource for CoreAudioStreamSource {
 }
 
 impl PlaybackBufferStream for CoreAudioPlaybackStream {
-    fn next_playback_buffer<'b, 's: 'b>(
-        &'s mut self,
-    ) -> Result<PlaybackBuffer<'b>, BoxError> {
+    fn next_playback_buffer<'b, 's: 'b>(&'s mut self) -> Result<PlaybackBuffer<'b>, BoxError> {
         if let Some(start_time) = self.start_time {
             let elapsed = start_time.elapsed();
             if elapsed < self.next_frame {
@@ -349,9 +336,8 @@ impl PlaybackBufferStream for CoreAudioPlaybackStream {
         // slice (for writing) and self (as BufferCommit) to PlaybackBuffer::new.
         // This is the same pattern used by win_audio's DeviceRendererWrapper.
         // The invariant: commit() only reads from self.buffer, never writes.
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.buffer.len())
-        };
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.buffer.len()) };
         Ok(PlaybackBuffer::new(self.frame_size, slice, self)?)
     }
 }
@@ -374,9 +360,8 @@ impl AsyncPlaybackBufferStream for CoreAudioPlaybackStream {
         }
 
         // SAFETY: Same aliasing pattern as the sync path above.
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.buffer.len())
-        };
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.buffer.len()) };
         Ok(AsyncPlaybackBuffer::new(self.frame_size, slice, self)?)
     }
 }

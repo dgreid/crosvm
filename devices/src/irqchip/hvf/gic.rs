@@ -8,7 +8,6 @@
 //! to boot and receive timer interrupts. It emulates:
 //! - Distributor (GICD) - manages SPIs (Shared Peripheral Interrupts)
 //! - Redistributor (GICR) - per-CPU interface for PPIs and SGIs
-//!
 // NOTE: Atomic operations throughout use SeqCst ordering. While Acquire/Release
 // would be sufficient for the cross-VCPU publish/consume pattern, SeqCst is used
 // consistently for simplicity and to avoid subtle ordering bugs. This can be
@@ -270,7 +269,8 @@ impl GicCpuInterface {
 
         // Move interrupt to active state
         self.active_intid.store(intid, Ordering::Release);
-        self.running_priority.store(pending_priority, Ordering::Release);
+        self.running_priority
+            .store(pending_priority, Ordering::Release);
 
         intid
     }
@@ -282,8 +282,10 @@ impl GicCpuInterface {
     pub fn end_of_interrupt(&self, intid: u32) {
         let active = self.active_intid.load(Ordering::Acquire);
         if active == intid {
-            self.active_intid.store(GIC_SPURIOUS_INTID, Ordering::Release);
-            self.running_priority.store(GIC_IDLE_PRIORITY, Ordering::Release);
+            self.active_intid
+                .store(GIC_SPURIOUS_INTID, Ordering::Release);
+            self.running_priority
+                .store(GIC_IDLE_PRIORITY, Ordering::Release);
         }
     }
 
@@ -485,7 +487,11 @@ impl RedistributorState {
                 }
             }
             _ => {
-                trace!("GICR write to unhandled offset {:#x} value {:#x}", offset, value);
+                trace!(
+                    "GICR write to unhandled offset {:#x} value {:#x}",
+                    offset,
+                    value
+                );
             }
         }
     }
@@ -608,9 +614,9 @@ impl DistributorState {
             GICD_TYPER => {
                 // ITLinesNumber indicates max interrupt lines as ((ITLinesNumber+1)*32)
                 // For 32 SPIs (INTIDs 32-63), we need total lines = 64, so ITLinesNumber = 1
-                // Formula: ITLinesNumber = (total_interrupts / 32) - 1 = ((32 private + N SPIs) / 32) - 1
-                // Simplified: ITLinesNumber = NR_SPIS / 32 (since 32 private IRQs = 1 group)
-                // CPUNumber = num_cpus - 1
+                // Formula: ITLinesNumber = (total_interrupts / 32) - 1 = ((32 private + N SPIs) /
+                // 32) - 1 Simplified: ITLinesNumber = NR_SPIS / 32 (since 32
+                // private IRQs = 1 group) CPUNumber = num_cpus - 1
                 // SecurityExtn = 0 (no security)
                 // MBIS = 0, LPIS = 0
                 let it_lines = GIC_NR_SPIS / 32;
@@ -757,8 +763,13 @@ impl DistributorState {
         match offset {
             GICD_CTLR => {
                 // Allow enabling/disabling groups, but keep DS bit set
-                let new_value = (value & (GICD_CTLR_ENABLE_G0 | GICD_CTLR_ENABLE_G1NS |
-                    GICD_CTLR_ENABLE_G1S | GICD_CTLR_ARE_S | GICD_CTLR_ARE_NS)) | GICD_CTLR_DS;
+                let new_value = (value
+                    & (GICD_CTLR_ENABLE_G0
+                        | GICD_CTLR_ENABLE_G1NS
+                        | GICD_CTLR_ENABLE_G1S
+                        | GICD_CTLR_ARE_S
+                        | GICD_CTLR_ARE_NS))
+                    | GICD_CTLR_DS;
                 self.ctlr.store(new_value, Ordering::SeqCst);
             }
             o if o >= GICD_IGROUPR && o < GICD_IGROUPR + 0x80 => {
@@ -833,7 +844,8 @@ impl DistributorState {
                     if is_high {
                         let mask = 0x0000_0000_FFFF_FFFFu64;
                         let old = self.router[idx].load(Ordering::SeqCst);
-                        self.router[idx].store((old & mask) | ((value as u64) << 32), Ordering::SeqCst);
+                        self.router[idx]
+                            .store((old & mask) | ((value as u64) << 32), Ordering::SeqCst);
                     } else {
                         let mask = 0xFFFF_FFFF_0000_0000u64;
                         let old = self.router[idx].load(Ordering::SeqCst);
@@ -842,7 +854,11 @@ impl DistributorState {
                 }
             }
             _ => {
-                trace!("GICD write to unhandled offset {:#x} value {:#x}", offset, value);
+                trace!(
+                    "GICD write to unhandled offset {:#x} value {:#x}",
+                    offset,
+                    value
+                );
             }
         }
     }
@@ -1108,10 +1124,7 @@ mod tests {
         assert_eq!(state.pending0.load(Ordering::SeqCst), 1 << 16);
 
         state.set_ppi_pending(11);
-        assert_eq!(
-            state.pending0.load(Ordering::SeqCst),
-            (1 << 16) | (1 << 27)
-        );
+        assert_eq!(state.pending0.load(Ordering::SeqCst), (1 << 16) | (1 << 27));
     }
 
     #[test]

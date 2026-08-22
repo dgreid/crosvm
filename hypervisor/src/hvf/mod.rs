@@ -24,6 +24,7 @@ use base::Protection;
 use base::Result;
 use base::SafeDescriptor;
 use cros_fdt::Fdt;
+pub use hvf_sys::*;
 use libc::EINVAL;
 use libc::ENOTSUP;
 use snapshot::AnySnapshot;
@@ -51,8 +52,6 @@ use crate::VcpuRegAArch64;
 use crate::Vm;
 use crate::VmAArch64;
 use crate::VmCap;
-
-pub use hvf_sys::*;
 
 /// Default guest IPA (Intermediate Physical Address) size in bits.
 /// Apple Silicon supports 40-bit physical addresses for guests.
@@ -291,7 +290,9 @@ impl Vm for HvfVm {
             VmCap::EarlyInitCpuid => false,
             VmCap::ReadOnlyMemoryRegion => true,
             VmCap::MemNoncoherentDma => false,
+            VmCap::Mte => false,
             VmCap::Sve => false,
+            VmCap::NestedVirt => false,
         }
     }
 
@@ -502,11 +503,7 @@ impl VmAArch64 for HvfVm {
         &self.hvf
     }
 
-    fn load_protected_vm_firmware(
-        &self,
-        _fw_addr: GuestAddress,
-        _fw_max_size: u64,
-    ) -> Result<()> {
+    fn load_protected_vm_firmware(&self, _fw_addr: GuestAddress, _fw_max_size: u64) -> Result<()> {
         Err(Error::new(ENOTSUP))
     }
 
@@ -824,7 +821,11 @@ impl HvfVcpu {
     }
 
     /// Set a pending interrupt on the VCPU.
-    pub fn set_pending_interrupt(&self, int_type: hv_interrupt_type_t, pending: bool) -> Result<()> {
+    pub fn set_pending_interrupt(
+        &self,
+        int_type: hv_interrupt_type_t,
+        pending: bool,
+    ) -> Result<()> {
         // SAFETY: We're setting a pending interrupt on a valid VCPU
         let ret = unsafe { hv_vcpu_set_pending_interrupt(self.vcpu, int_type, pending) };
         hv_result(ret)
@@ -834,9 +835,8 @@ impl HvfVcpu {
     pub fn get_sp_el1(&self) -> Result<u64> {
         let mut value: u64 = 0;
         // SAFETY: We're reading a valid system register
-        let ret = unsafe {
-            hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_SP_EL1, &mut value)
-        };
+        let ret =
+            unsafe { hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_SP_EL1, &mut value) };
         hv_result(ret)?;
         Ok(value)
     }
@@ -855,9 +855,8 @@ impl HvfVcpu {
     /// Set MPIDR_EL1 (multiprocessor affinity register).
     pub fn set_mpidr_el1(&self, value: u64) -> Result<()> {
         // SAFETY: We're writing a valid system register
-        let ret = unsafe {
-            hv_vcpu_set_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_MPIDR_EL1, value)
-        };
+        let ret =
+            unsafe { hv_vcpu_set_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_MPIDR_EL1, value) };
         hv_result(ret)
     }
 
@@ -865,9 +864,8 @@ impl HvfVcpu {
     pub fn get_sp_el0(&self) -> Result<u64> {
         let mut value: u64 = 0;
         // SAFETY: We're reading a valid system register
-        let ret = unsafe {
-            hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_SP_EL0, &mut value)
-        };
+        let ret =
+            unsafe { hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_SP_EL0, &mut value) };
         hv_result(ret)?;
         Ok(value)
     }
@@ -885,9 +883,8 @@ impl HvfVcpu {
     /// Get TCR_EL1 (translation control register).
     pub fn get_tcr_el1(&self) -> Result<u64> {
         let mut value: u64 = 0;
-        let ret = unsafe {
-            hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_TCR_EL1, &mut value)
-        };
+        let ret =
+            unsafe { hv_vcpu_get_sys_reg(self.vcpu, hv_sys_reg_t::HV_SYS_REG_TCR_EL1, &mut value) };
         hv_result(ret)?;
         Ok(value)
     }

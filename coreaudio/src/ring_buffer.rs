@@ -80,7 +80,8 @@ impl RingBuffer {
             }
         }
 
-        self.write_idx.store(w.wrapping_add(to_write), Ordering::Release);
+        self.write_idx
+            .store(w.wrapping_add(to_write), Ordering::Release);
         to_write
     }
 
@@ -114,7 +115,8 @@ impl RingBuffer {
             }
         }
 
-        self.read_idx.store(r.wrapping_add(to_read), Ordering::Release);
+        self.read_idx
+            .store(r.wrapping_add(to_read), Ordering::Release);
         to_read
     }
 

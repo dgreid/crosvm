@@ -13,18 +13,16 @@
 
 use std::io::Write;
 
-use hypervisor::ProtectionType;
-use tempfile::tempfile;
-use tempfile::NamedTempFile;
-
 use devices::virtio::base_features;
 use devices::virtio::block::BlockAsync;
 use devices::virtio::block::DiskOption;
 use devices::virtio::console::device::ConsoleDevice;
 use devices::virtio::console::port::ConsolePort;
 use devices::virtio::DeviceType;
-use devices::virtio::Rng;
 use devices::virtio::VirtioDevice;
+use hypervisor::ProtectionType;
+use tempfile::tempfile;
+use tempfile::NamedTempFile;
 
 // =============================================================================
 // Test 3.1: Virtio Block Device Creation
@@ -69,10 +67,17 @@ fn test_virtio_block_create() {
 
     // Verify queue configuration
     let queue_sizes = block_device.queue_max_sizes();
-    assert!(!queue_sizes.is_empty(), "Block device should have at least one queue");
+    assert!(
+        !queue_sizes.is_empty(),
+        "Block device should have at least one queue"
+    );
 
     // Verify features are non-zero (should have base features at minimum)
-    assert_ne!(block_device.features(), 0, "Block device should have features");
+    assert_ne!(
+        block_device.features(),
+        0,
+        "Block device should have features"
+    );
 
     // Verify config space is readable
     let mut config_data = [0u8; 8];
@@ -195,7 +200,12 @@ fn test_virtio_console_multiport() {
         let input = Box::new(tempfile().expect("Failed to create input tempfile"));
         let output: Box<dyn Write + Send> =
             Box::new(tempfile().expect("Failed to create output tempfile"));
-        ports.push(ConsolePort::new(Some(input), Some(output), None, Vec::new()));
+        ports.push(ConsolePort::new(
+            Some(input),
+            Some(output),
+            None,
+            Vec::new(),
+        ));
     }
 
     // Create multi-port console
@@ -265,59 +275,6 @@ fn test_virtio_console_keep_rds() {
 }
 
 // =============================================================================
-// Test 3.3: Virtio RNG Device Creation
-// =============================================================================
-
-#[test]
-fn test_virtio_rng_create() {
-    let features = base_features(ProtectionType::Unprotected);
-    let rng_device = Rng::new(features).expect("Failed to create Rng device");
-
-    // Verify device type
-    assert_eq!(rng_device.device_type(), DeviceType::Rng);
-
-    // Verify queue configuration
-    // RNG device has exactly 1 queue
-    let queue_sizes = rng_device.queue_max_sizes();
-    assert_eq!(
-        queue_sizes.len(),
-        1,
-        "RNG device should have exactly 1 queue"
-    );
-    assert_eq!(queue_sizes[0], 256, "RNG queue size should be 256");
-
-    // Verify features
-    assert_ne!(rng_device.features(), 0, "RNG device should have features");
-}
-
-#[test]
-fn test_virtio_rng_keep_rds() {
-    let features = base_features(ProtectionType::Unprotected);
-    let rng_device = Rng::new(features).expect("Failed to create Rng device");
-
-    // RNG device should have an empty keep_rds list (no external file descriptors)
-    let rds = rng_device.keep_rds();
-    assert!(
-        rds.is_empty(),
-        "RNG device should have no raw descriptors to keep"
-    );
-}
-
-#[test]
-fn test_virtio_rng_features() {
-    let base = base_features(ProtectionType::Unprotected);
-    let rng_device = Rng::new(base).expect("Failed to create Rng device");
-
-    // RNG device features should match the base features passed in
-    // (RNG doesn't add any device-specific features)
-    assert_eq!(
-        rng_device.features(),
-        base,
-        "RNG features should match base features"
-    );
-}
-
-// =============================================================================
 // Test 3.4: Vhost-User Net Device Setup
 // =============================================================================
 // Note: On macOS, the vhost-user net backend is not fully functional because
@@ -360,10 +317,6 @@ fn test_multiple_devices_coexist() {
     // Verify that multiple virtio devices can be created simultaneously
     let features = base_features(ProtectionType::Unprotected);
 
-    // Create RNG device
-    let rng_device = Rng::new(features).expect("Failed to create Rng device");
-    assert_eq!(rng_device.device_type(), DeviceType::Rng);
-
     // Create block device
     let temp_file = NamedTempFile::new().expect("Failed to create temp file");
     temp_file
@@ -387,8 +340,9 @@ fn test_multiple_devices_coexist() {
     let console = ConsoleDevice::new_single_port(ProtectionType::Unprotected, port);
     assert_eq!(console.max_queues(), 2);
 
-    // All devices should have different device types
-    assert_ne!(rng_device.device_type(), block_device.device_type());
+    // The public devices have distinct roles and queue layouts.
+    assert_eq!(block_device.device_type(), DeviceType::Block);
+    assert_ne!(console.max_queues(), block_device.queue_max_sizes().len());
 }
 
 #[test]
@@ -396,13 +350,6 @@ fn test_device_features_version_1() {
     // All virtio devices should have VIRTIO_F_VERSION_1 set
     const VIRTIO_F_VERSION_1: u64 = 1 << 32;
     let features = base_features(ProtectionType::Unprotected);
-
-    // RNG
-    let rng = Rng::new(features).expect("Failed to create Rng");
-    assert!(
-        rng.features() & VIRTIO_F_VERSION_1 != 0,
-        "RNG should have VIRTIO_F_VERSION_1"
-    );
 
     // Block
     let temp_file = NamedTempFile::new().expect("Failed to create temp file");
@@ -446,16 +393,12 @@ fn test_device_suspend_feature() {
         "Base features should include VIRTIO_F_SUSPEND"
     );
 
-    // RNG should have it
-    let rng = Rng::new(features).expect("Failed to create Rng");
-    assert!(
-        rng.features() & VIRTIO_F_SUSPEND != 0,
-        "RNG should have VIRTIO_F_SUSPEND"
-    );
-
     // Block should have it
     let temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file.as_file().set_len(4096).expect("Failed to set size");
+    temp_file
+        .as_file()
+        .set_len(4096)
+        .expect("Failed to set size");
     let disk_option = DiskOption {
         path: temp_file.path().to_path_buf(),
         ..Default::default()

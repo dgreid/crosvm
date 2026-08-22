@@ -17,13 +17,13 @@ use std::mem;
 use std::mem::size_of;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
+use std::ops::Deref;
 use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStringExt;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
-use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 use std::ptr::null_mut;
@@ -52,9 +52,10 @@ use log::warn;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::AsRawDescriptor;
 use crate::descriptor::FromRawDescriptor;
 use crate::descriptor::IntoRawDescriptor;
+use crate::unix::ScmSocketTransport;
+use crate::AsRawDescriptor;
 use crate::Error;
 use crate::RawDescriptor;
 use crate::SafeDescriptor;
@@ -63,11 +64,7 @@ use crate::ScmSocket;
 /// Length of the message length prefix in bytes
 const LENGTH_PREFIX_SIZE: usize = 4;
 
-fn socket(
-    domain: c_int,
-    sock_type: c_int,
-    protocol: c_int,
-) -> io::Result<SafeDescriptor> {
+fn socket(domain: c_int, sock_type: c_int, protocol: c_int) -> io::Result<SafeDescriptor> {
     // SAFETY:
     // Socket initialization doesn't touch memory.
     match unsafe { libc::socket(domain, sock_type, protocol) } {
@@ -142,7 +139,13 @@ pub(in crate::sys) fn sockaddrv6_to_lib_c(s: &SocketAddrV6) -> sockaddr_in6 {
 }
 
 macro_rules! ScmSocketTryFrom {
-    ($name:ident) => {
+    ($name:ident, $uses_length_prefix:expr) => {
+        impl ScmSocketTransport for $name {
+            fn uses_length_prefix() -> bool {
+                $uses_length_prefix
+            }
+        }
+
         impl TryFrom<$name> for ScmSocket<$name> {
             type Error = io::Error;
 
@@ -171,10 +174,10 @@ macro_rules! ScmSocketTryFrom {
     };
 }
 
-ScmSocketTryFrom!(UnixDatagram);
-ScmSocketTryFrom!(UnixListener);
-ScmSocketTryFrom!(UnixSeqpacket);
-ScmSocketTryFrom!(UnixStream);
+ScmSocketTryFrom!(UnixDatagram, false);
+ScmSocketTryFrom!(UnixListener, false);
+ScmSocketTryFrom!(UnixSeqpacket, true);
+ScmSocketTryFrom!(UnixStream, false);
 
 fn cloexec_or_close<Raw: AsRawDescriptor>(raw: Raw) -> io::Result<Raw> {
     // SAFETY: `raw` owns a file descriptor, there are no actions with memory.
@@ -402,10 +405,8 @@ impl UnixSeqpacket {
     /// Write data from a given buffer to the socket with length prefix.
     ///
     /// This method uses a 4-byte little-endian length prefix framing protocol to emulate
-    /// SOCK_SEQPACKET message boundaries over SOCK_STREAM. Do NOT mix calls to this method
-    /// with `raw_sendmsg` (used by `ScmSocket`/`send_with_fds`), which uses its own independent
-    /// length prefix framing. Mixing the two framing protocols on the same socket will corrupt
-    /// the message stream.
+    /// SOCK_SEQPACKET message boundaries over SOCK_STREAM. `ScmSocket<UnixSeqpacket>` uses the
+    /// same framing when sending file descriptors.
     ///
     /// # Arguments
     /// * `buf` - A reference to the data buffer.
@@ -458,13 +459,8 @@ impl UnixSeqpacket {
 
             // SAFETY: adjusted_iov points to valid iovec entries and iov_count matches the
             // number of valid entries.
-            let ret = unsafe {
-                libc::writev(
-                    self.as_raw_descriptor(),
-                    adjusted_iov.as_ptr(),
-                    iov_count,
-                )
-            };
+            let ret =
+                unsafe { libc::writev(self.as_raw_descriptor(), adjusted_iov.as_ptr(), iov_count) };
             if ret < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -487,10 +483,7 @@ impl UnixSeqpacket {
     /// Read a complete message from the socket.
     ///
     /// This method reads messages framed with a 4-byte little-endian length prefix, matching
-    /// the protocol used by `send()`. Do NOT mix calls to this method with `raw_recvmsg`
-    /// (used by `ScmSocket`/`recv_with_fds`), which uses its own independent length prefix
-    /// framing. Mixing the two framing protocols on the same socket will corrupt the message
-    /// stream.
+    /// the protocol used by `send()` and `ScmSocket<UnixSeqpacket>`.
     ///
     /// # Arguments
     /// * `buf` - A mut reference to the data buffer.
@@ -953,13 +946,16 @@ mod tests {
 
     #[test]
     fn sockaddr_un_long_input_err() {
-        let res = sockaddr_un(Path::new(&"a".repeat(108)));
+        let (addr, _) = sockaddr_un(Path::new("")).expect("sockaddr_un failed");
+        let res = sockaddr_un(Path::new(&"a".repeat(addr.sun_path.len())));
         assert!(res.is_err());
     }
 
     #[test]
     fn sockaddr_un_long_input_pass() {
-        let _res = sockaddr_un(Path::new(&"a".repeat(107))).expect("sockaddr_un failed");
+        let (addr, _) = sockaddr_un(Path::new("")).expect("sockaddr_un failed");
+        let _res = sockaddr_un(Path::new(&"a".repeat(addr.sun_path.len() - 1)))
+            .expect("sockaddr_un failed");
     }
 
     #[test]

@@ -201,3 +201,25 @@ impl VirtioDeviceModule for VirtioRngModule {
         jail::simple_jail(Some(jail_config), "rng_device")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_rng() -> Rng {
+        Rng {
+            worker_thread: None,
+            virtio_features: 0x1234_5678,
+        }
+    }
+
+    #[test]
+    fn device_properties() {
+        let rng = create_rng();
+
+        assert_eq!(rng.device_type(), DeviceType::Rng);
+        assert_eq!(rng.queue_max_sizes(), &[QUEUE_SIZE]);
+        assert_eq!(rng.features(), 0x1234_5678);
+        assert!(rng.keep_rds().is_empty());
+    }
+}

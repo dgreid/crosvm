@@ -18,27 +18,26 @@ use base::info;
 use base::Error;
 use base::Event;
 use base::Result;
-use hypervisor::DeviceKind;
-use hypervisor::IrqRoute;
-use hypervisor::MPState;
-use hypervisor::VcpuArch;
-use resources::SystemAllocator;
-use sync::Mutex;
-
 pub use gic::DistributorState;
 pub use gic::GicCpuInterface;
 pub use gic::GicDistributor;
 pub use gic::GicRedistributor;
 pub use gic::RedistributorState;
-pub use gic::GIC_SPURIOUS_INTID;
 pub use gic::GICD_SIZE;
 pub use gic::GICR_SIZE;
 pub use gic::GIC_NR_PPIS;
 pub use gic::GIC_NR_SGIS;
 pub use gic::GIC_NR_SPIS;
 pub use gic::GIC_SPI_BASE;
+pub use gic::GIC_SPURIOUS_INTID;
 pub use gic::VTIMER_INTID;
 pub use gic::VTIMER_PPI;
+use hypervisor::DeviceKind;
+use hypervisor::IrqRoute;
+use hypervisor::MPState;
+use hypervisor::VcpuArch;
+use resources::SystemAllocator;
+use sync::Mutex;
 
 use crate::Bus;
 use crate::IrqChip;
@@ -127,9 +126,7 @@ impl HvfIrqChip {
                 Arc::new(Mutex::new(GicRedistributor::new(cpu_id, is_last)))
             })
             .collect();
-        let cpu_interfaces: Vec<_> = (0..num_vcpus)
-            .map(|_| GicCpuInterface::new())
-            .collect();
+        let cpu_interfaces: Vec<_> = (0..num_vcpus).map(|_| GicCpuInterface::new()).collect();
 
         Ok(Self {
             num_vcpus,
@@ -164,7 +161,11 @@ impl HvfIrqChip {
         for cpu_id in 0..self.num_vcpus {
             let addr = redist_base + (cpu_id as u64 * AARCH64_GIC_REDIST_SIZE);
             mmio_bus
-                .insert(self.redistributors[cpu_id].clone(), addr, AARCH64_GIC_REDIST_SIZE)
+                .insert(
+                    self.redistributors[cpu_id].clone(),
+                    addr,
+                    AARCH64_GIC_REDIST_SIZE,
+                )
                 .map_err(|e| {
                     error!("Failed to insert GIC redistributor {}: {:?}", cpu_id, e);
                     Error::new(libc::ENOMEM)
@@ -192,7 +193,10 @@ impl HvfIrqChip {
     /// Set an SGI as pending for a specific CPU (for IPI delivery).
     pub fn set_sgi_pending(&self, cpu_id: usize, sgi: u32) {
         if cpu_id < self.redistributors.len() {
-            self.redistributors[cpu_id].lock().state().set_sgi_pending(sgi);
+            self.redistributors[cpu_id]
+                .lock()
+                .state()
+                .set_sgi_pending(sgi);
         }
     }
 
@@ -207,14 +211,20 @@ impl HvfIrqChip {
     /// virtual timer PPI as pending in the redistributor.
     pub fn set_ppi_pending(&self, cpu_id: usize, ppi: u32) {
         if cpu_id < self.redistributors.len() {
-            self.redistributors[cpu_id].lock().state().set_ppi_pending(ppi);
+            self.redistributors[cpu_id]
+                .lock()
+                .state()
+                .set_ppi_pending(ppi);
         }
     }
 
     /// Clear a PPI pending state for a specific CPU.
     pub fn clear_ppi_pending(&self, cpu_id: usize, ppi: u32) {
         if cpu_id < self.redistributors.len() {
-            self.redistributors[cpu_id].lock().state().clear_ppi_pending(ppi);
+            self.redistributors[cpu_id]
+                .lock()
+                .state()
+                .clear_ppi_pending(ppi);
         }
     }
 
@@ -282,7 +292,12 @@ impl HvfIrqChip {
         }
 
         // Check SPIs in the distributor
-        if let Some((intid, prio)) = self.distributor.lock().state().get_highest_priority_pending_spi() {
+        if let Some((intid, prio)) = self
+            .distributor
+            .lock()
+            .state()
+            .get_highest_priority_pending_spi()
+        {
             match best {
                 None => best = Some((intid, prio)),
                 Some((_, best_prio)) if prio < best_prio => best = Some((intid, prio)),
@@ -317,10 +332,11 @@ impl HvfIrqChip {
             if acked_intid < gic::GIC_SPI_BASE {
                 // Private interrupt (SGI/PPI) - clear in redistributor
                 if let Some(redist) = self.redistributors.get(cpu_id) {
-                    redist.lock().state().pending0.fetch_and(
-                        !(1 << acked_intid),
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
+                    redist
+                        .lock()
+                        .state()
+                        .pending0
+                        .fetch_and(!(1 << acked_intid), std::sync::atomic::Ordering::SeqCst);
                 }
             } else {
                 // SPI - clear in distributor
@@ -396,7 +412,10 @@ impl HvfIrqChip {
 
         info!(
             "IRQ diagnosis CPU {}: SPI pending={:#x}, enabled={:#x}, deliverable={:#x}",
-            cpu_id, pending, enabled, pending & enabled
+            cpu_id,
+            pending,
+            enabled,
+            pending & enabled
         );
 
         if let Some((intid, priority)) = self.get_highest_priority_pending(cpu_id) {
@@ -414,17 +433,13 @@ impl HvfIrqChip {
                     );
                 }
                 if priority >= pmr {
-                    info!(
-                        "IRQ blocked: priority {:#x} >= PMR {:#x}",
-                        priority, pmr
-                    );
+                    info!("IRQ blocked: priority {:#x} >= PMR {:#x}", priority, pmr);
                 }
             }
         } else {
             info!("IRQ diagnosis CPU {}: no pending interrupt", cpu_id);
         }
     }
-
 }
 
 impl IrqChip for HvfIrqChip {

@@ -81,6 +81,8 @@ pub use self::halla::HallaKernelIrqChip;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod hvf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use self::hvf::gic_redist_base;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use self::hvf::DistributorState;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use self::hvf::GicCpuInterface;
@@ -101,15 +103,13 @@ pub use self::hvf::AARCH64_GIC_NR_SPIS;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use self::hvf::AARCH64_GIC_REDIST_SIZE;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub use self::hvf::HVF_GIC_REDIST_REGION_SIZE;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use self::hvf::GIC_SPI_BASE;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use self::hvf::GIC_SPURIOUS_INTID;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub use self::hvf::VTIMER_PPI;
+pub use self::hvf::HVF_GIC_REDIST_REGION_SIZE;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub use self::hvf::gic_redist_base;
+pub use self::hvf::VTIMER_PPI;
 
 pub type IrqEventIndex = usize;
 
