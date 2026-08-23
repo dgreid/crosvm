@@ -2111,6 +2111,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "tempfile",
  "thiserror 1.0.38",
  "virtio_sys",
  "winapi",
