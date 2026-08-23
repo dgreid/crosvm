@@ -46,7 +46,14 @@ use cros_async::ExecutorKind;
 use device_virtio_block::DiskOption;
 #[cfg(all(unix, feature = "net"))]
 use device_virtio_net::NetParameters;
-#[cfg(all(unix, feature = "net"))]
+#[cfg(all(
+    any(
+        target_os = "android",
+        target_os = "linux",
+        all(target_os = "macos", test)
+    ),
+    feature = "net"
+))]
 use device_virtio_net::NetParametersMode;
 use device_virtio_scsi::ScsiOption;
 #[cfg(feature = "audio")]
@@ -1323,7 +1330,7 @@ pub struct RunCommand {
     /// connections.
     pub host_guid: Option<String>,
 
-    #[cfg(all(unix, feature = "net"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
     #[argh(option, arg_name = "IP")]
     /// (DEPRECATED): Use --net.
     /// IP address to assign to host tap interface
@@ -1408,7 +1415,7 @@ pub struct RunCommand {
     /// and stderr/stdout will be uncaptured
     pub logs_directory: Option<String>,
 
-    #[cfg(all(unix, feature = "net"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
     #[argh(option, arg_name = "MAC", long = "mac")]
     /// (DEPRECATED): Use --net.
     /// MAC address for VM
@@ -1477,13 +1484,20 @@ pub struct RunCommand {
     pub nested: Option<NestedConfig>,
 
     #[cfg(all(unix, feature = "net"))]
-    #[argh(
-        option,
-        arg_name = "(tap-name=TAP_NAME,mac=MAC_ADDRESS|tap-fd=TAP_FD,mac=MAC_ADDRESS|host-ip=IP,netmask=NETMASK,mac=MAC_ADDRESS),vhost-net=VHOST_NET,vq-pairs=N,pci-address=ADDR"
+    #[cfg_attr(
+        any(target_os = "android", target_os = "linux"),
+        argh(
+            option,
+            arg_name = "(tap-name=TAP_NAME,mac=MAC_ADDRESS|tap-fd=TAP_FD,mac=MAC_ADDRESS|host-ip=IP,netmask=NETMASK,mac=MAC_ADDRESS),vhost-net=VHOST_NET,vq-pairs=N,pci-address=ADDR"
+        )
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        argh(option, arg_name = "socket-vmnet=PATH[,mac=MAC_ADDRESS]")
     )]
     /// comma separated key=value pairs for setting up a network
     /// device.
-    /// Possible key values:
+    /// Possible key values on Linux and Android:
     ///   (
     ///      tap-name=STRING - name of a configured persistent TAP
     ///                          interface to use for networking.
@@ -1522,17 +1536,22 @@ pub struct RunCommand {
     ///                       If not set or set to false, it will disable this feature.
     ///                       Default: false.  [Optional]
     ///
-    /// Either one tap_name, one tap_fd or a triplet of host_ip,
-    /// netmask and mac must be specified.
+    /// On macOS:
+    ///   socket-vmnet=PATH - path to a socket_vmnet socket.
+    ///   mac=STRING        - MAC address for VM. [Optional]
+    ///
+    /// On Linux and Android, either one tap_name, one tap_fd or a triplet of
+    /// host_ip, netmask and mac must be specified. On macOS, socket_vmnet must
+    /// be specified.
     pub net: Vec<NetParameters>,
 
-    #[cfg(all(unix, feature = "net"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
     #[argh(option, arg_name = "N")]
     /// (DEPRECATED): Use --net.
     /// virtio net virtual queue pairs. (default: 1)
     pub net_vq_pairs: Option<u16>,
 
-    #[cfg(all(unix, feature = "net"))]
+    #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
     #[argh(option, arg_name = "NETMASK")]
     /// (DEPRECATED): Use --net.
     /// netmask for VM subnet
@@ -2986,7 +3005,13 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
         }
 
-        #[cfg(all(unix, feature = "net"))]
+        // macOS uses the raw virtio-net MMIO path, which consumes `cfg.net` directly.
+        #[cfg(all(target_os = "macos", feature = "net"))]
+        {
+            cfg.net = cmd.net;
+        }
+
+        #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
         let mut net_params = cmd.net;
 
         // Linux-only: deprecated vhost-net and tap options
@@ -3089,7 +3114,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
         }
 
-        #[cfg(all(unix, feature = "net"))]
+        #[cfg(all(any(target_os = "android", target_os = "linux"), feature = "net"))]
         {
             // The number of vq pairs on a network device shall never exceed the number of vcpu
             // cores. Fix that up if needed.
@@ -3373,6 +3398,72 @@ mod tests {
         assert_eq!(format_disk_letter("/dev/sd", 701), "/dev/sdzz");
         assert_eq!(format_disk_letter("/dev/sd", 702), "/dev/sdaaa");
         assert_eq!(format_disk_letter("/dev/sd", 703), "/dev/sdaab");
+    }
+
+    #[cfg(all(target_os = "macos", feature = "net"))]
+    #[test]
+    fn parse_socket_vmnet_cli() {
+        use argh::FromArgs;
+
+        let cmd = RunCommand::from_args(
+            &[],
+            &[
+                "--net",
+                "socket-vmnet=/var/run/socket_vmnet,mac=3d:70:eb:61:1a:91",
+                "/dev/null",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            cmd.net,
+            vec![NetParameters {
+                mode: NetParametersMode::SocketVmnet {
+                    socket_vmnet: PathBuf::from("/var/run/socket_vmnet"),
+                    mac: Some(net_util::MacAddress::from_str("3d:70:eb:61:1a:91").unwrap(),),
+                },
+                vq_pairs: None,
+                packed_queue: false,
+                pci_address: None,
+                mrg_rxbuf: false,
+            }]
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "net"))]
+    #[test]
+    fn reject_socket_vmnet_multiqueue_before_vcpu_normalization() {
+        use argh::FromArgs;
+
+        let cmd = RunCommand::from_args(
+            &[],
+            &[
+                "--net",
+                "socket-vmnet=/var/run/socket_vmnet,vq-pairs=2",
+                "/dev/null",
+            ],
+        )
+        .unwrap();
+
+        let result = crate::crosvm::config::Config::try_from(cmd);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("net device 0: macOS socket-vmnet supports only one queue pair")
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "net"))]
+    #[test]
+    fn reject_legacy_network_cli() {
+        use argh::FromArgs;
+
+        for arguments in [
+            &["--host-ip", "192.168.1.1", "/dev/null"][..],
+            &["--netmask", "255.255.255.0", "/dev/null"][..],
+            &["--mac", "3d:70:eb:61:1a:91", "/dev/null"][..],
+            &["--net-vq-pairs", "2", "/dev/null"][..],
+        ] {
+            assert!(RunCommand::from_args(&[], arguments).is_err());
+        }
     }
 
     #[test]

@@ -71,6 +71,10 @@ use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::snd::parameters::StreamSourceBackend;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::sys::StreamSourceBackend as SysStreamSourceBackend;
+#[cfg(feature = "net")]
+use devices::virtio::Net;
+#[cfg(feature = "net")]
+use devices::virtio::NetParametersMode;
 use devices::Bus;
 use devices::BusDevice;
 use devices::BusType;
@@ -93,6 +97,8 @@ use hypervisor::VcpuAArch64;
 use hypervisor::VcpuExit;
 use hypervisor::VcpuRegAArch64;
 use hypervisor::VmAArch64;
+#[cfg(feature = "net")]
+use net_util::sys::macos::SocketVmnet;
 use sync::Mutex;
 use vm_control::VmRequest;
 use vm_control::VmResponse;
@@ -386,6 +392,35 @@ fn handle_control_connection(socket: UnixSeqpacket, coordinator: &VcpuCoordinato
     }
 }
 
+struct TerminalModeGuard {
+    restored: bool,
+}
+
+impl TerminalModeGuard {
+    fn new() -> Result<Self> {
+        stdin()
+            .set_raw_mode()
+            .context("failed to set terminal raw mode")?;
+        Ok(Self { restored: false })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        stdin()
+            .set_canon_mode()
+            .context("failed to restore canonical mode for terminal")?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = stdin().set_canon_mode();
+        }
+    }
+}
+
 /// Run a VM with the given configuration.
 ///
 /// This is the main entry point for running a VM on macOS using Hypervisor.framework.
@@ -393,10 +428,9 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     info!("Starting VM on macOS with Hypervisor.framework");
 
     // Put the terminal into raw mode so keystrokes are delivered to the guest
-    // immediately without line buffering or local echo.
-    stdin()
-        .set_raw_mode()
-        .context("failed to set terminal raw mode")?;
+    // immediately without line buffering or local echo. The guard restores it
+    // on every return path, including startup failures.
+    let mut terminal_mode_guard = TerminalModeGuard::new()?;
 
     // Install a panic hook that restores the terminal to canonical mode before
     // aborting. Without this, a panic leaves the terminal in raw mode and the
@@ -572,6 +606,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     // Create a minimal device tree for the kernel
     // Pass the number of virtio-mmio devices so nodes can be added to FDT
     let mut num_mmio_devices = cfg.disks.len() + cfg.shared_dirs.len();
+    #[cfg(feature = "net")]
+    {
+        num_mmio_devices += cfg.net.len();
+    }
     #[cfg(feature = "audio")]
     {
         num_mmio_devices += 1; // virtio-snd
@@ -721,6 +759,63 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         );
 
         // Advance to next slot
+        next_mmio_addr += VIRTIO_MMIO_SIZE;
+        next_irq += 1;
+    }
+
+    // Set up network devices after block devices so adding networking does not
+    // change the existing virtio block device ordering.
+    #[cfg(feature = "net")]
+    let mut net_irq_events: Vec<(IrqEdgeEvent, u32)> = Vec::new();
+
+    #[cfg(feature = "net")]
+    for (i, net) in cfg.net.iter().enumerate() {
+        let (tap, mac) = match &net.mode {
+            NetParametersMode::SocketVmnet { socket_vmnet, mac } => {
+                let tap = SocketVmnet::connect(socket_vmnet.as_path()).with_context(|| {
+                    format!(
+                        "failed to connect network device {i} to socket-vmnet at {}",
+                        socket_vmnet.display()
+                    )
+                })?;
+                (tap, *mac)
+            }
+            _ => bail!("network device {i} is not supported on macOS"),
+        };
+
+        let net_device = Net::new_raw(
+            base_features(ProtectionType::Unprotected),
+            tap,
+            mac,
+            net.pci_address,
+        )
+        .with_context(|| format!("failed to create network device {i}"))?;
+        let mut mmio_device = VirtioMmioDevice::new(guest_mem.clone(), Box::new(net_device), false)
+            .with_context(|| format!("failed to create virtio-mmio network device {i}"))?;
+
+        let mmio_addr = next_mmio_addr;
+        let irq = next_irq;
+        let irq_evt = IrqEdgeEvent::new()
+            .with_context(|| format!("failed to create IRQ event for network device {i}"))?;
+        let handler_irq_evt = irq_evt
+            .try_clone()
+            .with_context(|| format!("failed to clone IRQ event for network device {i}"))?;
+
+        mmio_device.assign_irq(&irq_evt, irq);
+        mmio_bus
+            .insert(
+                Arc::new(Mutex::new(mmio_device)),
+                mmio_addr,
+                VIRTIO_MMIO_SIZE,
+            )
+            .with_context(|| format!("failed to insert network device {i} into MMIO bus"))?;
+        net_irq_events.push((handler_irq_evt, irq));
+
+        info!(
+            "Network device {} added at MMIO address {:#x} with IRQ {}",
+            i, mmio_addr, irq
+        );
+
         next_mmio_addr += VIRTIO_MMIO_SIZE;
         next_irq += 1;
     }
@@ -1023,6 +1118,10 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         .filter_map(|(evt, irq)| evt.try_clone().ok().map(|e| (e, *irq)))
         .collect::<Vec<_>>();
 
+    // Add network device interrupt events.
+    #[cfg(feature = "net")]
+    irq_events_for_handler.extend(net_irq_events);
+
     // Add virtiofs device interrupt events
     for (evt, irq) in &fs_irq_events {
         if let Ok(cloned) = evt.try_clone() {
@@ -1091,9 +1190,9 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     let gpu_exit_thread: Option<JoinHandle<()>> = None;
 
     let irq_handler_thread = if !irq_events_for_handler.is_empty() {
-        // TODO: Replace polling loop with WaitContext-based event multiplexing.
-        // Currently each event is polled sequentially with 10ms timeouts, which
-        // scales poorly with the number of devices.
+        // The userspace GIC currently exposes pending SPIs to every VCPU instead
+        // of honoring IROUTER. Keep the proven serialized polling behavior;
+        // batched delivery can expose an SMP interrupt-acknowledgement race.
         Some(thread::Builder::new()
             .name("irq-handler".to_string())
             .spawn(move || {
@@ -1262,9 +1361,7 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     info!("VM execution completed with state: {:?}", exit_state);
 
     // Restore terminal to canonical mode before exiting.
-    stdin()
-        .set_canon_mode()
-        .context("failed to restore canonical mode for terminal")?;
+    terminal_mode_guard.restore()?;
 
     Ok(exit_state)
 }
@@ -1417,7 +1514,7 @@ fn create_minimal_fdt(
         ],
     )?;
 
-    // Virtio-MMIO device nodes (block devices + virtiofs devices)
+    // Virtio-MMIO device nodes
     // Each device gets its own SPI, starting after serial IRQ (0)
     for i in 0..num_mmio_devices {
         let mmio_addr = AARCH64_MMIO_BASE + (i as u64 * VIRTIO_MMIO_SIZE);

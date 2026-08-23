@@ -7,6 +7,8 @@ use std::str::FromStr;
 
 use anyhow::bail;
 use anyhow::Context;
+#[cfg(feature = "net")]
+use devices::virtio::NetParametersMode;
 use devices::SerialParameters;
 use serde::Deserialize;
 use serde::Serialize;
@@ -72,6 +74,109 @@ pub fn check_serial_params(_serial_params: &SerialParameters) -> Result<(), Stri
     Ok(())
 }
 
-pub fn validate_config(_cfg: &mut Config) -> std::result::Result<(), String> {
+pub fn validate_config(
+    #[allow(unused_variables)] cfg: &mut Config,
+) -> std::result::Result<(), String> {
+    #[cfg(feature = "net")]
+    for (index, net) in cfg.net.iter().enumerate() {
+        if !matches!(&net.mode, NetParametersMode::SocketVmnet { .. }) {
+            return Err(format!(
+                "net device {index}: macOS only supports socket-vmnet networking"
+            ));
+        }
+        if !matches!(net.vq_pairs, None | Some(1)) {
+            return Err(format!(
+                "net device {index}: macOS socket-vmnet supports only one queue pair"
+            ));
+        }
+        if net.packed_queue {
+            return Err(format!(
+                "net device {index}: packed queues are not supported on macOS"
+            ));
+        }
+        if net.mrg_rxbuf {
+            return Err(format!(
+                "net device {index}: mergeable receive buffers are not supported on macOS"
+            ));
+        }
+        if net.pci_address.is_some() {
+            return Err(format!(
+                "net device {index}: pci-address is not supported for virtio-mmio devices on macOS"
+            ));
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(all(test, feature = "net"))]
+mod tests {
+    use devices::virtio::NetParameters;
+
+    use super::*;
+
+    fn socket_vmnet_parameters() -> NetParameters {
+        NetParameters {
+            mode: NetParametersMode::SocketVmnet {
+                socket_vmnet: PathBuf::from("/var/run/socket_vmnet"),
+                mac: None,
+            },
+            vq_pairs: None,
+            packed_queue: false,
+            pci_address: None,
+            mrg_rxbuf: false,
+        }
+    }
+
+    fn config_with_net(net: NetParameters) -> Config {
+        let mut cfg = Config::default();
+        cfg.net.push(net);
+        cfg
+    }
+
+    #[test]
+    fn accepts_supported_socket_vmnet_config() {
+        let mut cfg = config_with_net(socket_vmnet_parameters());
+
+        assert_eq!(validate_config(&mut cfg), Ok(()));
+
+        let mut net = socket_vmnet_parameters();
+        net.vq_pairs = Some(1);
+        assert_eq!(validate_config(&mut config_with_net(net)), Ok(()));
+    }
+
+    #[test]
+    fn rejects_unsupported_socket_vmnet_options() {
+        let mut net = socket_vmnet_parameters();
+        net.vq_pairs = Some(2);
+        assert!(validate_config(&mut config_with_net(net)).is_err());
+
+        let mut net = socket_vmnet_parameters();
+        net.packed_queue = true;
+        assert!(validate_config(&mut config_with_net(net)).is_err());
+
+        let mut net = socket_vmnet_parameters();
+        net.mrg_rxbuf = true;
+        assert!(validate_config(&mut config_with_net(net)).is_err());
+
+        let mut net = socket_vmnet_parameters();
+        net.pci_address = Some(Default::default());
+        assert!(validate_config(&mut config_with_net(net)).is_err());
+    }
+
+    #[test]
+    fn rejects_non_socket_vmnet_mode() {
+        let mut cfg = config_with_net(NetParameters {
+            mode: NetParametersMode::TapName {
+                tap_name: "tap0".to_owned(),
+                mac: None,
+            },
+            vq_pairs: None,
+            packed_queue: false,
+            pci_address: None,
+            mrg_rxbuf: false,
+        });
+
+        assert!(validate_config(&mut cfg).is_err());
+    }
 }

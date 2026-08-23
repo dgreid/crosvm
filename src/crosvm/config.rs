@@ -713,6 +713,10 @@ pub struct Config {
     pub name: Option<String>,
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub nested: NestedConfig,
+    // macOS builds raw virtio-net MMIO devices directly from these parameters instead of going
+    // through `virtio_device_modules`.
+    #[cfg(all(target_os = "macos", feature = "net"))]
+    pub net: Vec<device_virtio_net::NetParameters>,
     #[cfg(windows)]
     pub net_vhost_user_tube: Option<Tube>,
     pub no_i8042: bool,
@@ -955,6 +959,8 @@ impl Default for Config {
             name: None,
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             nested: NestedConfig::default(),
+            #[cfg(all(target_os = "macos", feature = "net"))]
+            net: Vec::new(),
             #[cfg(windows)]
             net_vhost_user_tube: None,
             no_i8042: false,
