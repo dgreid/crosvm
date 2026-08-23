@@ -1,5 +1,33 @@
 # Network
 
+## macOS shared networking
+
+On macOS, crosvm connects to a persistent [`socket_vmnet`](https://github.com/lima-vm/socket_vmnet)
+service. The helper owns the privileged vmnet.framework connection while crosvm and any writable
+shared directories remain unprivileged.
+
+Install and start the helper once:
+
+```sh
+brew install socket_vmnet
+sudo brew services start socket_vmnet
+```
+
+Then start crosvm with the helper's Unix socket:
+
+```sh
+crosvm run \
+  --net "socket-vmnet=$(brew --prefix)/var/run/socket_vmnet,mac=02:00:00:00:00:01" \
+  ...
+```
+
+The guest receives its address, default route, and DNS servers through DHCP. Shared mode provides
+NAT for outbound traffic and permits the host to connect directly to the guest address. The macOS
+backend currently supports one queue pair and does not expose network offloads.
+
+The packet protocol and guest DHCP exchange have been tested with a local protocol helper. Live
+shared-mode DHCP and NAT validation with the privileged socket_vmnet service is still pending.
+
 ## Host TAP configuration
 
 The most convenient way to provide a network device to a guest is to setup a persistent TAP
