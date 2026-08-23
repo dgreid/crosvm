@@ -6,44 +6,39 @@ This document tracks the current status of the macOS ARM64 (Apple Silicon) port 
 
 The macOS port uses Apple's Hypervisor.framework to run ARM64 virtual machines on Apple Silicon
 Macs. This is an experimental port with VM boot, block devices, shared filesystems, GPU, SMP, and
-audio working.
+audio working, plus experimental socket_vmnet networking support.
 
 ## Current Status
 
 ### Working Features
 
-| Feature            | Status     | Notes                                                        |
-| ------------------ | ---------- | ------------------------------------------------------------ |
-| HVF VM Creation    | ✅ Working | Creates VM using Hypervisor.framework                        |
-| Memory Mapping     | ✅ Working | Split low/high banks to avoid GIC region                     |
-| Kernel Loading     | ✅ Working | Loads ARM64 Linux kernel at 0x80000000                       |
-| Initrd Loading     | ✅ Working | Loads initramfs for module-based kernels                     |
-| FDT Generation     | ✅ Working | Generates device tree with memory, devices, initrd           |
-| VCPU Execution     | ✅ Working | Runs guest code in EL1                                       |
-| PSCI v1.1          | ✅ Working | VERSION, FEATURES, MIGRATE_INFO_TYPE, CPU_ON                 |
-| Serial Output      | ✅ Working | Earlycon via MMIO UART at 0x3f8                              |
-| HVC Handling       | ✅ Working | Returns PSCI results through the standard SMCCC register ABI |
-| GIC Emulation      | ✅ Working | Userspace GICv3 with HVF IRQ injection                       |
-| Virtual Timer      | ✅ Working | PPI 11 via GIC interrupt delivery                            |
-| Block Devices      | ✅ Working | virtio-blk via MMIO transport, async I/O                     |
-| Filesystem Sharing | ✅ Working | virtiofs via --shared-dir, host-guest file sharing           |
-| MMIO Bus           | ✅ Working | Full virtio MMIO v2 device support                           |
-| IRQ Delivery       | ✅ Working | Edge-triggered SPI injection via IRQ handler thread          |
-| GPU (virtio-gpu)   | ✅ Working | 2D framebuffer via MMIO, DRM/fb0 device in guest             |
-| Audio (virtio-snd) | ✅ Working | CoreAudio backend; guest kernel needs CONFIG_SND_VIRTIO      |
-| SMP Boot           | ✅ Working | PSCI CPU_ON, tested with up to 4 CPUs                        |
+| Feature            | Status          | Notes                                                        |
+| ------------------ | --------------- | ------------------------------------------------------------ |
+| HVF VM Creation    | ✅ Working      | Creates VM using Hypervisor.framework                        |
+| Memory Mapping     | ✅ Working      | Split low/high banks to avoid GIC region                     |
+| Kernel Loading     | ✅ Working      | Loads ARM64 Linux kernel at 0x80000000                       |
+| Initrd Loading     | ✅ Working      | Loads initramfs for module-based kernels                     |
+| FDT Generation     | ✅ Working      | Generates device tree with memory, devices, initrd           |
+| VCPU Execution     | ✅ Working      | Runs guest code in EL1                                       |
+| PSCI v1.1          | ✅ Working      | VERSION, FEATURES, MIGRATE_INFO_TYPE, CPU_ON                 |
+| Serial Output      | ✅ Working      | Earlycon via MMIO UART at 0x3f8                              |
+| HVC Handling       | ✅ Working      | Returns PSCI results through the standard SMCCC register ABI |
+| GIC Emulation      | ✅ Working      | Userspace GICv3 with HVF IRQ injection                       |
+| Virtual Timer      | ✅ Working      | PPI 11 via GIC interrupt delivery                            |
+| Block Devices      | ✅ Working      | virtio-blk via MMIO transport, async I/O                     |
+| Filesystem Sharing | ✅ Working      | virtiofs via --shared-dir, host-guest file sharing           |
+| Network            | ⚠️ Experimental | virtio-net via socket_vmnet; live shared NAT test pending    |
+| MMIO Bus           | ✅ Working      | Full virtio MMIO v2 device support                           |
+| IRQ Delivery       | ✅ Working      | Edge-triggered SPI injection via IRQ handler thread          |
+| GPU (virtio-gpu)   | ✅ Working      | 2D framebuffer via MMIO, DRM/fb0 device in guest             |
+| Audio (virtio-snd) | ✅ Working      | CoreAudio backend; guest kernel needs CONFIG_SND_VIRTIO      |
+| SMP Boot           | ✅ Working      | PSCI CPU_ON, tested with up to 4 CPUs                        |
 
 ### Partially Working
 
 | Feature      | Status        | Notes                                               |
 | ------------ | ------------- | --------------------------------------------------- |
 | Serial Input | ⚠️ Workaround | Polling-based input, kqueue doesn't work with stdin |
-
-### Not Yet Implemented
-
-| Feature | Status     | Notes             |
-| ------- | ---------- | ----------------- |
-| Network | ❌ Missing | No virtio-net yet |
 
 ## Boot Progress
 
@@ -57,6 +52,7 @@ The Linux kernel (tested with Debian 6.1.0-49-arm64) boots fully:
 1. ✅ Timer initialization (vtimer PPI 11)
 1. ✅ virtio-mmio device detection
 1. ✅ virtio-blk driver loads, partition table scanned
+1. ⚠️ virtio-net exchanges DHCP traffic with a local protocol helper
 1. ✅ ext4 root filesystem mounted
 1. ✅ virtiofs shared directories accessible
 1. ✅ Init process runs, shell prompt reached
@@ -124,6 +120,33 @@ Guest can mount the shared directory:
 mount -t virtiofs tagname /mnt
 ```
 
+### Networking
+
+The macOS backend uses a privileged, persistent `socket_vmnet` service while crosvm itself remains
+unprivileged. Install and start the service once:
+
+```bash
+brew install socket_vmnet
+sudo brew services start socket_vmnet
+```
+
+Then pass its Unix socket to crosvm:
+
+```bash
+./target/release/crosvm run -m 4096 \
+    --rwdisk disk.raw \
+    --initrd initrd.cpio \
+    --net "socket-vmnet=$(brew --prefix)/var/run/socket_vmnet,mac=02:00:00:00:00:01" \
+    -p "root=/dev/vda1 rw console=ttyS0 earlycon" \
+    vmlinuz
+```
+
+Shared mode supplies DHCP, DNS, NAT, and direct host-to-guest connectivity. The packet protocol and
+guest DHCP exchange have been tested with a local helper; live shared-mode validation with the
+privileged socket_vmnet service is still pending. The macOS backend supports one queue pair per
+interface and does not currently expose checksum or segmentation offloads. Do not run crosvm with
+`sudo`; only the small socket_vmnet service needs vmnet.framework privileges.
+
 ## Architecture Notes
 
 ### HVF PSCI Handling
@@ -147,13 +170,14 @@ which keeps the ABI compatible across Linux kernel versions.
 Device interrupts flow through a dedicated IRQ handler thread:
 
 1. Device worker completes I/O → signals IrqEdgeEvent (pipe-based)
-1. IRQ handler thread polls events with 10ms timeout
+1. IRQ handler thread polls device events serially
 1. Marks the SPI pending in the userspace GIC model
-1. Kicks boot VCPU via `hv_vcpus_exit()` to process the interrupt
+1. Kicks active VCPUs via `hv_vcpus_exit()` to process the interrupt
 1. Calls `hv_vcpu_set_pending_interrupt()` before the VCPU re-enters the guest
 
 ## References
 
 - [Apple Hypervisor.framework Documentation](https://developer.apple.com/documentation/hypervisor)
+- [socket_vmnet](https://github.com/lima-vm/socket_vmnet)
 - [ARM PSCI Specification](https://developer.arm.com/documentation/den0022)
 - [ARM SMCCC Specification](https://developer.arm.com/documentation/den0028)

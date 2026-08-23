@@ -5,22 +5,26 @@
 
 # Boot and device test script for macOS ARM64
 #
-# Runs five test tiers:
+# Runs six test tiers:
 #   1. Kernel boot (bare kernel, no devices)
 #   2. Block device + root mount (with Debian kernel + initrd + disk)
 #   3. Virtiofs shared directory (host-guest filesystem sharing)
 #   4. GPU (virtio-gpu DRM device detection)
 #   5. SMP (multi-CPU boot)
+#   6. Network (virtio-net, socket_vmnet DHCP, host reachability)
 #
 # Usage:
 #   ./tools/test_macos_boot.sh [test_tier]
 #
-#   test_tier: "boot", "block", "virtiofs", "gpu", "smp", or "all" (default: "all")
+#   test_tier: "boot", "block", "virtiofs", "gpu", "smp", "network", or "all"
+#              (default: "all")
 #
 # Environment variables:
 #   CROSVM_BIN - Path to crosvm binary (default: target/release/crosvm)
 #   CROSVM_KERNEL - Kernel image for bare boot test (default: arm64_Image)
 #   DEBIAN_DIR - Directory with Debian test files (default: .macos-debian)
+#   CROSVM_SOCKET_VMNET - socket_vmnet Unix socket path
+#   CROSVM_NET_MAC - Stable guest MAC address (default: 02:00:00:00:00:01)
 
 set -e
 
@@ -30,6 +34,8 @@ CROSVM_KERNEL="${CROSVM_KERNEL:-arm64_Image}"
 DEBIAN_DIR="${DEBIAN_DIR:-.macos-debian}"
 CROSVM_ENTITLEMENTS="${CROSVM_ENTITLEMENTS:-crosvm.entitlements}"
 BOOT_LOG="/tmp/crosvm_boot_test.log"
+CROSVM_SOCKET_VMNET="${CROSVM_SOCKET_VMNET:-}"
+CROSVM_NET_MAC="${CROSVM_NET_MAC:-02:00:00:00:00:01}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -58,6 +64,22 @@ skip() {
     echo -e "${YELLOW}[SKIP]${NC} $1"
     ((++SKIPPED))
     return 0
+}
+
+fail() {
+    echo -e "${RED}[FAIL]${NC} $1"
+    ((++FAILED))
+    return 0
+}
+
+socket_vmnet_path() {
+    if [ -n "$CROSVM_SOCKET_VMNET" ]; then
+        printf '%s\n' "$CROSVM_SOCKET_VMNET"
+    elif command -v brew >/dev/null 2>&1; then
+        printf '%s/var/run/socket_vmnet\n' "$(brew --prefix)"
+    else
+        printf '%s\n' /var/run/socket_vmnet
+    fi
 }
 
 ensure_signed() {
@@ -290,6 +312,79 @@ run_smp_test() {
 }
 
 # ============================================================
+# Test 6: Network (socket_vmnet shared mode)
+# ============================================================
+run_network_test() {
+    echo "--- Test: Network (socket_vmnet) ---"
+    local kernel="$DEBIAN_DIR/debian-vmlinuz"
+    local initrd="$DEBIAN_DIR/debian-initrd"
+    local disk="$DEBIAN_DIR/debian-work.raw"
+    local socket_path
+    socket_path="$(socket_vmnet_path)"
+
+    if [ ! -f "$kernel" ] || [ ! -f "$initrd" ] || [ ! -f "$disk" ]; then
+        if [ "$TEST_TIER" = network ]; then
+            fail "Network test requires Debian test files in $DEBIAN_DIR"
+        else
+            skip "Network test (missing Debian test files in $DEBIAN_DIR)"
+        fi
+        return
+    fi
+
+    if [ ! -S "$socket_path" ]; then
+        if [ "$TEST_TIER" = network ]; then
+            fail "socket_vmnet is not running at $socket_path"
+        else
+            skip "Network test (socket_vmnet is not running at $socket_path)"
+        fi
+        return
+    fi
+
+    : > "$BOOT_LOG"
+    timeout 45 "$CROSVM_BIN" run -m 4096 \
+        --rwdisk "$disk" \
+        --initrd "$initrd" \
+        --net "socket-vmnet=$socket_path,mac=$CROSVM_NET_MAC" \
+        -p "root=/dev/vda1 rw console=ttyS0 earlycon panic=5 ip=dhcp" \
+        "$kernel" < /dev/null > "$BOOT_LOG" 2>&1 &
+    local vm_pid=$!
+
+    local attempt
+    for attempt in $(seq 1 35); do
+        if grep -Eq 'IP-Config: .* complete \(' "$BOOT_LOG" 2>/dev/null; then
+            break
+        fi
+        if ! kill -0 "$vm_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+
+    check_output "virtio_net" "virtio-net driver initialized"
+    if grep -Eq 'IP-Config: .* complete \(' "$BOOT_LOG" 2>/dev/null; then
+        echo -e "${GREEN}[PASS]${NC} DHCP configuration completed"
+        ((++PASSED))
+    else
+        fail "DHCP configuration did not complete"
+    fi
+    check_output "gateway" "DHCP supplied a default gateway"
+    check_output "dns0" "DHCP supplied a DNS server"
+
+    local guest_ip
+    guest_ip="$(sed -nE 's/^[[:space:]]*address:[[:space:]]*([0-9.]+).*/\1/p' "$BOOT_LOG" | head -1)"
+    if [ -n "$guest_ip" ] && ping -c 1 -W 1000 "$guest_ip" >/dev/null 2>&1; then
+        echo -e "${GREEN}[PASS]${NC} Host reached guest at $guest_ip"
+        ((++PASSED))
+    else
+        fail "Host could not reach DHCP guest address${guest_ip:+ $guest_ip}"
+    fi
+
+    kill "$vm_pid" 2>/dev/null || true
+    wait "$vm_pid" 2>/dev/null || true
+    echo ""
+}
+
+# ============================================================
 # Run selected tests
 # ============================================================
 case "$TEST_TIER" in
@@ -308,16 +403,20 @@ case "$TEST_TIER" in
     smp)
         run_smp_test
         ;;
+    network)
+        run_network_test
+        ;;
     all)
         run_boot_test
         run_block_test
         run_virtiofs_test
         run_gpu_test
         run_smp_test
+        run_network_test
         ;;
     *)
         echo "Unknown test tier: $TEST_TIER"
-        echo "Usage: $0 [boot|block|virtiofs|gpu|smp|all]"
+        echo "Usage: $0 [boot|block|virtiofs|gpu|smp|network|all]"
         exit 1
         ;;
 esac
