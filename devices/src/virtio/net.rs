@@ -64,6 +64,7 @@ use crate::PciAddress;
 #[cfg(windows)]
 pub(crate) const MAX_BUFFER_SIZE: usize = 65562;
 const QUEUE_SIZE: u16 = 256;
+const RAW_NET_MTU: u16 = 1500;
 
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub static VHOST_NET_DEFAULT_PATH: &str = "/dev/vhost-net";
@@ -173,6 +174,13 @@ pub enum NetParametersMode {
         host_ip: Ipv4Addr,
         netmask: Ipv4Addr,
         mac: MacAddress,
+    },
+    /// Connect to a `socket_vmnet` server on macOS.
+    #[cfg(target_os = "macos")]
+    #[serde(rename_all = "kebab-case")]
+    SocketVmnet {
+        socket_vmnet: PathBuf,
+        mac: Option<MacAddress>,
     },
 }
 
@@ -381,7 +389,7 @@ where
                 self.overlapped_wrapper.get_h_event_ref().unwrap(),
                 Token::RxTap,
             ),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
             (self.tap.get_read_notifier(), Token::RxTap),
             (self.rx_queue.event(), Token::RxQueue),
             (self.tx_queue.event(), Token::TxQueue),
@@ -558,6 +566,29 @@ where
         )
     }
 
+    /// Creates a virtio network device backed by raw Ethernet frames.
+    ///
+    /// Unlike [`Net::new`], this does not configure TAP offloads or a virtio-net header. The
+    /// backend is expected to add and remove the virtio-net header when exchanging packets with
+    /// the device. Raw backends support one receive/transmit queue pair and do not expose a
+    /// control queue, packed queues, mergeable receive buffers, or network offload features.
+    pub fn new_raw(
+        base_features: u64,
+        tap: T,
+        mac_addr: Option<MacAddress>,
+        pci_address: Option<PciAddress>,
+    ) -> Result<Net<T>, NetError> {
+        Self::new_internal(
+            vec![tap],
+            raw_net_features(base_features, mac_addr.is_some()),
+            RAW_NET_MTU,
+            mac_addr,
+            pci_address,
+            #[cfg(windows)]
+            None,
+        )
+    }
+
     pub(crate) fn new_internal(
         taps: Vec<T>,
         avail_features: u64,
@@ -568,7 +599,8 @@ where
     ) -> Result<Self, NetError> {
         let net = Self {
             guest_mac: mac_addr.map(|mac| mac.octets()),
-            queue_sizes: vec![QUEUE_SIZE; taps.len() * 2 + 1].into_boxed_slice(),
+            queue_sizes: vec![QUEUE_SIZE; net_queue_count(taps.len(), avail_features)]
+                .into_boxed_slice(),
             worker_threads: Vec::new(),
             taps,
             avail_features,
@@ -587,6 +619,18 @@ where
     fn max_virtqueue_pairs(&self) -> usize {
         self.taps.len()
     }
+}
+
+fn raw_net_features(base_features: u64, has_mac: bool) -> u64 {
+    let mut avail_features = base_features | 1 << virtio_net::VIRTIO_NET_F_MTU;
+    if has_mac {
+        avail_features |= 1 << virtio_net::VIRTIO_NET_F_MAC;
+    }
+    avail_features
+}
+
+fn net_queue_count(vq_pairs: usize, avail_features: u64) -> usize {
+    vq_pairs * 2 + usize::from(avail_features & (1 << virtio_net::VIRTIO_NET_F_CTRL_VQ) != 0)
 }
 
 impl<T> Drop for Net<T>
@@ -981,6 +1025,73 @@ mod tests {
 
         // invalid parameter
         assert!(from_net_arg("tap-name=tap,foomatic=true").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn params_from_key_values_socket_vmnet() {
+        let params = from_net_arg("socket-vmnet=/var/run/socket_vmnet").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vq_pairs: None,
+                mode: NetParametersMode::SocketVmnet {
+                    socket_vmnet: PathBuf::from("/var/run/socket_vmnet"),
+                    mac: None,
+                },
+                packed_queue: false,
+                pci_address: None,
+                mrg_rxbuf: false,
+            }
+        );
+
+        let params =
+            from_net_arg("socket-vmnet=/var/run/socket_vmnet,mac=3d:70:eb:61:1a:91").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vq_pairs: None,
+                mode: NetParametersMode::SocketVmnet {
+                    socket_vmnet: PathBuf::from("/var/run/socket_vmnet"),
+                    mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap()),
+                },
+                packed_queue: false,
+                pci_address: None,
+                mrg_rxbuf: false,
+            }
+        );
+    }
+
+    #[test]
+    fn raw_net_features_are_minimal() {
+        let base_features = 1 << 63;
+        let features_without_mac = raw_net_features(base_features, false);
+        assert_eq!(
+            features_without_mac,
+            base_features | 1 << virtio_net::VIRTIO_NET_F_MTU
+        );
+
+        let features_with_mac = raw_net_features(base_features, true);
+        assert_eq!(
+            features_with_mac,
+            base_features | 1 << virtio_net::VIRTIO_NET_F_MTU | 1 << virtio_net::VIRTIO_NET_F_MAC
+        );
+        assert_eq!(
+            features_with_mac
+                & (1 << virtio_net::VIRTIO_NET_F_CTRL_VQ
+                    | 1 << virtio_net::VIRTIO_NET_F_MQ
+                    | 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF
+                    | 1 << virtio_net::VIRTIO_NET_F_CSUM
+                    | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
+                    | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
+                    | 1 << virtio_net::VIRTIO_NET_F_GUEST_UFO
+                    | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
+                    | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
+                    | 1 << VIRTIO_F_RING_PACKED),
+            0
+        );
+        assert_eq!(net_queue_count(1, features_with_mac), 2);
+        assert_eq!(RAW_NET_MTU, 1500);
     }
 
     #[test]
