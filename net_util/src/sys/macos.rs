@@ -2,17 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! MacOS networking stubs.
+//! macOS networking support.
 //!
 //! macOS doesn't have Linux-style TAP devices. For networking, crosvm on macOS
-//! should use slirp (user-space networking) or vmnet.framework.
+//! can connect to a privileged `socket_vmnet` helper over a Unix socket.
+
+mod socket_vmnet;
 
 use base::FileReadWriteVolatile;
+pub use socket_vmnet::SocketVmnet;
 
 use crate::TapTCommon;
 
-/// MacOS TAP trait - a placeholder since macOS doesn't have traditional TAP devices.
-/// Use slirp or vmnet.framework for actual networking.
+/// Trait implemented by macOS virtio-net packet backends.
 pub trait TapT: FileReadWriteVolatile + TapTCommon {}
 
 pub mod fakes {
