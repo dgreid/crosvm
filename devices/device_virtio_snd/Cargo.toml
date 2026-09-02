@@ -49,3 +49,6 @@ crosvm_cli = { workspace = true }
 proc_init = { workspace = true }
 tube_transporter = { workspace = true }
 win_audio = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio = { path = "../../coreaudio" }

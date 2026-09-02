@@ -2603,6 +2603,8 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg_if::cfg_if! {
             if #[cfg(windows)] {
                 cfg.disks_auto_vhost_user = disks.iter().map(|d| d.disk_option.clone()).collect();
+            } else if #[cfg(target_os = "macos")] {
+                cfg.disks = disks.iter().map(|d| d.disk_option.clone()).collect();
             } else {
                 cfg.virtio_device_modules.extend(disks.iter().map(|d| d.disk_option.clone().into()));
             }

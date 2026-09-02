@@ -14,7 +14,7 @@ use crate::serial_device::SerialOptions;
 use crate::sys::serial_device::SerialDevice;
 use crate::Serial;
 
-pub(crate) type InStreamType = Box<dyn SerialInput>;
+pub type InStreamType = Box<dyn SerialInput>;
 
 impl SerialDevice for Serial {
     /// Constructs a Serial device ready for input and output.

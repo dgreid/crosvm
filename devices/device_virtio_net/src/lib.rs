@@ -15,7 +15,7 @@ use std::io;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::os::raw::c_uint;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -939,6 +939,13 @@ impl NetParameters {
         {
             let _ = protection_type;
             anyhow::bail!("net device not supported on Windows");
+        }
+        // macOS builds raw virtio-net MMIO devices directly from `Config::net` rather than
+        // going through the virtio device module path.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = protection_type;
+            anyhow::bail!("net device modules are not supported on macOS");
         }
     }
 }

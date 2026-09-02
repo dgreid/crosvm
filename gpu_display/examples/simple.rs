@@ -31,7 +31,7 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 mod platform {
     use anyhow::anyhow;
     use anyhow::Result;

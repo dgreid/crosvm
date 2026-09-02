@@ -42,6 +42,19 @@ use base::UnixSeqpacketListener;
 use base::UnlinkUnixSeqpacketListener;
 use base::VmEventType;
 use cros_fdt::Fdt;
+use device_virtio_block::BlockAsync;
+#[cfg(feature = "net")]
+use device_virtio_net::Net;
+#[cfg(feature = "net")]
+use device_virtio_net::NetParametersMode;
+#[cfg(feature = "audio")]
+use device_virtio_snd::common_backend::VirtioSnd;
+#[cfg(feature = "audio")]
+use device_virtio_snd::parameters::Parameters as SndParameters;
+#[cfg(feature = "audio")]
+use device_virtio_snd::parameters::StreamSourceBackend;
+#[cfg(feature = "audio")]
+use device_virtio_snd::sys::StreamSourceBackend as SysStreamSourceBackend;
 use devices::irqchip::gic_redist_base;
 use devices::irqchip::GicCpuInterface;
 use devices::irqchip::HvfIrqChip;
@@ -55,7 +68,6 @@ use devices::irqchip::VTIMER_PPI;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::virtio::base_features;
-use devices::virtio::block::BlockAsync;
 use devices::virtio::fs::Fs;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::DisplayBackend;
@@ -63,18 +75,6 @@ use devices::virtio::gpu::DisplayBackend;
 use devices::virtio::gpu::Gpu;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::GpuParameters;
-#[cfg(feature = "audio")]
-use devices::virtio::snd::common_backend::VirtioSnd;
-#[cfg(feature = "audio")]
-use devices::virtio::snd::parameters::Parameters as SndParameters;
-#[cfg(feature = "audio")]
-use devices::virtio::snd::parameters::StreamSourceBackend;
-#[cfg(feature = "audio")]
-use devices::virtio::snd::sys::StreamSourceBackend as SysStreamSourceBackend;
-#[cfg(feature = "net")]
-use devices::virtio::Net;
-#[cfg(feature = "net")]
-use devices::virtio::NetParametersMode;
 use devices::Bus;
 use devices::BusDevice;
 use devices::BusType;

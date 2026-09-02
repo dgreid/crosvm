@@ -645,6 +645,10 @@ pub struct Config {
     pub dev_pm: Option<DevicePowerManagerConfig>,
     pub device_tree_overlay: Vec<DtboOption>,
     pub disable_virtio_intx: bool,
+    // macOS attaches disks as raw virtio-mmio devices instead of going through
+    // `virtio_device_modules`.
+    #[cfg(target_os = "macos")]
+    pub disks: Vec<device_virtio_block::DiskOption>,
     // Disks that run as an automatically setup vhost-user backend.
     #[cfg(windows)]
     pub disks_auto_vhost_user: Vec<device_virtio_block::DiskOption>,
@@ -881,6 +885,8 @@ impl Default for Config {
             #[cfg(any(target_os = "android", target_os = "linux"))]
             dev_pm: None,
             device_tree_overlay: Vec::new(),
+            #[cfg(target_os = "macos")]
+            disks: Vec::new(),
             #[cfg(windows)]
             disks_auto_vhost_user: Vec::new(),
             disable_virtio_intx: false,

@@ -8,7 +8,7 @@ use std::str::FromStr;
 use anyhow::bail;
 use anyhow::Context;
 #[cfg(feature = "net")]
-use devices::virtio::NetParametersMode;
+use device_virtio_net::NetParametersMode;
 use devices::SerialParameters;
 use serde::Deserialize;
 use serde::Serialize;
@@ -111,7 +111,7 @@ pub fn validate_config(
 
 #[cfg(all(test, feature = "net"))]
 mod tests {
-    use devices::virtio::NetParameters;
+    use device_virtio_net::NetParameters;
 
     use super::*;
 

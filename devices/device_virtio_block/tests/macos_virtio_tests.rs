@@ -7,17 +7,17 @@
 //! These tests verify that virtio devices can be created and configured on macOS.
 //! They focus on device instantiation and basic setup, not full I/O operations.
 //!
-//! Run with: `cargo test -p devices --test macos_virtio_tests`
+//! Run with: `cargo test -p device_virtio_block --test macos_virtio_tests`
 
 #![cfg(target_os = "macos")]
 
 use std::io::Write;
 
+use device_virtio_block::BlockAsync;
+use device_virtio_block::DiskOption;
+use device_virtio_console::device::ConsoleDevice;
+use device_virtio_console::port::ConsolePort;
 use devices::virtio::base_features;
-use devices::virtio::block::BlockAsync;
-use devices::virtio::block::DiskOption;
-use devices::virtio::console::device::ConsoleDevice;
-use devices::virtio::console::port::ConsolePort;
 use devices::virtio::DeviceType;
 use devices::virtio::VirtioDevice;
 use hypervisor::ProtectionType;
