@@ -208,6 +208,7 @@ ciborium = "0.2.2"
 enumn = "0.1.0"
 gdbstub = "0.7.0"
 gdbstub_arch = "0.3.0"
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 libc = "0.2.188"
 rand = "0.9.2"
 remain = "0.2"
@@ -355,6 +356,9 @@ media = ["devices/media"]
 
 #! ### Linux-specific feature flags
 
+## Enables custom formatting for stderr and log-file output. Only available on Linux.
+log-format = ["base/log-format"]
+
 ## Enables the use of the GenieZone hypervisor
 geniezone = ["devices/geniezone", "hypervisor/geniezone"]
 
@@ -485,6 +489,7 @@ all-default = [
     "gfxstream",
     "gfxstream_display",
     "libvda-stub",
+    "log-format",
     "media",
     "net",
     "noncoherent-dma",
