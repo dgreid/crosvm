@@ -127,7 +127,11 @@ unprivileged. Install and start the service once:
 
 ```bash
 brew install socket_vmnet
-sudo brew services start socket_vmnet
+brew update
+sudo env \
+  HOMEBREW_CACHE="$(brew --cache)" \
+  HOMEBREW_NO_AUTO_UPDATE=1 \
+  "$(command -v brew)" services start socket_vmnet
 ```
 
 Then pass its Unix socket to crosvm:
