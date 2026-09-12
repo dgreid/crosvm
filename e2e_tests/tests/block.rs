@@ -123,8 +123,18 @@ fn run_vhost_user_test(cmd_type: CmdType, config: VmConfig) {
     let socket = NamedTempFile::new().unwrap();
     let disk = prepare_disk_img();
 
-    let vu_config = create_vu_block_config(cmd_type, socket.path(), disk.path());
-    let _vu_device = VhostUserBackend::new(vu_config).unwrap();
+    let check_log_format = matches!(&cmd_type, CmdType::Devices);
+    let mut vu_config = create_vu_block_config(cmd_type, socket.path(), disk.path());
+    if check_log_format {
+        // Exercise global log formatting as part of the existing device test to avoid another VM
+        // boot.
+        vu_config = vu_config.global_args(vec![
+            "--no-syslog".to_string(),
+            "--log-format".to_string(),
+            "glog-e2e:{levelchar}{localglog} {tid} {location}] {msg}".to_string(),
+        ]);
+    }
+    let vu_device = VhostUserBackend::new(vu_config).unwrap();
 
     let config = config.with_vhost_user("block", socket.path());
     let mut vm = TestVm::new(config).unwrap();
@@ -135,6 +145,20 @@ fn run_vhost_user_test(cmd_type: CmdType, config: VmConfig) {
             .trim(),
         "42"
     );
+
+    std::mem::drop(vm);
+    let output = vu_device.wait_with_output();
+    if check_log_format {
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        let exit_log = stderr
+            .lines()
+            .find(|line| line.ends_with("] exiting with success"))
+            .unwrap_or_else(|| panic!("exit log not found in stderr:\n{stderr}"));
+        assert!(
+            exit_log.starts_with("glog-e2e:I"),
+            "unexpected exit log: {exit_log}"
+        );
+    }
 }
 
 /// Tests vhost-user block device with `crosvm device`.
@@ -144,7 +168,7 @@ fn vhost_user_mount() {
     run_vhost_user_test(CmdType::Device, config);
 }
 
-/// Tests vhost-user block device with `crosvm devices` (not `device`).
+/// Tests vhost-user block device and custom log formatting with `crosvm devices` (not `device`).
 #[test]
 fn vhost_user_mount_with_devices() {
     let config = VmConfig::new();
@@ -158,7 +182,7 @@ fn vhost_user_mount_disable_sandbox() {
     run_vhost_user_test(CmdType::Device, config);
 }
 
-/// Tests vhost-user block device with `crosvm devices` (not `device`).
+/// Tests vhost-user block device and custom log formatting with `crosvm devices` (not `device`).
 #[test]
 fn vhost_user_mount_with_devices_disable_sandbox() {
     let config = VmConfig::new().disable_sandbox();
