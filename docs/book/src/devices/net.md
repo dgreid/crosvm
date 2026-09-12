@@ -10,7 +10,11 @@ Install and start the helper once:
 
 ```sh
 brew install socket_vmnet
-sudo brew services start socket_vmnet
+brew update
+sudo env \
+  HOMEBREW_CACHE="$(brew --cache)" \
+  HOMEBREW_NO_AUTO_UPDATE=1 \
+  "$(command -v brew)" services start socket_vmnet
 ```
 
 Then start crosvm with the helper's Unix socket:

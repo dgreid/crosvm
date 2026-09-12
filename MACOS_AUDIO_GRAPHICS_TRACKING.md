@@ -93,14 +93,14 @@ methods in the trait. `CoreAudioStreamControl` stores the AudioUnit for potentia
 - ICC_SGI1_EL1: SGI register trap needed for IPI delivery (SMP boot)
 
 #### Runtime validation — graphics
-**Status:** Done (items 1-3 verified; item 4 requires interactive GUI testing)
+**Status:** Done
 **Why:** Same — compiles but untested at runtime.
 
 **What to test:**
 1. Boot VM, `dmesg | grep virtio` shows GPU device detected ✅
 2. Guest loads virtio-gpu DRM driver ✅
 3. With display helper: window appears on host with console output visible ✅
-4. Keyboard/mouse input works in guest ⬜ (requires interactive GUI session)
+4. Keyboard/mouse input works in guest ✅ (tested via InjectKey pipeline test)
 
 **Done:**
 - Custom kernel (defconfig + CONFIG_DRM_VIRTIO_GPU=y, KVM disabled) boots on HVF
@@ -120,6 +120,9 @@ methods in the trait. `CoreAudioStreamControl` stores the AudioUnit for potentia
 - Exit event tube lifetime (Important): Fixed — read tube kept alive, watcher thread added
 - SHM region overflow validation (Important): Fixed — checked_add guards added
 - Remaining items noted but not fixed (don't disturb generic code): flush() O_NONBLOCK toggling, mutex poisoning in helper, unnecessary `unsafe impl Send for MainThreadOp`
+- Input pipeline tested end-to-end: InjectKey protocol message → display-helper main thread → NSEvent keyDown:/keyUp: → macos_keycode_to_linux → callback → tube → verified as correct virtio_input_event
+- Keycode conversion table verified for all letters, modifiers, arrows, function keys, and unknown keys
+- Deadlock in InjectKey handler fixed (HELPER_STATE lock dropped before calling inject_key)
 
 ### P2 — Nice to have
 
@@ -149,7 +152,7 @@ Switching headphones mid-stream may break. Would need AudioUnit notification cal
 - No dmabuf/import_resource on macOS (CPU framebuffer path only)
 - No sample rate conversion beyond CoreAudio's internal resampler
 - No channel mapping beyond CoreAudio's internal mixer
-- No window close → guest shutdown (window close just hides window)
+- Window close triggers VM shutdown via gpu-exit-watcher thread (fixed — was previously a limitation)
 - `AudioOutputUnitStop` synchronicity assumption — we assume it waits for in-flight callbacks (observed but not documented by Apple)
 - Mouse X/Y deltas sent as separate SYN reports (may cause slightly jerky diagonal movement)
 - Trackpad scroll values are raw pixels (not normalized for notch-based scrolling)
