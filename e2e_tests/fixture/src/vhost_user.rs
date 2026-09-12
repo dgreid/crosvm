@@ -39,6 +39,7 @@ impl CmdType {
 pub struct Config {
     cmd_type: CmdType,
     dev_name: String,
+    global_args: Vec<String>,
     extra_args: Vec<String>,
     #[cfg(unix)]
     pass_fds: Vec<std::os::unix::io::RawFd>,
@@ -49,10 +50,17 @@ impl Config {
         Config {
             cmd_type,
             dev_name: name.to_string(),
+            global_args: Default::default(),
             extra_args: Default::default(),
             #[cfg(unix)]
             pass_fds: Default::default(),
         }
+    }
+
+    /// Uses extra arguments for `crosvm` before the `(device|devices)` subcommand.
+    pub fn global_args(mut self, args: Vec<String>) -> Self {
+        self.global_args = args;
+        self
     }
 
     /// Uses extra arguments for `crosvm (device|devices)`.
@@ -91,6 +99,7 @@ impl VhostUserBackend {
     }
 
     fn new_common(mut cmd: Command, cfg: Config) -> Result<Self> {
+        cmd.args(cfg.global_args);
         cmd.args([cfg.cmd_type.to_subcommand()]);
         cmd.args(cfg.extra_args);
 
@@ -127,10 +136,13 @@ impl VhostUserBackend {
             process,
         })
     }
-}
 
-impl Drop for VhostUserBackend {
-    fn drop(&mut self) {
+    /// Waits for the backend to exit and returns its captured output.
+    pub fn wait_with_output(mut self) -> process::Output {
+        self.collect_output()
+    }
+
+    fn collect_output(&mut self) -> process::Output {
         let output = self.process.take().unwrap().wait_with_output().unwrap();
 
         // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when the test
@@ -151,6 +163,16 @@ impl Drop for VhostUserBackend {
                 "VhostUserBackend {} exited illegally: {}",
                 self.name, output.status
             );
+        }
+
+        output
+    }
+}
+
+impl Drop for VhostUserBackend {
+    fn drop(&mut self) {
+        if self.process.is_some() {
+            std::mem::drop(self.collect_output());
         }
     }
 }

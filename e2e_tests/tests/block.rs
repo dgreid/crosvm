@@ -6,9 +6,11 @@
 
 #![cfg(any(target_os = "android", target_os = "linux"))]
 
+use std::process::Command;
 use std::time;
 
 use fixture::utils::create_vu_block_config;
+use fixture::utils::find_crosvm_binary;
 use fixture::utils::prepare_disk_img;
 use fixture::utils::DEFAULT_BLOCK_SIZE;
 use fixture::vhost_user::CmdType;
@@ -119,12 +121,31 @@ fn resize(config: VmConfig) {
     );
 }
 
+/// Returns whether the crosvm binary was built with the `log-format` feature.
+fn supports_log_format() -> bool {
+    let output = Command::new(find_crosvm_binary())
+        .arg("--help")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).contains("--log-format")
+}
+
 fn run_vhost_user_test(cmd_type: CmdType, config: VmConfig) {
     let socket = NamedTempFile::new().unwrap();
     let disk = prepare_disk_img();
 
-    let vu_config = create_vu_block_config(cmd_type, socket.path(), disk.path());
-    let _vu_device = VhostUserBackend::new(vu_config).unwrap();
+    let check_log_format = matches!(&cmd_type, CmdType::Devices) && supports_log_format();
+    let mut vu_config = create_vu_block_config(cmd_type, socket.path(), disk.path());
+    if check_log_format {
+        // Exercise global log formatting as part of the existing device test to avoid another VM
+        // boot.
+        vu_config = vu_config.global_args(vec![
+            "--no-syslog".to_string(),
+            "--log-format".to_string(),
+            "glog-e2e:{levelchar}{localglog} {tid} {location}] {msg}".to_string(),
+        ]);
+    }
+    let vu_device = VhostUserBackend::new(vu_config).unwrap();
 
     let config = config.with_vhost_user("block", socket.path());
     let mut vm = TestVm::new(config).unwrap();
@@ -135,6 +156,21 @@ fn run_vhost_user_test(cmd_type: CmdType, config: VmConfig) {
             .trim(),
         "42"
     );
+
+    // Drop the VM so the backend exits and output is flushed.
+    std::mem::drop(vm);
+    let output = vu_device.wait_with_output();
+    if check_log_format {
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        let exit_log = stderr
+            .lines()
+            .find(|line| line.ends_with("] exiting with success"))
+            .unwrap_or_else(|| panic!("exit log not found in stderr:\n{stderr}"));
+        assert!(
+            exit_log.starts_with("glog-e2e:I"),
+            "unexpected exit log: {exit_log}"
+        );
+    }
 }
 
 /// Tests vhost-user block device with `crosvm device`.
@@ -144,7 +180,7 @@ fn vhost_user_mount() {
     run_vhost_user_test(CmdType::Device, config);
 }
 
-/// Tests vhost-user block device with `crosvm devices` (not `device`).
+/// Tests vhost-user block device and custom log formatting with `crosvm devices` (not `device`).
 #[test]
 fn vhost_user_mount_with_devices() {
     let config = VmConfig::new();
@@ -158,7 +194,7 @@ fn vhost_user_mount_disable_sandbox() {
     run_vhost_user_test(CmdType::Device, config);
 }
 
-/// Tests vhost-user block device with `crosvm devices` (not `device`).
+/// Tests vhost-user block device and custom log formatting with `crosvm devices` (not `device`).
 #[test]
 fn vhost_user_mount_with_devices_disable_sandbox() {
     let config = VmConfig::new().disable_sandbox();
