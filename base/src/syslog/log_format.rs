@@ -3,9 +3,13 @@
 // found in the LICENSE file.
 
 //! Flexible formatting for for crosvm log records. This is glog format compatible.
+//!
+//! Format strings are parsed once during logger initialization. The local timezone is initialized
+//! at the same point so jailed device processes do not need access per log.
 
 use std::io;
 use std::io::Write;
+use std::mem::MaybeUninit;
 use std::str::FromStr;
 use std::thread;
 use std::time::Instant;
@@ -17,6 +21,15 @@ use chrono::Timelike;
 use chrono::Utc;
 
 use super::Error;
+
+/// The timezone used to render a date or time field.
+#[derive(Copy, Clone)]
+enum Zone {
+    /// Coordinated Universal Time.
+    Utc,
+    /// The process-local timezone initialized when the formatter was created.
+    Local,
+}
 
 /// A timestamp component selected by an individual format placeholder.
 #[derive(Copy, Clone)]
@@ -44,6 +57,8 @@ enum Token {
     WallClock,
     /// The current UTC time in glog's timestamp format.
     Glog,
+    /// The current local time in glog's timestamp format.
+    LocalGlog,
     /// The process ID.
     Pid,
     /// The Linux thread ID.
@@ -58,26 +73,42 @@ enum Token {
     Location,
     /// The formatted log message.
     Message,
-    /// One UTC timestamp component.
-    Time(TimeField),
+    /// One timestamp component rendered in the selected timezone.
+    Time(TimeField, Zone),
+}
+
+impl Token {
+    fn uses_local_time(&self) -> bool {
+        matches!(self, Self::LocalGlog | Self::Time(_, Zone::Local))
+    }
 }
 
 impl FromStr for Token {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (name, zone) = match value.strip_prefix("local") {
+            Some(name) => (name, Zone::Local),
+            None => (value, Zone::Utc),
+        };
+
+        match name {
+            "year" => return Ok(Self::Time(TimeField::Year, zone)),
+            "month" => return Ok(Self::Time(TimeField::Month, zone)),
+            "day" => return Ok(Self::Time(TimeField::Day, zone)),
+            "hour" => return Ok(Self::Time(TimeField::Hour, zone)),
+            "minute" => return Ok(Self::Time(TimeField::Minute, zone)),
+            "second" => return Ok(Self::Time(TimeField::Second, zone)),
+            "micros" => return Ok(Self::Time(TimeField::Micros, zone)),
+            "offset" => return Ok(Self::Time(TimeField::Offset, zone)),
+            _ => {}
+        }
+
         match value {
-            "year" => Ok(Self::Time(TimeField::Year)),
-            "month" => Ok(Self::Time(TimeField::Month)),
-            "day" => Ok(Self::Time(TimeField::Day)),
-            "hour" => Ok(Self::Time(TimeField::Hour)),
-            "minute" => Ok(Self::Time(TimeField::Minute)),
-            "second" => Ok(Self::Time(TimeField::Second)),
-            "micros" => Ok(Self::Time(TimeField::Micros)),
-            "offset" => Ok(Self::Time(TimeField::Offset)),
             "boottime" => Ok(Self::BootTime),
             "wallclock" => Ok(Self::WallClock),
             "glog" => Ok(Self::Glog),
+            "localglog" => Ok(Self::LocalGlog),
             "pid" => Ok(Self::Pid),
             "tid" => Ok(Self::Tid),
             "thread" => Ok(Self::Thread),
@@ -148,6 +179,38 @@ fn thread_id() -> u64 {
 /// Calendar fields for a wall clock sample in one timezone.
 type CalendarTime = DateTime<FixedOffset>;
 
+fn to_local_time(timestamp: DateTime<Utc>) -> io::Result<CalendarTime> {
+    // `time_t` is `i64` on this target, but can be narrower on other Linux targets.
+    #[allow(clippy::useless_conversion)]
+    let seconds: libc::time_t = timestamp.timestamp().try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "system time does not fit in time_t",
+        )
+    })?;
+    let mut time = MaybeUninit::<libc::tm>::uninit();
+
+    // SAFETY: `seconds` and `time` are valid for the duration of the call. `localtime_r`
+    // initializes `time` when it returns a non-null pointer, which is checked below.
+    if unsafe { libc::localtime_r(&seconds, time.as_mut_ptr()) }.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: A non-null return from `localtime_r` means `time` was initialized.
+    let seconds = unsafe { time.assume_init() }
+        .tm_gmtoff
+        .try_into()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "timezone offset does not fit in i32",
+            )
+        })?;
+    let offset = FixedOffset::east_opt(seconds)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid timezone offset"))?;
+    Ok(timestamp.with_timezone(&offset))
+}
+
 fn write_wall_clock<W: Write>(output: &mut W, time: &CalendarTime) -> io::Result<()> {
     write!(
         output,
@@ -192,6 +255,21 @@ fn write_time_field<W: Write>(
     }
 }
 
+fn get_calendar_time<'a>(
+    timestamp: &mut Option<DateTime<Utc>>,
+    time: &'a mut Option<CalendarTime>,
+    zone: Zone,
+) -> io::Result<&'a CalendarTime> {
+    if time.is_none() {
+        let timestamp = *timestamp.get_or_insert_with(Utc::now);
+        *time = Some(match zone {
+            Zone::Utc => timestamp.fixed_offset(),
+            Zone::Local => to_local_time(timestamp)?,
+        });
+    }
+    Ok(time.as_ref().unwrap())
+}
+
 /// A parsed format and the time.
 pub(super) struct LogFormatter {
     tokens: Vec<Token>,
@@ -199,10 +277,17 @@ pub(super) struct LogFormatter {
 }
 
 impl LogFormatter {
-    /// Parses `format`.
+    /// Parses `format` and initializes the local timezone before sandboxing.
     pub(super) fn new(format: &str) -> Result<Self, Error> {
+        let tokens = parse_format(format)?;
+
+        if tokens.iter().any(Token::uses_local_time) {
+            // Initialize libc's timezone cache before the device process enters its jail.
+            let _ = to_local_time(Utc::now());
+        }
+
         Ok(Self {
-            tokens: parse_format(format)?,
+            tokens,
             start: Instant::now(),
         })
     }
@@ -215,17 +300,23 @@ impl LogFormatter {
     ) -> io::Result<()> {
         let boot_time = Instant::now().duration_since(self.start).as_secs_f32();
         let mut timestamp = None;
+        let mut utc = None;
+        let mut local = None;
 
         for token in &self.tokens {
             match token {
                 Token::Literal(value) => output.write_all(value.as_bytes())?,
                 Token::BootTime => write!(output, "{boot_time:>10.6?}")?,
                 Token::WallClock => {
-                    let time = timestamp.get_or_insert_with(|| Utc::now().fixed_offset());
+                    let time = get_calendar_time(&mut timestamp, &mut utc, Zone::Utc)?;
                     write_wall_clock(output, time)?;
                 }
                 Token::Glog => {
-                    let time = timestamp.get_or_insert_with(|| Utc::now().fixed_offset());
+                    let time = get_calendar_time(&mut timestamp, &mut utc, Zone::Utc)?;
+                    write_glog_time(output, time)?;
+                }
+                Token::LocalGlog => {
+                    let time = get_calendar_time(&mut timestamp, &mut local, Zone::Local)?;
                     write_glog_time(output, time)?;
                 }
                 Token::Pid => write!(output, "{}", std::process::id())?,
@@ -242,8 +333,11 @@ impl LogFormatter {
                     _ => write!(output, "{}", record.target())?,
                 },
                 Token::Message => write!(output, "{}", record.args())?,
-                Token::Time(field) => {
-                    let time = timestamp.get_or_insert_with(|| Utc::now().fixed_offset());
+                Token::Time(field, zone) => {
+                    let time = match zone {
+                        Zone::Utc => get_calendar_time(&mut timestamp, &mut utc, *zone)?,
+                        Zone::Local => get_calendar_time(&mut timestamp, &mut local, *zone)?,
+                    };
                     write_time_field(output, *field, time)?;
                 }
             }
@@ -339,9 +433,38 @@ mod tests {
     }
 
     #[test]
+    fn local_time_observes_dst() {
+        const CHILD: &str = "CROSVM_LOG_FORMAT_DST_TEST_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("local_time_observes_dst")
+                .env(CHILD, "1")
+                .env("TZ", "PST8PDT,M3.2.0,M11.1.0")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        for (seconds, hour, offset) in
+            [(1_705_320_000, 4, -8 * 3600), (1_721_044_800, 5, -7 * 3600)]
+        {
+            let timestamp = DateTime::<Utc>::from_timestamp(seconds, 0).unwrap();
+            let time = to_local_time(timestamp).unwrap();
+            assert_eq!(time.hour(), hour);
+            assert_eq!(time.offset().local_minus_utc(), offset);
+        }
+    }
+
+    #[test]
     fn glog_format_has_expected_shape() {
         let output = format_record(
-            "{levelchar}{glog} {tid} {location}] {msg}",
+            "{levelchar}{localglog} {tid} {location}] {msg}",
             log::Level::Info,
         );
         let bytes = output.as_bytes();
@@ -363,7 +486,9 @@ mod tests {
     #[test]
     fn supports_individual_time_fields() {
         let output = format_record(
-            "{year}-{month}-{day}T{hour}:{minute}:{second}.{micros}{offset}",
+            "{year}-{month}-{day}T{hour}:{minute}:{second}.{micros}{offset} \
+             {localyear}-{localmonth}-{localday}T{localhour}:{localminute}:\
+             {localsecond}.{localmicros}{localoffset}",
             log::Level::Info,
         );
 
