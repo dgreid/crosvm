@@ -120,6 +120,9 @@ pub struct CrosvmCmdlineArgs {
     #[argh(option, default = r#"String::from("info")"#)]
     /// specify log level, eg "off", "error", "debug,disk=off", etc
     pub log_level: String,
+    #[argh(option, arg_name = "FORMAT")]
+    /// format stderr log output; see the logging docs for tokens
+    pub log_format: Option<String>,
     #[argh(option, arg_name = "TAG")]
     /// when logging to syslog, use the provided tag
     pub syslog_tag: Option<String>,
@@ -3420,6 +3423,15 @@ fn format_disk_letter(dev_prefix: &str, mut i: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_log_format() {
+        let format = "{levelchar}{localglog} {tid} {location}] {msg}";
+        let args = CrosvmCmdlineArgs::from_args(&["crosvm"], &["--log-format", format, "version"])
+            .unwrap();
+
+        assert_eq!(args.log_format.as_deref(), Some(format));
+    }
 
     #[test]
     fn disk_letter() {
