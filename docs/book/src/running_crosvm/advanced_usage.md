@@ -35,6 +35,38 @@ Available LEVELs: off, error, warn, info (default), debug, trace (only available
 
 Note: Logs will print all logs of the same or lower level. Ex: info will print error + warn + info.
 
+## Specify the log format
+
+This option is available on Linux when crosvm is built with the non-default `log-format` Cargo
+feature.
+
+To customize stderr and log-file output, pass a template to `--log-format` before the subcommand:
+
+```sh
+crosvm --log-format='{levelchar}{localglog} {tid} {location}] {msg}' devices
+```
+
+Platform syslog output keeps its platform-defined format. If `--log-format` is omitted, crosvm's
+existing log format is unchanged. Literal braces can be escaped as `{{` and `}}`.
+
+| Token         | Output                                                        |
+| ------------- | ------------------------------------------------------------- |
+| `{boottime}`  | Seconds since logging was initialized.                        |
+| `{wallclock}` | UTC RFC 3339 timestamp with six fractional digits.            |
+| `{glog}`      | UTC glog timestamp `MMDD HH:MM:SS.uuuuuu`.                    |
+| `{localglog}` | Local-time glog timestamp with the same shape as `{glog}`.    |
+| `{pid}`       | Process ID.                                                   |
+| `{tid}`       | Thread ID.                                                    |
+| `{thread}`    | Thread name, or `anonymous` for an unnamed thread.            |
+| `{level}`     | Log level (`ERROR`, `WARN`, `INFO`, `DEBUG`, or `TRACE`).     |
+| `{levelchar}` | Single-letter glog level (`E`, `W`, `I`, `D`, or `T`).        |
+| `{location}`  | Source file and line, or the log target if those are missing. |
+| `{msg}`       | Log message.                                                  |
+
+UTC date and time components are also available as `{year}`, `{month}`, `{day}`, `{hour}`,
+`{minute}`, `{second}`, `{micros}`, and `{offset}`. Prefix any of these names with `local` for the
+local-time equivalent, such as `{localyear}` or `{localoffset}`.
+
 ## Boot a Kernel
 
 To run a very basic VM with just a kernel and default devices:
