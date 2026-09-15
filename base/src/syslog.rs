@@ -46,6 +46,8 @@ compile_error!("The \"log-format\" feature is only supported on Linux.");
 use std::fmt::Display;
 use std::io;
 use std::io::Write;
+#[cfg(feature = "log-format")]
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::MutexGuard;
 
@@ -64,8 +66,10 @@ use crate::platform::syslog::PlatformSyslog;
 use crate::platform::RawDescriptor;
 
 #[cfg(feature = "log-format")]
-#[allow(dead_code)]
 mod log_format;
+
+#[cfg(feature = "log-format")]
+use log_format::LogFormatter;
 
 /// The priority (i.e. severity) of a syslog message.
 ///
@@ -234,6 +238,10 @@ pub struct LogArgs {
     ///
     /// Example: `off`, `trace`, `trace,crosvm=error,base::syslog=debug`
     pub filter: String,
+    /// Optional format for stderr and file output. Platform syslog output has a fixed format.
+    #[cfg(feature = "log-format")]
+    #[serde(default)]
+    pub log_format: Option<String>,
     /// If set to true will duplicate output to stderr
     pub stderr: bool,
     /// TAG to use for syslog output
@@ -248,6 +256,8 @@ impl Default for LogArgs {
     fn default() -> Self {
         Self {
             filter: String::from("info"),
+            #[cfg(feature = "log-format")]
+            log_format: None,
             stderr: true,
             proc_name: String::from("crosvm"),
             syslog: true,
@@ -278,11 +288,25 @@ impl State {
         let mut builder = env_filter::Builder::new();
         builder.parse(&cfg.log_args.filter);
         let filter = builder.build();
+        #[cfg(feature = "log-format")]
+        let log_formatter = cfg
+            .log_args
+            .log_format
+            .as_deref()
+            .map(LogFormatter::new)
+            .transpose()?
+            .map(Arc::new);
 
         let create_formatted_builder = || {
             let mut builder = env_logger::Builder::new();
 
-            // Output log lines w/ local ISO 8601 timestamps.
+            #[cfg(feature = "log-format")]
+            if let Some(formatter) = log_formatter.clone() {
+                builder.format(move |buf, record| formatter.write(buf, record));
+                return builder;
+            }
+
+            // Output log lines with UTC ISO 8601 timestamps.
             builder.format(|buf, record| {
                 writeln!(
                     buf,

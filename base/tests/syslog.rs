@@ -81,6 +81,39 @@ fn proc_name() {
 }
 
 #[test]
+#[cfg(feature = "log-format")]
+fn custom_log_format() {
+    let output = MockWrite::new();
+    let state = State::new(LogConfig {
+        log_args: LogArgs {
+            filter: String::from("info"),
+            log_format: Some(String::from("{levelchar} {location}] {msg}")),
+            stderr: false,
+            syslog: false,
+            ..Default::default()
+        },
+        pipe: Some(Box::new(output.clone())),
+        ..Default::default()
+    })
+    .unwrap();
+
+    state.log(
+        &log::RecordBuilder::new()
+            .level(Level::Error)
+            .file(Some("test.rs"))
+            .line(Some(42))
+            .args(format_args!("hello"))
+            .build(),
+    );
+
+    std::mem::drop(state);
+    assert_eq!(
+        "E test.rs:42] hello\n",
+        String::from_utf8_lossy(&output.into_inner())
+    );
+}
+
+#[test]
 fn macros() {
     test_only_ensure_inited().unwrap();
     log::error!("this is an error {}", 3);
