@@ -40,6 +40,9 @@
 //!
 //! [log-crate-url]: https://docs.rs/log/
 
+#[cfg(all(feature = "log-format", not(target_os = "linux")))]
+compile_error!("The \"log-format\" feature is only supported on Linux.");
+
 use std::fmt::Display;
 use std::io;
 use std::io::Write;
@@ -59,6 +62,10 @@ use thiserror::Error as ThisError;
 use crate::descriptor::AsRawDescriptor;
 use crate::platform::syslog::PlatformSyslog;
 use crate::platform::RawDescriptor;
+
+#[cfg(feature = "log-format")]
+#[allow(dead_code)]
+mod log_format;
 
 /// The priority (i.e. severity) of a syslog message.
 ///
@@ -154,6 +161,18 @@ pub enum Error {
     /// Error while attempting to connect socket.
     #[error("failed to connect socket: {0}")]
     Connect(io::Error),
+    /// The log format contains an unknown token.
+    #[cfg(feature = "log-format")]
+    #[error("unknown log format token '{{{0}}}'")]
+    FormatUnknownToken(String),
+    /// The log format contains a closing brace without a matching opening brace.
+    #[cfg(feature = "log-format")]
+    #[error("unmatched '}}' in log format")]
+    FormatUnmatchedBrace,
+    /// The log format contains an opening brace without a matching closing brace.
+    #[cfg(feature = "log-format")]
+    #[error("unterminated '{{' in log format")]
+    FormatUnterminatedBrace,
     /// There was an error using `open` to get the lowest file descriptor.
     #[error("failed to get lowest file descriptor: {0}")]
     GetLowestFd(io::Error),
