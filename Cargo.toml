@@ -355,6 +355,9 @@ media = ["devices/media"]
 
 #! ### Linux-specific feature flags
 
+## Enables custom formatting for stderr and log-file output. Only available on Linux.
+log-format = ["base/log-format"]
+
 ## Enables the use of the GenieZone hypervisor
 geniezone = ["devices/geniezone", "hypervisor/geniezone"]
 
@@ -485,6 +488,7 @@ all-default = [
     "gfxstream",
     "gfxstream_display",
     "libvda-stub",
+    "log-format",
     "media",
     "net",
     "noncoherent-dma",
