@@ -772,6 +772,8 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
     let mut log_config = LogConfig {
         log_args: LogArgs {
             filter: args.log_level,
+            #[cfg(feature = "log-format")]
+            log_format: args.log_format,
             proc_name: args.syslog_tag.unwrap_or("crosvm".to_string()),
             syslog: !args.no_syslog,
             ..Default::default()
