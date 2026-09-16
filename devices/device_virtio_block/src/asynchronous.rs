@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::io;
 use std::io::Write;
 use std::mem::size_of;
@@ -13,6 +15,7 @@ use std::result;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -279,6 +282,7 @@ async fn process_one_chain(
     disk_state: &AsyncRwLock<DiskState>,
     flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
+    signal_pending: &Cell<bool>,
 ) {
     let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
         .await
@@ -290,9 +294,38 @@ async fn process_one_chain(
         }
     };
 
-    let mut queue = queue.borrow_mut();
-    queue.add_used_with_bytes_written(avail_desc, len as u32);
-    queue.trigger_interrupt();
+    // Publish `used_idx` eagerly even though the notification is deferred: it is what the
+    // guest's `virtqueue_poll` re-check reads, so a suppressed notification usually costs
+    // nothing instead of stalling the driver until the next interrupt.
+    queue
+        .borrow_mut()
+        .add_used_with_bytes_written(avail_desc, len as u32);
+    signal_pending.set(true);
+}
+
+/// Takes every request that has already finished off `background_tasks`, then raises at most one
+/// interrupt covering all of them.
+///
+/// Interrupting per request costs an eventfd write plus a fence and a volatile read of
+/// `used_event` out of cross-process guest memory, which at high queue depth costs more than
+/// servicing the request. Coalescing is what the `VIRTIO_RING_F_EVENT_IDX` suppression logic in
+/// `Queue::trigger_interrupt` already expects: it is specified in terms of a flurry of `add_used`
+/// calls followed by a single notification, and because it compares against `last_used`, which
+/// only advances when an interrupt is actually raised, deferring the check only widens the
+/// interval in which it decides to notify. Coalescing can therefore add a spurious interrupt but
+/// never drop a required one.
+///
+/// This never suspends -- `poll!` resolves within the caller's current poll -- so the caller
+/// cannot be dropped part way through and leave `signal_pending` set.
+async fn signal_completed_requests<F: Future<Output = ()>>(
+    queue: &RefCell<Queue>,
+    background_tasks: &mut FuturesUnordered<F>,
+    signal_pending: &Cell<bool>,
+) {
+    while let Poll::Ready(Some(())) = futures::poll!(background_tasks.next()) {}
+    if signal_pending.replace(false) {
+        queue.borrow_mut().trigger_interrupt();
+    }
 }
 
 // There is one async task running `handle_queue` per virtio queue in use.
@@ -307,6 +340,11 @@ async fn handle_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Queue {
     let queue = RefCell::new(queue);
+    // Set by `process_one_chain` once a request is in the used ring, and cleared by
+    // `signal_completed_requests`. Every path on which this future can suspend clears it first,
+    // so a completion can neither be dropped nor held past the moment the worker stops making
+    // progress.
+    let signal_pending = Cell::new(false);
     let mut background_tasks = FuturesUnordered::new();
     let evt_future = evt.next_val().fuse();
     pin_mut!(evt_future);
@@ -318,11 +356,14 @@ async fn handle_queue(
         // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
         // eventfd).
         futures::select! {
-            // A request finished. Fall through to the pop loop below: the driver only kicks
-            // when it adds to an empty ring or when `avail_event` says a kick is required, so a
-            // completion is the only other point at which we are guaranteed to be running and
-            // can notice work the driver queued without a kick.
-            _ = background_tasks.next() => {}
+            // A request finished. Collect the rest of the completions the executor has already
+            // delivered so that the whole batch costs one interrupt, then fall through to the
+            // pop loop below: the driver only kicks when `avail_event` says a kick is required,
+            // so a completion is the only other point at which we are guaranteed to be running
+            // and can notice work the driver queued without a kick.
+            _ = background_tasks.next() => {
+                signal_completed_requests(&queue, &mut background_tasks, &signal_pending).await;
+            }
             res = evt_future => {
                 evt_future.set(evt.next_val().fuse());
                 if let Err(e) = res {
@@ -332,8 +373,17 @@ async fn handle_queue(
             }
             _ = stop_rx => {
                 // Process all the descriptors we've already popped from the queue so that we leave
-                // the queue in a consistent state.
-                background_tasks.collect::<()>().await;
+                // the queue in a consistent state. Signalling inside the loop stops one slow
+                // request from holding back the interrupt for requests that already finished.
+                loop {
+                    signal_completed_requests(&queue, &mut background_tasks, &signal_pending).await;
+                    if background_tasks.next().await.is_none() {
+                        break;
+                    }
+                }
+                // The tasks borrow `queue`, so the (now empty) collection has to go away before
+                // the queue can be moved back out of the `RefCell`.
+                drop(background_tasks);
                 return queue.into_inner();
             }
         };
@@ -347,6 +397,7 @@ async fn handle_queue(
                     &disk_state,
                     &flush_timer,
                     &flush_timer_armed,
+                    &signal_pending,
                 ));
             }
 
@@ -360,6 +411,13 @@ async fn handle_queue(
             if !popped || !queue.borrow_mut().enable_notification() {
                 break;
             }
+        }
+        // Submitting cannot complete a chain today -- `FuturesUnordered::push` does not poll --
+        // but keeping the check here means the flag is cleared unconditionally before the
+        // `select!` above suspends, so "no completion is ever left unsignalled at an await
+        // point" holds by construction rather than by argument about who polls what.
+        if signal_pending.replace(false) {
+            queue.borrow_mut().trigger_interrupt();
         }
     }
 }
@@ -1510,6 +1568,7 @@ mod tests {
         const USED_RING: u64 = 0x3000;
         const USED_IDX: u64 = USED_RING + 2;
         const AVAIL_EVENT: u64 = USED_RING + 4 + 8 * QUEUE_SIZE as u64;
+        const USED_EVENT: u64 = AVAIL_RING + 4 + 2 * QUEUE_SIZE as u64;
         // Each request gets a `REQ_STRIDE`-byte slot holding its header, data buffer and status.
         const REQ_BASE: u64 = 0x10000;
         const REQ_STRIDE: u64 = 0x1000;
@@ -1597,6 +1656,11 @@ mod tests {
         // kick behind them.
         mem.write_obj_at_addr(Le16::from(1u16), GuestAddress(AVAIL_RING + 2))
             .expect("writing avail idx failed");
+        // Ask to be notified only once the last request is used. The interrupt for the final
+        // batch is then the one the driver is relying on, so it pins down the end of the
+        // coalescing window rather than just "some interrupt happened".
+        mem.write_obj_at_addr(Le16::from(NUM_REQUESTS - 1), GuestAddress(USED_EVENT))
+            .expect("writing used event failed");
 
         let read_u16 = |addr: u64| -> u16 {
             mem.read_obj_from_addr::<Le16>(GuestAddress(addr))
@@ -1615,11 +1679,16 @@ mod tests {
         queue_config.set_used_ring(GuestAddress(USED_RING));
         queue_config.set_ready(true);
         let kick_evt = Event::new().unwrap();
+        let interrupt = Interrupt::new_for_test();
+        let interrupt_evt = interrupt
+            .get_interrupt_evt()
+            .try_clone()
+            .expect("cloning interrupt event failed");
         let queue = queue_config
             .activate(
                 &mem,
                 kick_evt.try_clone().expect("cloning kick event failed"),
-                Interrupt::new_for_test(),
+                interrupt,
             )
             .expect("QueueConfig::activate");
 
@@ -1640,6 +1709,9 @@ mod tests {
         let flush_timer_armed = Rc::new(RefCell::new(false));
         let mut poll_timer =
             TimerAsync::new(Timer::new().unwrap(), &ex).expect("Failed to create an async timer");
+        let mut irq_deadline =
+            TimerAsync::new(Timer::new().unwrap(), &ex).expect("Failed to create an async timer");
+        let interrupt_evt = EventAsync::new(interrupt_evt, &ex).unwrap();
 
         let (stop_tx, stop_rx) = oneshot::channel();
         let worker = handle_queue(
@@ -1677,6 +1749,16 @@ mod tests {
                     read_u16(USED_IDX) == NUM_REQUESTS
                 })
                 .await;
+
+                // Coalescing is allowed to merge notifications, but the one the driver asked
+                // for with `used_event` has to arrive or the guest waits forever.
+                irq_deadline.reset_oneshot(Duration::from_secs(10)).unwrap();
+                futures::select! {
+                    res = interrupt_evt.next_val().fuse() => res.expect("interrupt wait failed"),
+                    _ = irq_deadline.wait().fuse() => {
+                        panic!("no interrupt was delivered for the final batch")
+                    }
+                };
 
                 stop_tx.send(()).unwrap();
             };
