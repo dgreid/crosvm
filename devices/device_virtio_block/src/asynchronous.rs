@@ -318,7 +318,11 @@ async fn handle_queue(
         // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
         // eventfd).
         futures::select! {
-            _ = background_tasks.next() => continue,
+            // A request finished. Fall through to the pop loop below: the driver only kicks
+            // when it adds to an empty ring or when `avail_event` says a kick is required, so a
+            // completion is the only other point at which we are guaranteed to be running and
+            // can notice work the driver queued without a kick.
+            _ = background_tasks.next() => {}
             res = evt_future => {
                 evt_future.set(evt.next_val().fuse());
                 if let Err(e) = res {
@@ -1252,6 +1256,7 @@ mod tests {
     use std::fs::File;
     use std::mem::size_of_val;
     use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
 
     use data_model::Le32;
     use data_model::Le64;
@@ -1259,12 +1264,14 @@ mod tests {
     use devices::suspendable_virtio_tests;
     use devices::virtio::base_features;
     use devices::virtio::create_descriptor_chain;
+    use devices::virtio::Desc;
     use devices::virtio::DescriptorType;
     use devices::virtio::QueueConfig;
     use disk::SingleFileDisk;
     use hypervisor::ProtectionType;
     use tempfile::tempfile;
     use tempfile::TempDir;
+    use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
     use vm_memory::GuestAddress;
 
     use super::*;
@@ -1477,6 +1484,232 @@ mod tests {
         let status_offset = GuestAddress((0x1000 + size_of_val(&req_hdr) + 512) as u64);
         let status = mem.read_obj_from_addr::<u8>(status_offset).unwrap();
         assert_eq!(status, VIRTIO_BLK_S_OK);
+    }
+
+    /// Finishing a request must make the worker re-read the available ring.
+    ///
+    /// Once `avail_event` says the device has caught up, a driver adding to a ring that is not
+    /// empty is entitled to skip the kick, so a completion is the only other moment at which the
+    /// worker is running and can notice the new descriptors. If it only refills on a kick, those
+    /// descriptors sit in the ring until some unrelated event wakes the worker.
+    ///
+    /// The interleaving is pinned with the disk lock, which every request takes before touching
+    /// the image: while the test holds it as a writer the first request cannot finish, so the
+    /// worker is guaranteed to be parked with exactly one chain in flight at the point where the
+    /// remaining chains are published without a kick.
+    #[test]
+    fn completion_refills_avail_ring_without_a_kick() {
+        // Wire constants; `devices` does not re-export them.
+        const VIRTQ_DESC_F_NEXT: u16 = 0x1;
+        const VIRTQ_DESC_F_WRITE: u16 = 0x2;
+
+        const QUEUE_SIZE: u16 = 16;
+        const NUM_REQUESTS: u16 = 4;
+        const DESC_TABLE: u64 = 0x1000;
+        const AVAIL_RING: u64 = 0x2000;
+        const USED_RING: u64 = 0x3000;
+        const USED_IDX: u64 = USED_RING + 2;
+        const AVAIL_EVENT: u64 = USED_RING + 4 + 8 * QUEUE_SIZE as u64;
+        // Each request gets a `REQ_STRIDE`-byte slot holding its header, data buffer and status.
+        const REQ_BASE: u64 = 0x10000;
+        const REQ_STRIDE: u64 = 0x1000;
+        const DATA_LEN: u32 = 512;
+
+        /// Lets the worker run until `cond` holds, failing the test instead of hanging if it
+        /// never does. Everything being waited on here is work the executor owes us, so the
+        /// deadline only expires if the worker really did not act.
+        async fn wait_for(
+            timer: &mut TimerAsync<Timer>,
+            what: &str,
+            mut cond: impl FnMut() -> bool,
+        ) {
+            const DEADLINE: Duration = Duration::from_secs(10);
+            const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+            let start = Instant::now();
+            while !cond() {
+                assert!(start.elapsed() < DEADLINE, "timed out waiting for {what}");
+                timer.reset_oneshot(POLL_INTERVAL).unwrap();
+                timer.wait().await.unwrap();
+            }
+        }
+
+        let ex = Executor::new().expect("creating an executor failed");
+
+        let f = tempfile().unwrap();
+        let disk_size = 0x10000;
+        f.set_len(disk_size).unwrap();
+        let af = SingleFileDisk::new(f, &ex).expect("Failed to create SFD");
+
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+
+        let hdr_len = size_of::<virtio_blk_req_header>() as u32;
+        for i in 0..NUM_REQUESTS {
+            let req = REQ_BASE + u64::from(i) * REQ_STRIDE;
+            mem.write_obj_at_addr(
+                virtio_blk_req_header {
+                    req_type: Le32::from(VIRTIO_BLK_T_IN),
+                    reserved: Le32::from(0),
+                    sector: Le64::from(u64::from(i)),
+                },
+                GuestAddress(req),
+            )
+            .expect("writing req header failed");
+
+            // Three descriptors per request: header (readable), data (writable), status
+            // (writable).
+            let head = i * 3;
+            let descs = [
+                Desc {
+                    addr: Le64::from(req),
+                    len: Le32::from(hdr_len),
+                    flags: Le16::from(VIRTQ_DESC_F_NEXT),
+                    next: Le16::from(head + 1),
+                },
+                Desc {
+                    addr: Le64::from(req + u64::from(hdr_len)),
+                    len: Le32::from(DATA_LEN),
+                    flags: Le16::from(VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT),
+                    next: Le16::from(head + 2),
+                },
+                Desc {
+                    addr: Le64::from(req + u64::from(hdr_len) + u64::from(DATA_LEN)),
+                    len: Le32::from(1),
+                    flags: Le16::from(VIRTQ_DESC_F_WRITE),
+                    next: Le16::from(0),
+                },
+            ];
+            for (j, desc) in descs.into_iter().enumerate() {
+                let addr = DESC_TABLE + u64::from(head + j as u16) * 16;
+                mem.write_obj_at_addr(desc, GuestAddress(addr))
+                    .expect("writing descriptor failed");
+            }
+
+            // avail.ring[i], which follows the 2-byte flags and 2-byte idx fields.
+            mem.write_obj_at_addr(
+                Le16::from(head),
+                GuestAddress(AVAIL_RING + 4 + u64::from(i) * 2),
+            )
+            .expect("writing avail ring entry failed");
+        }
+        // Only the first request is visible to begin with; the rest are published later with no
+        // kick behind them.
+        mem.write_obj_at_addr(Le16::from(1u16), GuestAddress(AVAIL_RING + 2))
+            .expect("writing avail idx failed");
+
+        let read_u16 = |addr: u64| -> u16 {
+            mem.read_obj_from_addr::<Le16>(GuestAddress(addr))
+                .unwrap()
+                .to_native()
+        };
+
+        // `avail_event` is only published when `VIRTIO_RING_F_EVENT_IDX` is negotiated, and it is
+        // also the feature that lets a real driver skip the kick this test is about.
+        let event_idx = 1u64 << VIRTIO_RING_F_EVENT_IDX;
+        let mut queue_config = QueueConfig::new(QUEUE_SIZE, event_idx);
+        queue_config.ack_features(event_idx);
+        queue_config.set_size(QUEUE_SIZE);
+        queue_config.set_desc_table(GuestAddress(DESC_TABLE));
+        queue_config.set_avail_ring(GuestAddress(AVAIL_RING));
+        queue_config.set_used_ring(GuestAddress(USED_RING));
+        queue_config.set_ready(true);
+        let kick_evt = Event::new().unwrap();
+        let queue = queue_config
+            .activate(
+                &mem,
+                kick_evt.try_clone().expect("cloning kick event failed"),
+                Interrupt::new_for_test(),
+            )
+            .expect("QueueConfig::activate");
+
+        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
+            disk_image: Box::new(af),
+            read_only: false,
+            sparse: true,
+            id: Default::default(),
+            dontcache_read: false,
+            dontcache_write: false,
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
+                disk_size: Arc::new(AtomicU64::new(disk_size)),
+            })),
+        }));
+        let flush_timer = Rc::new(RefCell::new(
+            TimerAsync::new(Timer::new().unwrap(), &ex).expect("Failed to create an async timer"),
+        ));
+        let flush_timer_armed = Rc::new(RefCell::new(false));
+        let mut poll_timer =
+            TimerAsync::new(Timer::new().unwrap(), &ex).expect("Failed to create an async timer");
+
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = handle_queue(
+            disk_state.clone(),
+            queue,
+            EventAsync::new(kick_evt.try_clone().unwrap(), &ex).unwrap(),
+            flush_timer,
+            flush_timer_armed,
+            stop_rx,
+        );
+
+        let test = async {
+            // Taken before the worker's first poll, so the first request is certain to park in
+            // `execute_request` rather than run to completion.
+            let blocked = disk_state.lock().await;
+
+            let driver = async {
+                kick_evt.signal().unwrap();
+
+                // `pop` publishes `avail_event`, so this is the point at which the worker has
+                // taken the first chain and will not look at the ring again on its own.
+                wait_for(&mut poll_timer, "the worker to pop the first chain", || {
+                    read_u16(AVAIL_EVENT) == 1
+                })
+                .await;
+
+                mem.write_obj_at_addr(Le16::from(NUM_REQUESTS), GuestAddress(AVAIL_RING + 2))
+                    .expect("writing avail idx failed");
+
+                // Release the first request. Its completion is the only wakeup the worker gets
+                // from here on.
+                drop(blocked);
+
+                wait_for(&mut poll_timer, "the remaining chains to be used", || {
+                    read_u16(USED_IDX) == NUM_REQUESTS
+                })
+                .await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+
+        for i in 0..NUM_REQUESTS {
+            let elem = USED_RING + 4 + u64::from(i) * 8;
+            let id = mem
+                .read_obj_from_addr::<Le32>(GuestAddress(elem))
+                .unwrap()
+                .to_native();
+            let len = mem
+                .read_obj_from_addr::<Le32>(GuestAddress(elem + 4))
+                .unwrap()
+                .to_native();
+            assert_eq!(id, u32::from(i * 3), "used ring entry {i} has the wrong id");
+            assert_eq!(
+                len,
+                DATA_LEN + 1,
+                "used ring entry {i} has the wrong length"
+            );
+            let status = mem
+                .read_obj_from_addr::<u8>(GuestAddress(
+                    REQ_BASE + u64::from(i) * REQ_STRIDE + u64::from(hdr_len) + u64::from(DATA_LEN),
+                ))
+                .unwrap();
+            assert_eq!(status, VIRTIO_BLK_S_OK, "request {i} failed");
+        }
     }
 
     #[test]
