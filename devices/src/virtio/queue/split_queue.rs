@@ -293,6 +293,44 @@ impl SplitQueue {
         Wrapping(used_event)
     }
 
+    // Get the `idx` field of the available ring, which the driver advances as it publishes
+    // descriptor chains.
+    //
+    // The load is relaxed: a caller that goes on to read the descriptors themselves has to issue
+    // its own acquire barrier, as `peek()` does once it knows the ring is not empty.
+    fn get_avail_index(&self) -> Wrapping<u16> {
+        let avail_index_addr = self.avail_ring.unchecked_add(2);
+        let avail_index: u16 = self
+            .mem
+            .read_obj_from_addr_volatile(avail_index_addr)
+            .unwrap();
+
+        Wrapping(avail_index)
+    }
+
+    /// Ask the driver to kick again, and report whether it published descriptor chains that have
+    /// not been popped yet.
+    ///
+    /// Returns `true` if there is work in the available ring, in which case the caller has to
+    /// process it rather than wait: the kick for it may already have been skipped.
+    ///
+    /// The device suppresses kicks by advancing `avail_event` past the chains it has taken, so
+    /// re-arming is a store of `avail_event` followed by a re-read of `avail_idx`, and the two
+    /// must not be reordered. x86 allows a store to be buffered past a later load, so without
+    /// the fence the device can observe a stale-empty `avail_idx` while the driver observes the
+    /// old `avail_event` and skips the kick, leaving each side waiting for the other. `peek()`
+    /// is not enough on its own: it loads `avail_idx` relaxed and only fences once it has found
+    /// a chain.
+    pub fn enable_notification(&mut self) -> bool {
+        if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
+            self.set_avail_event(self.next_avail);
+        }
+
+        fence(Ordering::SeqCst);
+
+        self.get_avail_index() != self.next_avail
+    }
+
     /// Get the first available descriptor chain without removing it from the queue.
     /// Call `pop_peeked` to remove the returned descriptor chain from the queue.
     pub fn peek(&mut self) -> Option<DescriptorChain> {
@@ -889,5 +927,39 @@ mod tests {
         // At this moment driver has finished all the previous interrupts, so it
         // should inject interrupt again.
         assert_eq!(queue.trigger_interrupt(), true);
+    }
+
+    #[test]
+    fn enable_notification_rechecks_the_avail_ring() {
+        let mut queue_config =
+            QueueConfig::new(QUEUE_SIZE.try_into().unwrap(), 1 << VIRTIO_RING_F_EVENT_IDX);
+        let mem = GuestMemory::new(&[(GuestAddress(0x0), GUEST_MEMORY_SIZE)]).unwrap();
+        let mut queue = setup_vq(&mut queue_config, &mem);
+
+        let avail_idx_address = GuestAddress(AVAIL_OFFSET + offset_of!(Avail, idx) as u64);
+        let avail_event_address = GuestAddress(USED_OFFSET + offset_of!(Used, avail_event) as u64);
+        let read_avail_event = || {
+            mem.read_obj_from_addr::<Le16>(avail_event_address)
+                .unwrap()
+                .to_native()
+        };
+
+        // Nothing published, so the device may wait for a kick.
+        assert_eq!(queue.enable_notification(), false);
+
+        // The driver publishes a chain having seen the `avail_event` written above, which
+        // entitles it to skip the kick. Re-reading `avail_idx` after the store is what stops
+        // both sides waiting for the other.
+        let _ = mem.write_obj_at_addr(Le16::from(1u16), avail_idx_address);
+        assert_eq!(queue.enable_notification(), true);
+
+        let desc_chain = queue.pop().expect("the published chain should be popped");
+        drop(desc_chain);
+
+        // Clear the `avail_event` that `pop` wrote so the store below is the only thing that
+        // could have set it.
+        let _ = mem.write_obj_at_addr(Le16::from(0u16), avail_event_address);
+        assert_eq!(queue.enable_notification(), false);
+        assert_eq!(read_avail_event(), 1);
     }
 }
