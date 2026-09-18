@@ -257,6 +257,39 @@ impl PackedQueue {
         desc
     }
 
+    // Report whether the descriptor the device would take next has been made available by the
+    // driver. Unlike `peek()` this does not build a `DescriptorChain`, and a descriptor that
+    // cannot be read is reported as unavailable rather than logged; `peek()` does the reporting
+    // when the caller comes back for it.
+    fn next_desc_is_available(&self) -> bool {
+        let Some(desc_addr) = self
+            .desc_table
+            .checked_add(u64::from(self.avail_index.index.0) * 16)
+        else {
+            return false;
+        };
+
+        self.mem
+            .read_obj_from_addr::<PackedDesc>(desc_addr)
+            .map(|desc| desc.is_available(self.avail_index.wrap_counter as u16))
+            .unwrap_or(false)
+    }
+
+    /// Ask the driver to kick again, and report whether it made descriptors available that have
+    /// not been popped yet.
+    ///
+    /// See `SplitQueue::enable_notification` for why the store and the re-read have to be
+    /// separated by a fence.
+    pub fn enable_notification(&mut self) -> bool {
+        if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
+            self.set_avail_event(self.avail_index.to_desc());
+        }
+
+        fence(Ordering::SeqCst);
+
+        self.next_desc_is_available()
+    }
+
     /// Get the first available descriptor chain without removing it from the queue.
     /// Call `pop_peeked` to remove the returned descriptor chain from the queue.
     pub fn peek(&mut self) -> Option<DescriptorChain> {

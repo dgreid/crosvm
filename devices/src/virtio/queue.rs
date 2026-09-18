@@ -424,6 +424,19 @@ impl Queue {
         self.peek().map(PeekedDescriptorChain::pop)
     }
 
+    /// Ask the driver to kick again once it publishes more work, and report whether it already
+    /// published some that has not been popped yet.
+    ///
+    /// A device that has drained the queue must call this before waiting on the queue event.
+    /// If it returns `true` the device has to go back and pop, because the driver may have
+    /// decided no kick was needed for the chains it added.
+    pub fn enable_notification(&mut self) -> bool {
+        match self {
+            Queue::SplitVirtQueue(q) => q.enable_notification(),
+            Queue::PackedVirtQueue(q) => q.enable_notification(),
+        }
+    }
+
     /// try to pop DescriptorChain and collect until writable descriptors' total length
     /// bigger than request_length. If no enough descriptors, return None.
     pub fn try_pop_length(&mut self, request_length: usize) -> Option<Vec<DescriptorChain>> {

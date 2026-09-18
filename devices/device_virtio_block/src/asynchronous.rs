@@ -343,14 +343,29 @@ async fn handle_queue(
             return queue.into_inner();
         }
 
-        while let Some(descriptor_chain) = queue.borrow_mut().pop() {
-            background_tasks.push(process_one_chain(
-                &queue,
-                descriptor_chain,
-                &disk_state,
-                &flush_timer,
-                &flush_timer_armed,
-            ));
+        loop {
+            let mut popped = false;
+            while let Some(descriptor_chain) = queue.borrow_mut().pop() {
+                popped = true;
+                background_tasks.push(process_one_chain(
+                    &queue,
+                    descriptor_chain,
+                    &disk_state,
+                    &flush_timer,
+                    &flush_timer_armed,
+                ));
+            }
+
+            // `pop` told the driver a kick is not needed up to the chains it took; re-arm and
+            // re-check before going back to sleep, because the driver may have published more
+            // in between and skipped the kick for them.
+            //
+            // `popped` bounds this to one extra pass when the ring is not actually drainable:
+            // `pop` also returns `None` for a malformed chain without consuming it, and that
+            // leaves `enable_notification` reporting work forever.
+            if !popped || !queue.borrow_mut().enable_notification() {
+                break;
+            }
         }
     }
 }
