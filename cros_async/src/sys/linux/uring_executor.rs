@@ -53,14 +53,14 @@ use std::mem::MaybeUninit;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::io::RawFd;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Weak;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
-use std::thread;
-use std::thread::ThreadId;
 
 use base::trace;
 use base::warn;
@@ -298,6 +298,25 @@ impl Drop for RegisteredSource {
 // Number of entries in the ring.
 const NUM_ENTRIES: usize = 256;
 
+// `UringReactor::thread_id` value meaning that no thread has run the executor yet.
+const NO_THREAD: u64 = 0;
+
+// Returns an identifier for the calling thread.
+//
+// Like `ThreadId`, an identifier is unique for the lifetime of the process and is never reused, so
+// a recorded identifier can only ever match the thread it was taken from. `ThreadId` itself is not
+// usable here because it cannot be stored in an atomic: `ThreadId::as_u64` is still unstable, and
+// `thread::current()` clones an `Arc` on every call.
+fn current_thread_id() -> u64 {
+    thread_local! {
+        static THREAD_ID: u64 = {
+            static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(NO_THREAD + 1);
+            NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed)
+        };
+    }
+    THREAD_ID.with(|id| *id)
+}
+
 // An operation that has been submitted to the uring and is potentially being waited on.
 struct OpData {
     _file: Arc<File>,
@@ -324,7 +343,10 @@ pub struct UringReactor {
     // releasing the resources borrowed by the kernel before we free them.
     ctx: URingContext,
     ring: Mutex<Ring>,
-    thread_id: Mutex<Option<ThreadId>>,
+    // Identifier of the thread that runs tasks, or `NO_THREAD`. Read on every pending poll, so it
+    // is an atomic rather than a lock. All accesses are `Relaxed`: the value guards no other data,
+    // it only names a thread.
+    thread_id: AtomicU64,
 }
 
 impl UringReactor {
@@ -354,15 +376,14 @@ impl UringReactor {
                 ops: Slab::with_capacity(NUM_ENTRIES),
                 registered_sources: Slab::with_capacity(NUM_ENTRIES),
             }),
-            thread_id: Mutex::new(None),
+            thread_id: AtomicU64::new(NO_THREAD),
         })
     }
 
     fn runs_tasks_on_current_thread(&self) -> bool {
-        let executor_thread = self.thread_id.lock();
-        executor_thread
-            .map(|id| id == thread::current().id())
-            .unwrap_or(false)
+        // `NO_THREAD` is never handed out by `current_thread_id`, so this is false when no thread
+        // has run the executor yet.
+        self.thread_id.load(Ordering::Relaxed) == current_thread_id()
     }
 
     fn get_result(&self, token: &WakerToken, cx: &mut Context) -> Option<io::Result<u32>> {
@@ -710,7 +731,7 @@ impl Reactor for UringReactor {
         // Since the UringReactor is wrapped in an Arc it may end up being dropped from a different
         // thread than the one that called `run` or `run_until`. Since we know there are no other
         // references, just clear the thread id so that we don't panic.
-        *self.thread_id.lock() = None;
+        self.thread_id.store(NO_THREAD, Ordering::Relaxed);
 
         // Make sure all pending uring operations are completed as kernel may try to write to
         // memory that we may drop.
@@ -728,13 +749,18 @@ impl Reactor for UringReactor {
     }
 
     fn on_thread_start(&self) {
-        let current_thread = thread::current().id();
-        let mut thread_id = self.thread_id.lock();
-        assert_eq!(
-            *thread_id.get_or_insert(current_thread),
+        let current_thread = current_thread_id();
+        if let Err(existing) = self.thread_id.compare_exchange(
+            NO_THREAD,
             current_thread,
-            "`UringReactor::wait_for_work` cannot be called from more than one thread"
-        );
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            assert_eq!(
+                existing, current_thread,
+                "`UringReactor::wait_for_work` cannot be called from more than one thread"
+            );
+        }
     }
 
     fn wait_for_work(&self, set_processing: impl Fn()) -> std::io::Result<()> {
@@ -893,6 +919,7 @@ mod tests {
     use std::rc::Rc;
     use std::task::Context;
     use std::task::Poll;
+    use std::thread;
 
     use futures::executor::block_on;
 
