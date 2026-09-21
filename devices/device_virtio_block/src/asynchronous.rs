@@ -90,6 +90,7 @@ use vm_control::DiskControlResult;
 use vm_memory::GuestMemory;
 use zerocopy::IntoBytes;
 
+use crate::future_slab::FutureSlab;
 use crate::sys::*;
 use crate::DiskOption;
 
@@ -310,18 +311,17 @@ async fn handle_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Queue {
     let queue = RefCell::new(queue);
-    let mut background_tasks = FuturesUnordered::new();
+    let mut background_tasks = FutureSlab::new();
     let evt_future = evt.next_val().fuse();
     pin_mut!(evt_future);
     loop {
-        // Wait for the next signal from `evt` and process `background_tasks` in the meantime.
+        // Wait for the next signal from `evt`, running `background_tasks` in the meantime.
         //
-        // NOTE: We can't call `evt.next_val()` directly in the `select!` expression. That would
-        // create a new future each time, which, in the completion-based async backends like
-        // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
-        // eventfd).
+        // NOTE: We can't call `evt.next_val()` directly here. That would create a new future
+        // each time, which, in the completion-based async backends like io_uring, means we'd
+        // submit a new syscall each time (i.e. a race condition on the eventfd).
         let stop = poll_fn(|cx| {
-            while let Poll::Ready(Some(())) = background_tasks.poll_next_unpin(cx) {}
+            background_tasks.poll(cx);
             if stop_rx.poll_unpin(cx).is_ready() {
                 return Poll::Ready(true);
             }
@@ -337,7 +337,9 @@ async fn handle_queue(
         if stop {
             // Process all the descriptors we've already popped from the queue so that we leave
             // the queue in a consistent state.
-            background_tasks.collect::<()>().await;
+            background_tasks.drain().await;
+            // The futures borrow `queue`, so the slab has to go before it can be moved out.
+            drop(background_tasks);
             return queue.into_inner();
         }
 
