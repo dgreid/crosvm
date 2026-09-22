@@ -157,9 +157,16 @@ impl VfioPlatformDevice {
         Ok(())
     }
 
-    fn find_region(&self, addr: u64) -> Option<MmioInfo> {
+    fn find_region(&self, addr: u64, len: u64) -> Option<MmioInfo> {
+        if len == 0 {
+            return None;
+        }
+        let end = addr.checked_add(len)?;
         for mmio_info in self.mmio_regions.iter() {
-            if addr >= mmio_info.start && addr < mmio_info.start + mmio_info.length {
+            let Some(region_end) = mmio_info.start.checked_add(mmio_info.length) else {
+                continue;
+            };
+            if addr >= mmio_info.start && end <= region_end {
                 return Some(MmioInfo {
                     index: mmio_info.index,
                     start: mmio_info.start,
@@ -332,7 +339,7 @@ impl VfioPlatformDevice {
     }
 
     fn read_mmio(&mut self, addr: u64, data: &mut [u8]) {
-        if let Some(mmio_info) = self.find_region(addr) {
+        if let Some(mmio_info) = self.find_region(addr, data.len() as u64) {
             let offset = addr - mmio_info.start;
             let index = mmio_info.index;
             self.device.region_read(index, data, offset);
@@ -343,7 +350,7 @@ impl VfioPlatformDevice {
     }
 
     fn write_mmio(&mut self, addr: u64, data: &[u8]) {
-        if let Some(mmio_info) = self.find_region(addr) {
+        if let Some(mmio_info) = self.find_region(addr, data.len() as u64) {
             let offset = addr - mmio_info.start;
             let index = mmio_info.index;
             self.device.region_write(index, data, offset);
