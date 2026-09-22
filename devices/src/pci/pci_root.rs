@@ -918,22 +918,23 @@ impl BusDevice for PciVirtualConfigMmio {
     }
 
     fn read(&mut self, info: BusAccessInfo, data: &mut [u8]) {
-        let value = if info.offset % 4 != 0 || data.len() != 4 {
+        if info.offset % 4 != 0 || data.len() != 4 {
             error!(
                 "{} unexpected read at offset = {}, len = {}",
                 self.debug_label(),
                 info.offset,
                 data.len()
             );
-            0u32
-        } else {
-            let (address, register) =
-                PciAddress::from_config_address(info.offset as u32, self.register_bit_num);
-            self.pci_root
-                .lock()
-                .virtual_config_space_read(address, register)
-        };
-        data[0..4].copy_from_slice(&value.to_le_bytes()[..]);
+            data.fill(0);
+            return;
+        }
+        let (address, register) =
+            PciAddress::from_config_address(info.offset as u32, self.register_bit_num);
+        let value = self
+            .pci_root
+            .lock()
+            .virtual_config_space_read(address, register);
+        data.copy_from_slice(&value.to_le_bytes());
     }
 
     fn write(&mut self, info: BusAccessInfo, data: &[u8]) {
@@ -1085,5 +1086,42 @@ mod tests {
             &mut config_address,
         );
         assert_eq!(config_address, [0x44, 0x33, 0xAA, 0x55]);
+    }
+
+    #[test]
+    fn pci_virtual_config_mmio_short_read_zero_fills() {
+        let mut dev = PciVirtualConfigMmio::new(create_pci_root(), 13);
+        let aligned = BusAccessInfo {
+            offset: 0,
+            address: 0,
+            id: 0,
+        };
+
+        let mut one = [0xAAu8];
+        dev.read(aligned, &mut one);
+        assert_eq!(one, [0]);
+
+        let mut two = [0xBBu8, 0xBB];
+        dev.read(aligned, &mut two);
+        assert_eq!(two, [0, 0]);
+
+        let mut eight = [0xDDu8; 8];
+        dev.read(aligned, &mut eight);
+        assert_eq!(eight, [0; 8]);
+
+        let mut unaligned = [0xCCu8; 4];
+        dev.read(
+            BusAccessInfo {
+                offset: 1,
+                address: 1,
+                id: 0,
+            },
+            &mut unaligned,
+        );
+        assert_eq!(unaligned, [0; 4]);
+
+        // A 4-byte aligned read still completes.
+        let mut four = [0xEEu8; 4];
+        dev.read(aligned, &mut four);
     }
 }
