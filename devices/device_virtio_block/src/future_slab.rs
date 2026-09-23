@@ -4,6 +4,7 @@
 
 //! A set of futures polled by one task without allocating per future.
 
+#[cfg(test)]
 use std::future::poll_fn;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,6 +12,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::Context;
+#[cfg(test)]
 use std::task::Poll;
 use std::task::Wake;
 use std::task::Waker;
@@ -147,6 +149,7 @@ impl<F: Future<Output = ()>> FutureSlab<F> {
     }
 
     /// Polls the futures until they have all completed.
+    #[cfg(test)]
     pub async fn drain(&mut self) {
         poll_fn(|cx| {
             self.poll(cx);

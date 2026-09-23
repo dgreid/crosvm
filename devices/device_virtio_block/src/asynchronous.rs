@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -14,7 +15,6 @@ use std::result;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::task::ready;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -276,6 +276,39 @@ async fn process_one_request(
     Ok(available_bytes)
 }
 
+/// Interrupts owed for requests completed by `process_one_chain`.
+///
+/// The first request to complete in a batch interrupts the guest right away, and the rest of the
+/// batch shares one interrupt from `end_batch` once `handle_queue` has polled everything that's
+/// ready. The guest is usually still reading the used ring when the rest land and picks them up
+/// without waiting for that interrupt.
+#[derive(Clone, Copy, PartialEq)]
+enum Signal {
+    /// No requests have completed in this batch.
+    Idle,
+    /// One request has completed and it called `trigger_interrupt`.
+    Notified,
+    /// Requests have completed without calling `trigger_interrupt`.
+    Pending,
+}
+
+// Calls `trigger_interrupt` for the requests that completed after the first in the batch and
+// starts a new batch. Returns true if any requests completed.
+fn end_batch(queue: &RefCell<Queue>, signal: &Cell<Signal>) -> bool {
+    match signal.replace(Signal::Idle) {
+        Signal::Idle => false,
+        Signal::Notified => true,
+        Signal::Pending => {
+            queue.borrow_mut().trigger_interrupt();
+            true
+        }
+    }
+}
+
+// How many times in a row `handle_queue` checks for new requests because others completed before
+// it lets the other tasks on the worker run.
+const MAX_REFILLS: u32 = 16;
+
 /// Process one descriptor chain asynchronously.
 async fn process_one_chain(
     queue: &RefCell<Queue>,
@@ -283,6 +316,7 @@ async fn process_one_chain(
     disk_state: &AsyncRwLock<DiskState>,
     flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
+    signal: &Cell<Signal>,
 ) {
     let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
         .await
@@ -296,7 +330,12 @@ async fn process_one_chain(
 
     let mut queue = queue.borrow_mut();
     queue.add_used_with_bytes_written(avail_desc, len as u32);
-    queue.trigger_interrupt();
+    if signal.get() == Signal::Idle {
+        queue.trigger_interrupt();
+        signal.set(Signal::Notified);
+    } else {
+        signal.set(Signal::Pending);
+    }
 }
 
 // There is one async task running `handle_queue` per virtio queue in use.
@@ -311,33 +350,54 @@ async fn handle_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Queue {
     let queue = RefCell::new(queue);
+    let signal = Cell::new(Signal::Idle);
     let mut background_tasks = FutureSlab::new();
     let evt_future = futures::future::Either::Left(std::future::ready(Ok(0))).fuse();
     pin_mut!(evt_future);
+    let mut refills = 0;
     loop {
-        // Wait for the next signal from `evt` and process `background_tasks` in the meantime.
+        // Wait for the next signal from `evt` or for requests in `background_tasks` to complete.
         //
         // NOTE: We can't call `evt.next_val()` directly here. That would create a new future each
         // time, which, in the completion-based async backends like io_uring, means we'd submit a
         // new syscall each time (i.e. a race condition on the eventfd).
         let stop = poll_fn(|cx| {
             background_tasks.poll(cx);
+            let completed = end_batch(&queue, &signal);
             if stop_rx.poll_unpin(cx).is_ready() {
                 return Poll::Ready(true);
             }
-            let res = ready!(evt_future.poll_unpin(cx));
-            evt_future.set(futures::future::Either::Right(evt.next_val()).fuse());
-            if let Err(e) = res {
-                error!("Failed to read the next queue event: {:#}", e);
+            if let Poll::Ready(res) = evt_future.poll_unpin(cx) {
+                evt_future.set(futures::future::Either::Right(evt.next_val()).fuse());
+                if let Err(e) = res {
+                    error!("Failed to read the next queue event: {:#}", e);
+                }
+                return Poll::Ready(false);
             }
-            Poll::Ready(false)
+            // Check for new requests when others complete as well. The driver kicks for them
+            // anyway, but this saves waiting for the kick.
+            if completed && refills < MAX_REFILLS {
+                refills += 1;
+                return Poll::Ready(false);
+            }
+            refills = 0;
+            Poll::Pending
         })
         .await;
 
         if stop {
             // Process all the descriptors we've already popped from the queue so that we leave
             // the queue in a consistent state.
-            background_tasks.drain().await;
+            poll_fn(|cx| {
+                background_tasks.poll(cx);
+                end_batch(&queue, &signal);
+                if background_tasks.is_empty() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
             // The futures borrow `queue`, so the slab has to go before it can be moved out.
             drop(background_tasks);
             return queue.into_inner();
@@ -350,6 +410,7 @@ async fn handle_queue(
                 &disk_state,
                 &flush_timer,
                 &flush_timer_armed,
+                &signal,
             ));
         }
     }
@@ -1282,6 +1343,7 @@ mod tests {
     use hypervisor::ProtectionType;
     use tempfile::tempfile;
     use tempfile::TempDir;
+    use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
     use vm_memory::GuestAddress;
 
     use super::*;
@@ -1380,6 +1442,16 @@ mod tests {
                 .to_native()
         };
         (read(elem), read(elem + 4))
+    }
+
+    /// Returns the address of the avail ring's `used_event` for a queue of `size` entries.
+    fn used_event(size: u16) -> u64 {
+        AVAIL_RING + 4 + 2 * u64::from(size)
+    }
+
+    /// Returns the address of the used ring's `avail_event` for a queue of `size` entries.
+    fn avail_event(size: u16) -> u64 {
+        USED_RING + 4 + 8 * u64::from(size)
     }
 
     /// Activates a queue of `size` entries at the addresses above, with `features` acked. It's a
@@ -1837,6 +1909,165 @@ mod tests {
                 "request {i} failed"
             );
         }
+    }
+
+    /// A completed request makes the worker check for new requests without waiting for a kick.
+    ///
+    /// The test holds the disk lock so the first request can't complete until the rest have been
+    /// added, and never kicks for them. That stands in for a kick that hasn't arrived yet.
+    #[test]
+    fn completion_checks_for_new_requests() {
+        const QUEUE_SIZE: u16 = 16;
+        const NUM_REQUESTS: u16 = 4;
+        const DATA_LEN: u32 = 512;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_REQUESTS {
+            write_split_chain(&mem, i * 3, &read_request(&mem, i, DATA_LEN));
+            write_avail_entry(&mem, i, i * 3);
+        }
+        // Only the first request is available when the worker starts.
+        write_u16(&mem, AVAIL_IDX, 1);
+        // Only ask for an interrupt after the last request.
+        write_u16(&mem, used_event(QUEUE_SIZE), NUM_REQUESTS - 1);
+
+        let kick_evt = Event::new().unwrap();
+        let interrupt = Interrupt::new_for_test();
+        let interrupt_evt = EventAsync::new(
+            interrupt
+                .get_interrupt_evt()
+                .try_clone()
+                .expect("cloning interrupt event failed"),
+            &ex,
+        )
+        .unwrap();
+        // `avail_event` is only written with `VIRTIO_RING_F_EVENT_IDX`.
+        let features = 1 << VIRTIO_RING_F_EVENT_IDX;
+        let queue = activate_queue(&mem, QUEUE_SIZE, features, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let mut irq_deadline = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            let blocked = disk_state.lock().await;
+
+            let driver = async {
+                // The worker checks the queue when it starts, and `pop` sets `avail_event`.
+                wait_for(&mut poll_timer, "the first request to be popped", || {
+                    read_u16(&mem, avail_event(QUEUE_SIZE)) == 1
+                })
+                .await;
+
+                // Add the rest without kicking and let the first request complete.
+                write_u16(&mem, AVAIL_IDX, NUM_REQUESTS);
+                drop(blocked);
+
+                wait_for(&mut poll_timer, "all requests to be used", || {
+                    read_u16(&mem, USED_IDX) == NUM_REQUESTS
+                })
+                .await;
+                wait_for_event(&interrupt_evt, &mut irq_deadline, "the last interrupt").await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+        for i in 0..NUM_REQUESTS {
+            assert_eq!(
+                read_used_elem(&mem, i),
+                (u32::from(i * 3), DATA_LEN + 1),
+                "used ring entry {i} is wrong"
+            );
+            assert_eq!(
+                read_status(&mem, i, DATA_LEN),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+    }
+
+    /// Completes `num_requests` requests in one batch and returns how many interrupts were sent.
+    ///
+    /// The requests read zero bytes, so they all complete the first time they're polled. Without
+    /// `VIRTIO_RING_F_EVENT_IDX` every `trigger_interrupt` sends an interrupt, and a vhost-user
+    /// interrupt writes its eventfd every time, so on Linux the eventfd's count is the number of
+    /// interrupts.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn notifications_for_batch(num_requests: u16) -> u64 {
+        const QUEUE_SIZE: u16 = 16;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..num_requests {
+            write_split_chain(&mem, i * 2, &read_request(&mem, i, 0));
+            write_avail_entry(&mem, i, i * 2);
+        }
+        write_u16(&mem, AVAIL_IDX, num_requests);
+
+        let kick_evt = Event::new().unwrap();
+        let call_evt = Event::new().unwrap();
+        let notifications = EventAsync::new(
+            call_evt.try_clone().expect("cloning call event failed"),
+            &ex,
+        )
+        .unwrap();
+        let interrupt = Interrupt::new_vhost_user(call_evt, Box::new(|| {}));
+        let queue = activate_queue(&mem, QUEUE_SIZE, 0, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let mut irq_deadline = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            let driver = async {
+                kick_evt.signal().unwrap();
+                wait_for(&mut poll_timer, "every request to be used", || {
+                    read_u16(&mem, USED_IDX) == num_requests
+                })
+                .await;
+                stop_tx.send(()).unwrap();
+            };
+            let (queue, ()) = futures::future::join(worker, driver).await;
+
+            // The eventfd adds up the writes, so one read after the worker returns gets the total.
+            let count = wait_for_event(&notifications, &mut irq_deadline, "an interrupt").await;
+            (queue, count)
+        };
+
+        let (queue, count) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), num_requests);
+        for i in 0..num_requests {
+            assert_eq!(
+                read_status(&mem, i, 0),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+        count
+    }
+
+    /// A batch gets one interrupt for the first request and one for the rest.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn a_batch_notifies_for_its_head_and_once_for_the_rest() {
+        assert_eq!(notifications_for_batch(8), 2);
+    }
+
+    /// A lone request gets exactly one interrupt.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn a_single_request_costs_one_notification() {
+        assert_eq!(notifications_for_batch(1), 1);
     }
 
     #[test]
