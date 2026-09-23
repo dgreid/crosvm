@@ -84,7 +84,8 @@ impl<F> Chunk<F> {
 ///
 /// `FuturesUnordered` allocates a task for every future added to it. `FutureSlab` keeps futures in
 /// slots that are allocated a chunk at a time and reused, so it stops allocating once it has
-/// enough slots for the futures in flight.
+/// enough slots for the futures in flight. Chunks are never freed and `poll` checks every one of
+/// them, so the owner should limit how many futures it adds.
 pub struct FutureSlab<F> {
     chunks: Vec<Chunk<F>>,
     /// Unoccupied slots, used as a stack.
