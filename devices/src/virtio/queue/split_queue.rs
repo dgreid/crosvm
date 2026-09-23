@@ -320,6 +320,10 @@ impl SplitQueue {
         if next_avail.0 == avail_index {
             return None;
         }
+        if (Wrapping(avail_index) - next_avail).0 > self.size {
+            // The driver cannot reuse a ring entry until the device has used it.
+            return None;
+        }
 
         // This fence ensures that subsequent reads from the descriptor do not
         // get reordered and happen only after fetching the available_index and
@@ -730,6 +734,42 @@ mod tests {
     fn fake_desc_chain(mem: &GuestMemory) -> DescriptorChain {
         create_descriptor_chain(mem, GuestAddress(0), GuestAddress(0), Vec::new(), 0)
             .expect("failed to create descriptor chain")
+    }
+
+    #[test]
+    fn rejects_available_index_past_queue_size() {
+        let mut config = QueueConfig::new(QUEUE_SIZE as u16, 1 << VIRTIO_RING_F_EVENT_IDX);
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let mut queue = setup_vq(&mut config, &mem);
+        let index = GuestAddress(AVAIL_OFFSET + 2);
+
+        mem.write_obj_at_addr(Le16::from(u16::MAX), index).unwrap();
+        assert!(queue.pop().is_none());
+        assert_eq!(queue.next_avail_to_process(), 0);
+
+        mem.write_obj_at_addr(Le16::from(QUEUE_SIZE as u16), index)
+            .unwrap();
+        for _ in 0..QUEUE_SIZE {
+            assert!(queue.pop().is_some());
+        }
+        assert!(queue.pop().is_none());
+        assert_eq!(queue.next_avail_to_process(), QUEUE_SIZE as u16);
+    }
+
+    #[test]
+    fn accepts_available_index_wrapping_past_u16_max() {
+        let mut config = QueueConfig::new(QUEUE_SIZE as u16, 1 << VIRTIO_RING_F_EVENT_IDX);
+        config.set_next_avail(Wrapping(u16::MAX - 1));
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let mut queue = setup_vq(&mut config, &mem);
+        let index = GuestAddress(AVAIL_OFFSET + 2);
+
+        mem.write_obj_at_addr(Le16::from(1u16), index).unwrap();
+        for _ in 0..3 {
+            assert!(queue.pop().is_some());
+        }
+        assert_eq!(queue.next_avail_to_process(), 1);
+        assert!(queue.pop().is_none());
     }
 
     #[test]

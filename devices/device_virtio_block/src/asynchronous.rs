@@ -279,7 +279,8 @@ async fn process_one_chain(
     disk_state: &AsyncRwLock<DiskState>,
     flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
-) {
+) -> usize {
+    let descriptor_count = usize::from(avail_desc.count);
     let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
         .await
     {
@@ -293,6 +294,7 @@ async fn process_one_chain(
     let mut queue = queue.borrow_mut();
     queue.add_used_with_bytes_written(avail_desc, len as u32);
     queue.trigger_interrupt();
+    descriptor_count
 }
 
 // There is one async task running `handle_queue` per virtio queue in use.
@@ -307,6 +309,9 @@ async fn handle_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Queue {
     let queue = RefCell::new(queue);
+    // A driver cannot reuse a descriptor until the device uses it.
+    let max_in_flight_descriptors = usize::from(queue.borrow().size());
+    let mut in_flight_descriptors = 0;
     let mut background_tasks = FuturesUnordered::new();
     let evt_future = futures::future::Either::Left(std::future::ready(Ok(0))).fuse();
     pin_mut!(evt_future);
@@ -317,23 +322,46 @@ async fn handle_queue(
         // create a new future each time, which, in the completion-based async backends like
         // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
         // eventfd).
-        futures::select! {
-            _ = background_tasks.next() => continue,
+        let next_background_task = if background_tasks.is_empty() {
+            futures::future::Either::Left(futures::future::pending::<Option<usize>>())
+        } else {
+            futures::future::Either::Right(background_tasks.next())
+        };
+        let should_stop = futures::select! {
+            completed = next_background_task.fuse() => {
+                if let Some(count) = completed {
+                    in_flight_descriptors -= count;
+                }
+                false
+            },
             res = evt_future => {
                 evt_future.set(futures::future::Either::Right(evt.next_val()).fuse());
                 if let Err(e) = res {
                     error!("Failed to read the next queue event: {:#}", e);
                     continue;
                 }
+                false
             }
-            _ = stop_rx => {
-                // Process all the descriptors we've already popped from the queue so that we leave
-                // the queue in a consistent state.
-                background_tasks.collect::<()>().await;
-                return queue.into_inner();
-            }
+            _ = stop_rx => true,
         };
-        while let Some(descriptor_chain) = queue.borrow_mut().pop() {
+        if should_stop {
+            // Process all the descriptors we've already popped from the queue so that we leave
+            // the queue in a consistent state.
+            background_tasks.for_each(|_| async {}).await;
+            return queue.into_inner();
+        }
+        while in_flight_descriptors < max_in_flight_descriptors {
+            let descriptor_chain = {
+                let mut queue = queue.borrow_mut();
+                let Some(peeked) = queue.peek() else {
+                    break;
+                };
+                if usize::from(peeked.count) > max_in_flight_descriptors - in_flight_descriptors {
+                    break;
+                }
+                peeked.pop()
+            };
+            in_flight_descriptors += usize::from(descriptor_chain.count);
             background_tasks.push(process_one_chain(
                 &queue,
                 descriptor_chain,
@@ -1254,9 +1282,19 @@ impl VirtioDevice for BlockAsync {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use std::future::Future;
     use std::mem::size_of_val;
     use std::sync::atomic::AtomicU64;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use std::task::Poll;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use std::time::Instant;
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use base::WaitContext;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use data_model::Le16;
     use data_model::Le32;
     use data_model::Le64;
     #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -1269,6 +1307,8 @@ mod tests {
     use hypervisor::ProtectionType;
     use tempfile::tempfile;
     use tempfile::TempDir;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
     use vm_memory::GuestAddress;
 
     use super::*;
@@ -1409,6 +1449,138 @@ mod tests {
         assert_eq!([128; 1], b.queue_max_sizes());
         // Single queue device should not set VIRTIO_BLK_F_MQ
         assert_eq!(0, b.features() & (1 << VIRTIO_BLK_F_MQ) as u64);
+    }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn handle_queue_limits_in_flight_descriptors() {
+        const QUEUE_SIZE: u16 = 4;
+        const DESC_TABLE: u64 = 0x100;
+        const AVAIL_RING: u64 = 0x200;
+        const USED_RING: u64 = 0x300;
+
+        let ex = Executor::with_executor_kind(cros_async::sys::linux::ExecutorKindSys::Fd.into())
+            .unwrap();
+        let disk_file = tempfile().unwrap();
+        disk_file.set_len(0x1000).unwrap();
+        let disk_image = SingleFileDisk::new(disk_file, &ex).unwrap();
+        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
+            disk_image: Box::new(disk_image),
+            read_only: false,
+            sparse: true,
+            id: Default::default(),
+            dontcache_read: false,
+            dontcache_write: false,
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
+                disk_size: Arc::new(AtomicU64::new(0x1000)),
+            })),
+        }));
+        let mem = GuestMemory::new(&[(GuestAddress(0), 0x2000)]).unwrap();
+        let req_hdr = virtio_blk_req_header {
+            req_type: Le32::from(VIRTIO_BLK_T_GET_ID),
+            reserved: Le32::from(0),
+            sector: Le64::from(0),
+        };
+        mem.write_obj_at_addr(req_hdr, GuestAddress(0x1000))
+            .unwrap();
+        create_descriptor_chain(
+            &mem,
+            GuestAddress(DESC_TABLE),
+            GuestAddress(0x1000),
+            vec![
+                (DescriptorType::Readable, size_of_val(&req_hdr) as u32),
+                (DescriptorType::Writable, 21),
+            ],
+            0,
+        )
+        .unwrap();
+        let event_idx = 1u64 << VIRTIO_RING_F_EVENT_IDX;
+        let mut config = QueueConfig::new(QUEUE_SIZE, event_idx);
+        config.ack_features(event_idx);
+        config.set_desc_table(GuestAddress(DESC_TABLE));
+        config.set_avail_ring(GuestAddress(AVAIL_RING));
+        config.set_used_ring(GuestAddress(USED_RING));
+        config.set_ready(true);
+        let kick = Event::new().unwrap();
+        let queue = config
+            .activate(&mem, kick.try_clone().unwrap(), Interrupt::new_for_test())
+            .unwrap();
+        let wait_kick = WaitContext::build_with(&[(&kick, ())]).unwrap();
+        let evt = EventAsync::new(kick.try_clone().unwrap(), &ex).unwrap();
+        let flush_timer = Rc::new(RefCell::new(
+            TimerAsync::new(Timer::new().unwrap(), &ex).unwrap(),
+        ));
+        let flush_timer_armed = Rc::new(RefCell::new(false));
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let disk_lock = ex.run_until(disk_state.lock()).unwrap();
+        let handler = handle_queue(
+            disk_state.clone(),
+            queue,
+            evt,
+            flush_timer,
+            flush_timer_armed,
+            stop_rx,
+        );
+        pin_mut!(handler);
+
+        // Reuse the two-descriptor head while the first two requests cannot finish.
+        let avail_idx = GuestAddress(AVAIL_RING + 2);
+        mem.write_obj_at_addr(Le16::from(2u16), avail_idx).unwrap();
+        ex.run_until(futures::future::poll_fn(|cx| {
+            assert!(handler.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }))
+        .unwrap();
+
+        mem.write_obj_at_addr(Le16::from(4u16), avail_idx).unwrap();
+        kick.signal().unwrap();
+        ex.run_until(futures::future::poll_fn(|cx| {
+            assert!(handler.as_mut().poll(cx).is_pending());
+            if wait_kick.wait_timeout(Duration::ZERO).unwrap().is_empty() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            mem.read_obj_from_addr::<Le16>(GuestAddress(USED_RING + 2))
+                .unwrap()
+                .to_native(),
+            0
+        );
+        assert_eq!(
+            mem.read_obj_from_addr::<Le16>(GuestAddress(USED_RING + 4 + 8 * u64::from(QUEUE_SIZE)))
+                .unwrap()
+                .to_native(),
+            2
+        );
+        drop(disk_lock);
+        let mut poll_timer = TimerAsync::new(Timer::new().unwrap(), &ex).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let queue = ex
+            .run_until(async {
+                let driver = async {
+                    while mem
+                        .read_obj_from_addr::<Le16>(GuestAddress(USED_RING + 2))
+                        .unwrap()
+                        .to_native()
+                        != 4
+                    {
+                        assert!(
+                            Instant::now() < deadline,
+                            "requests stalled without a new kick"
+                        );
+                        poll_timer.reset_oneshot(Duration::from_millis(1)).unwrap();
+                        poll_timer.wait().await.unwrap();
+                    }
+                    stop_tx.send(()).unwrap();
+                };
+                futures::future::join(handler.as_mut(), driver).await.0
+            })
+            .unwrap();
+        assert_eq!(queue.next_avail_to_process(), 4);
     }
 
     #[test]
