@@ -1,0 +1,33 @@
+#!/bin/busybox sh
+# Copyright 2026 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+bdf=
+read -r cmdline </proc/cmdline
+for arg in $cmdline; do
+    case "$arg" in
+        repro.bdf=*) bdf=${arg#repro.bdf=} ;;
+    esac
+done
+
+if [ -z "$bdf" ]; then
+    echo "avail_idx_flood: set repro.bdf=PCI_BDF on the kernel command line"
+    echo "avail_idx_flood: virtio-blk PCI devices (choose a scratch disk):"
+    for pci in /sys/bus/pci/devices/*; do
+        [ -r "$pci/vendor" ] || continue
+        [ "$(cat "$pci/vendor")" = "0x1af4" ] || continue
+        case "$(cat "$pci/device")" in
+            0x1001|0x1042) echo "${pci##*/}" ;;
+        esac
+    done
+else
+    sh /run.sh "$bdf" --disposable || echo "avail_idx_flood: probe failed"
+fi
+
+echo "avail_idx_flood: initrd idle; terminate the test VM from the host"
+while :; do sleep 3600; done
