@@ -9,6 +9,7 @@ use acpi_tables::aml::Aml;
 use anyhow::anyhow;
 use anyhow::Context;
 use base::error;
+use base::info;
 use base::pagesize;
 use base::warn;
 use base::AsRawDescriptors;
@@ -40,6 +41,39 @@ const VIRT_MAGIC: u32 = 0x74726976; /* 'virt' */
 const VIRT_VERSION: u8 = 2;
 const VIRT_VENDOR: u32 = 0x4D565243; /* 'CRVM' */
 const VIRTIO_MMIO_REGION_SZ: u64 = 0x200;
+
+/// Registers written on every queue notification and interrupt. Tracing them
+/// buries the transport handshake in noise, so they are always skipped.
+const MMIO_TRACE_HOT_OFFSETS: [u32; 3] = [
+    VIRTIO_MMIO_QUEUE_NOTIFY,
+    VIRTIO_MMIO_INTERRUPT_STATUS,
+    VIRTIO_MMIO_INTERRUPT_ACK,
+];
+
+/// Returns whether `CROSVM_MMIO_TRACE` asked for a log of every guest access to
+/// a virtio-mmio transport register.
+///
+/// A driver that declines to bind to a virtio-mmio device leaves no trace in the
+/// guest log, so the transport handshake is the only way to tell "the guest never
+/// looked at this device" apart from "the guest probed it and walked away".
+fn mmio_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CROSVM_MMIO_TRACE").is_some())
+}
+
+fn mmio_trace_read(dev: &VirtioMmioDevice, info: &BusAccessInfo, data: &[u8]) {
+    if !mmio_trace_enabled() || MMIO_TRACE_HOT_OFFSETS.contains(&(info.offset as u32)) {
+        return;
+    }
+    base::info!(
+        "MMIOTRACE {} R addr={:#x} off={:#05x} len={} data={:02x?}",
+        dev.debug_label(),
+        info.address,
+        info.offset,
+        data.len(),
+        data
+    );
+}
 
 /// Implements the
 /// [MMIO](http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-1090002)
@@ -168,10 +202,20 @@ impl VirtioMmioDevice {
             })
             .collect::<anyhow::Result<BTreeMap<usize, Queue>>>()?;
 
+        let num_queues = queues.len();
         if let Err(e) = self.device.activate(mem, interrupt, queues) {
             error!("{} activate failed: {:#}", self.debug_label(), e);
             self.driver_status |= VIRTIO_CONFIG_S_NEEDS_RESET as u8;
         } else {
+            // A guest driver that binds successfully is otherwise silent on the
+            // host side, which makes "the guest has no driver for this device"
+            // indistinguishable from "the device is broken". Record the
+            // transition so the host log answers that question directly.
+            info!(
+                "{} activated by the guest driver with {} queue(s)",
+                self.debug_label(),
+                num_queues
+            );
             self.device_activated = true;
         }
 
@@ -183,6 +227,7 @@ impl VirtioMmioDevice {
         if info.offset >= VIRTIO_MMIO_CONFIG as u64 {
             self.device
                 .read_config(info.offset - VIRTIO_MMIO_CONFIG as u64, data);
+            mmio_trace_read(self, &info, data);
             return;
         }
 
@@ -281,9 +326,20 @@ impl VirtioMmioDevice {
 
         let val_arr = val.to_le_bytes();
         data.copy_from_slice(&val_arr);
+        mmio_trace_read(self, &info, data);
     }
 
     fn write_mmio(&mut self, info: BusAccessInfo, data: &[u8]) {
+        if mmio_trace_enabled() && !MMIO_TRACE_HOT_OFFSETS.contains(&(info.offset as u32)) {
+            base::info!(
+                "MMIOTRACE {} W addr={:#x} off={:#05x} len={} data={:02x?}",
+                self.debug_label(),
+                info.address,
+                info.offset,
+                data.len(),
+                data
+            );
+        }
         // Config space can be accessed with different widths (1, 2, or 4 bytes)
         if info.offset >= VIRTIO_MMIO_CONFIG as u64 {
             self.device
