@@ -1254,8 +1254,10 @@ impl VirtioDevice for BlockAsync {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    use std::future::Future;
     use std::mem::size_of_val;
     use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
 
     use data_model::Le32;
     use data_model::Le64;
@@ -1263,6 +1265,7 @@ mod tests {
     use devices::suspendable_virtio_tests;
     use devices::virtio::base_features;
     use devices::virtio::create_descriptor_chain;
+    use devices::virtio::Desc;
     use devices::virtio::DescriptorType;
     use devices::virtio::QueueConfig;
     use disk::SingleFileDisk;
@@ -1272,6 +1275,189 @@ mod tests {
     use vm_memory::GuestAddress;
 
     use super::*;
+
+    // Where the queue tests put things in guest memory: the queue's descriptor table (or packed
+    // ring), driver area and device area, then a page per request for its header, data and status.
+    const DESC_TABLE: u64 = 0x1000;
+    const AVAIL_RING: u64 = 0x2000;
+    const USED_RING: u64 = 0x3000;
+    const AVAIL_IDX: u64 = AVAIL_RING + 2;
+    const USED_IDX: u64 = USED_RING + 2;
+    const REQ_BASE: u64 = 0x10000;
+    const REQ_STRIDE: u64 = 0x1000;
+    const HDR_LEN: u32 = size_of::<virtio_blk_req_header>() as u32;
+
+    // Not exported by `devices`.
+    const VIRTQ_DESC_F_NEXT: u16 = 0x1;
+    const VIRTQ_DESC_F_WRITE: u16 = 0x2;
+
+    fn read_u16(mem: &GuestMemory, addr: u64) -> u16 {
+        mem.read_obj_from_addr::<Le16>(GuestAddress(addr))
+            .unwrap()
+            .to_native()
+    }
+
+    fn write_u16(mem: &GuestMemory, addr: u64, val: u16) {
+        mem.write_obj_at_addr(Le16::from(val), GuestAddress(addr))
+            .unwrap();
+    }
+
+    /// Returns the address of request `i`'s status byte, if it reads `data_len` bytes.
+    fn status_addr(i: u16, data_len: u32) -> u64 {
+        REQ_BASE + u64::from(i) * REQ_STRIDE + u64::from(HDR_LEN) + u64::from(data_len)
+    }
+
+    fn read_status(mem: &GuestMemory, i: u16, data_len: u32) -> u8 {
+        mem.read_obj_from_addr(GuestAddress(status_addr(i, data_len)))
+            .unwrap()
+    }
+
+    /// Writes the header of request `i`, a read of `data_len` bytes from sector `i`, and returns
+    /// its buffers as (address, length, descriptor flags). There's no data buffer if `data_len` is
+    /// zero.
+    fn read_request(mem: &GuestMemory, i: u16, data_len: u32) -> Vec<(u64, u32, u16)> {
+        let req = REQ_BASE + u64::from(i) * REQ_STRIDE;
+        mem.write_obj_at_addr(
+            virtio_blk_req_header {
+                req_type: Le32::from(VIRTIO_BLK_T_IN),
+                reserved: Le32::from(0),
+                sector: Le64::from(u64::from(i)),
+            },
+            GuestAddress(req),
+        )
+        .expect("writing req header failed");
+
+        let mut bufs = vec![(req, HDR_LEN, VIRTQ_DESC_F_NEXT)];
+        if data_len > 0 {
+            let data = req + u64::from(HDR_LEN);
+            bufs.push((data, data_len, VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT));
+        }
+        bufs.push((status_addr(i, data_len), 1, VIRTQ_DESC_F_WRITE));
+        bufs
+    }
+
+    /// Writes `bufs` to the descriptor table as a chain starting at descriptor `head`.
+    fn write_split_chain(mem: &GuestMemory, head: u16, bufs: &[(u64, u32, u16)]) {
+        for (j, &(addr, len, flags)) in bufs.iter().enumerate() {
+            let index = head + j as u16;
+            let next = if flags & VIRTQ_DESC_F_NEXT != 0 {
+                index + 1
+            } else {
+                0
+            };
+            let desc = Desc {
+                addr: Le64::from(addr),
+                len: Le32::from(len),
+                flags: Le16::from(flags),
+                next: Le16::from(next),
+            };
+            mem.write_obj_at_addr(desc, GuestAddress(DESC_TABLE + u64::from(index) * 16))
+                .expect("writing descriptor failed");
+        }
+    }
+
+    /// Puts descriptor `head` in entry `slot` of the avail ring.
+    fn write_avail_entry(mem: &GuestMemory, slot: u16, head: u16) {
+        write_u16(mem, AVAIL_RING + 4 + u64::from(slot) * 2, head);
+    }
+
+    /// Returns the id and length in entry `slot` of the used ring.
+    fn read_used_elem(mem: &GuestMemory, slot: u16) -> (u32, u32) {
+        let elem = USED_RING + 4 + u64::from(slot) * 8;
+        let read = |addr| {
+            mem.read_obj_from_addr::<Le32>(GuestAddress(addr))
+                .unwrap()
+                .to_native()
+        };
+        (read(elem), read(elem + 4))
+    }
+
+    /// Activates a queue of `size` entries at the addresses above, with `features` acked. It's a
+    /// packed queue if `features` includes `VIRTIO_F_RING_PACKED`.
+    fn activate_queue(
+        mem: &GuestMemory,
+        size: u16,
+        features: u64,
+        kick_evt: &Event,
+        interrupt: Interrupt,
+    ) -> Queue {
+        let mut config = QueueConfig::new(size, features);
+        config.ack_features(features);
+        config.set_size(size);
+        config.set_desc_table(GuestAddress(DESC_TABLE));
+        config.set_avail_ring(GuestAddress(AVAIL_RING));
+        config.set_used_ring(GuestAddress(USED_RING));
+        config.set_ready(true);
+        config
+            .activate(
+                mem,
+                kick_evt.try_clone().expect("cloning kick event failed"),
+                interrupt,
+            )
+            .expect("QueueConfig::activate")
+    }
+
+    /// Returns the state of a `disk_size` byte disk backed by a temporary file.
+    fn test_disk(ex: &Executor, disk_size: u64) -> DiskState {
+        let f = tempfile().unwrap();
+        f.set_len(disk_size).unwrap();
+        DiskState {
+            disk_image: Box::new(SingleFileDisk::new(f, ex).expect("Failed to create SFD")),
+            read_only: false,
+            sparse: true,
+            id: Default::default(),
+            dontcache_read: false,
+            dontcache_write: false,
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
+                disk_size: Arc::new(AtomicU64::new(disk_size)),
+            })),
+        }
+    }
+
+    fn test_timer(ex: &Executor) -> TimerAsync<Timer> {
+        TimerAsync::new(Timer::new().unwrap(), ex).expect("Failed to create an async timer")
+    }
+
+    /// Returns `handle_queue` for `queue`, with `disk_state` as the disk and `kick_evt` as the
+    /// queue event.
+    fn start_worker(
+        ex: &Executor,
+        disk_state: &Rc<AsyncRwLock<DiskState>>,
+        queue: Queue,
+        kick_evt: &Event,
+        stop_rx: oneshot::Receiver<()>,
+    ) -> impl Future<Output = Queue> {
+        handle_queue(
+            disk_state.clone(),
+            queue,
+            EventAsync::new(kick_evt.try_clone().unwrap(), ex).unwrap(),
+            Rc::new(RefCell::new(test_timer(ex))),
+            Rc::new(RefCell::new(false)),
+            stop_rx,
+        )
+    }
+
+    /// Polls `cond` every millisecond until it's true, panicking after ten seconds.
+    async fn wait_for(timer: &mut TimerAsync<Timer>, what: &str, mut cond: impl FnMut() -> bool) {
+        const DEADLINE: Duration = Duration::from_secs(10);
+        const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+        let start = Instant::now();
+        while !cond() {
+            assert!(start.elapsed() < DEADLINE, "timed out waiting for {what}");
+            timer.reset_oneshot(POLL_INTERVAL).unwrap();
+            timer.wait().await.unwrap();
+        }
+    }
+
+    /// Waits for `evt` to be signaled and returns its value, panicking after ten seconds.
+    async fn wait_for_event(evt: &EventAsync, timer: &mut TimerAsync<Timer>, what: &str) -> u64 {
+        timer.reset_oneshot(Duration::from_secs(10)).unwrap();
+        futures::select! {
+            res = evt.next_val().fuse() => res.expect("waiting for the event failed"),
+            _ = timer.wait().fuse() => panic!("timed out waiting for {what}"),
+        }
+    }
 
     #[test]
     fn read_size() {
@@ -1415,11 +1601,6 @@ mod tests {
     fn read_last_sector() {
         let ex = Executor::new().expect("creating an executor failed");
 
-        let f = tempfile().unwrap();
-        let disk_size = 0x1000;
-        f.set_len(disk_size).unwrap();
-        let af = SingleFileDisk::new(f, &ex).expect("Failed to create SFD");
-
         let mem = Rc::new(
             GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
                 .expect("Creating guest memory failed."),
@@ -1449,23 +1630,9 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let timer = Timer::new().expect("Failed to create a timer");
-        let flush_timer = Rc::new(RefCell::new(
-            TimerAsync::new(timer, &ex).expect("Failed to create an async timer"),
-        ));
+        let flush_timer = Rc::new(RefCell::new(test_timer(&ex)));
         let flush_timer_armed = Rc::new(RefCell::new(false));
-
-        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
-            disk_image: Box::new(af),
-            read_only: false,
-            sparse: true,
-            id: Default::default(),
-            dontcache_read: false,
-            dontcache_write: false,
-            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
-                disk_size: Arc::new(AtomicU64::new(disk_size)),
-            })),
-        }));
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x1000)));
 
         let fut = process_one_request(
             &mut avail_desc,
@@ -1485,9 +1652,6 @@ mod tests {
 
     #[test]
     fn read_beyond_last_sector() {
-        let f = tempfile().unwrap();
-        let disk_size = 0x1000;
-        f.set_len(disk_size).unwrap();
         let mem = Rc::new(
             GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
                 .expect("Creating guest memory failed."),
@@ -1519,23 +1683,9 @@ mod tests {
 
         let ex = Executor::new().expect("creating an executor failed");
 
-        let af = SingleFileDisk::new(f, &ex).expect("Failed to create SFD");
-        let timer = Timer::new().expect("Failed to create a timer");
-        let flush_timer = Rc::new(RefCell::new(
-            TimerAsync::new(timer, &ex).expect("Failed to create an async timer"),
-        ));
+        let flush_timer = Rc::new(RefCell::new(test_timer(&ex)));
         let flush_timer_armed = Rc::new(RefCell::new(false));
-        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
-            disk_image: Box::new(af),
-            read_only: false,
-            sparse: true,
-            id: Default::default(),
-            dontcache_read: false,
-            dontcache_write: false,
-            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
-                disk_size: Arc::new(AtomicU64::new(disk_size)),
-            })),
-        }));
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x1000)));
 
         let fut = process_one_request(
             &mut avail_desc,
@@ -1556,10 +1706,6 @@ mod tests {
     #[test]
     fn get_id() {
         let ex = Executor::new().expect("creating an executor failed");
-
-        let f = tempfile().unwrap();
-        let disk_size = 0x1000;
-        f.set_len(disk_size).unwrap();
 
         let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
             .expect("Creating guest memory failed.");
@@ -1588,25 +1734,14 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let af = SingleFileDisk::new(f, &ex).expect("Failed to create SFD");
-        let timer = Timer::new().expect("Failed to create a timer");
-        let flush_timer = Rc::new(RefCell::new(
-            TimerAsync::new(timer, &ex).expect("Failed to create an async timer"),
-        ));
+        let flush_timer = Rc::new(RefCell::new(test_timer(&ex)));
         let flush_timer_armed = Rc::new(RefCell::new(false));
 
         let id = b"a20-byteserialnumber";
 
         let disk_state = Rc::new(AsyncRwLock::new(DiskState {
-            disk_image: Box::new(af),
-            read_only: false,
-            sparse: true,
             id: *id,
-            dontcache_read: false,
-            dontcache_write: false,
-            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
-                disk_size: Arc::new(AtomicU64::new(disk_size)),
-            })),
+            ..test_disk(&ex, 0x1000)
         }));
 
         let fut = process_one_request(
@@ -1627,6 +1762,71 @@ mod tests {
         let id_offset = GuestAddress(0x1000 + size_of_val(&req_hdr) as u64);
         let returned_id = mem.read_obj_from_addr::<[u8; 20]>(id_offset).unwrap();
         assert_eq!(returned_id, *id);
+    }
+
+    /// Requests on a split queue are processed, used and interrupted for.
+    #[test]
+    fn split_queue_requests() {
+        const QUEUE_SIZE: u16 = 16;
+        const NUM_REQUESTS: u16 = 4;
+        const DATA_LEN: u32 = 512;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_REQUESTS {
+            write_split_chain(&mem, i * 3, &read_request(&mem, i, DATA_LEN));
+            write_avail_entry(&mem, i, i * 3);
+        }
+        write_u16(&mem, AVAIL_IDX, NUM_REQUESTS);
+
+        let kick_evt = Event::new().unwrap();
+        let interrupt = Interrupt::new_for_test();
+        let interrupt_evt = EventAsync::new(
+            interrupt
+                .get_interrupt_evt()
+                .try_clone()
+                .expect("cloning interrupt event failed"),
+            &ex,
+        )
+        .unwrap();
+        let queue = activate_queue(&mem, QUEUE_SIZE, 0, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let mut irq_deadline = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let driver = async {
+            // The worker checks the queue when it starts, so there's no kick.
+            wait_for(&mut poll_timer, "all requests to be used", || {
+                read_u16(&mem, USED_IDX) == NUM_REQUESTS
+            })
+            .await;
+            wait_for_event(&interrupt_evt, &mut irq_deadline, "an interrupt").await;
+            stop_tx.send(()).unwrap();
+        };
+
+        let (queue, ()) = ex
+            .run_until(futures::future::join(worker, driver))
+            .expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+        // The requests can complete in any order.
+        let mut used: Vec<_> = (0..NUM_REQUESTS)
+            .map(|slot| read_used_elem(&mem, slot))
+            .collect();
+        used.sort();
+        let expected: Vec<_> = (0..NUM_REQUESTS)
+            .map(|i| (u32::from(i * 3), DATA_LEN + 1))
+            .collect();
+        assert_eq!(used, expected);
+        for i in 0..NUM_REQUESTS {
+            assert_eq!(
+                read_status(&mem, i, DATA_LEN),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
     }
 
     #[test]
