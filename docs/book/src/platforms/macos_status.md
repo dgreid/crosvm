@@ -31,8 +31,16 @@ audio working, plus experimental socket_vmnet networking support.
 | MMIO Bus           | ✅ Working      | Full virtio MMIO v2 device support                           |
 | IRQ Delivery       | ✅ Working      | Edge-triggered SPI injection via IRQ handler thread          |
 | GPU (virtio-gpu)   | ✅ Working      | 2D framebuffer via MMIO, DRM/fb0 device in guest             |
-| Audio (virtio-snd) | ✅ Working      | CoreAudio backend; guest kernel needs CONFIG_SND_VIRTIO      |
+| Audio (virtio-snd) | ✅ Working      | CoreAudio backend; guest kernel needs CONFIG_SND_VIRTIO[^1]  |
 | SMP Boot           | ✅ Working      | PSCI CPU_ON, tested with up to 4 CPUs                        |
+
+[^1]: Stock Debian bookworm arm64 kernels (`6.1.0-*-arm64`) are built with
+    `# CONFIG_SND_VIRTIO is not set`, so they ship no `virtio_snd` module at all.
+    crosvm still exposes the device correctly (the guest enumerates it under
+    `/sys/bus/virtio/devices` with modalias `virtio:d00000019v*`), but nothing
+    binds to it and no kernel message is printed, because `virtio_mmio` only
+    logs on magic/version mismatches. Check `/boot/config-$(uname -r)` in the
+    guest before debugging the host side.
 
 ### Partially Working
 
