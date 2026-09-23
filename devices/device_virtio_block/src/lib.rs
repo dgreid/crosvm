@@ -20,6 +20,7 @@ use serde::Serializer;
 use vm_control::AnyControlTube;
 
 pub mod asynchronous;
+mod future_slab;
 pub mod sys;
 pub mod vhost_user;
 
