@@ -29,8 +29,27 @@ The guest receives its address, default route, and DNS servers through DHCP. Sha
 NAT for outbound traffic and permits the host to connect directly to the guest address. The macOS
 backend currently supports one queue pair and does not expose network offloads.
 
-The packet protocol and guest DHCP exchange have been tested with a local protocol helper. Live
-shared-mode DHCP and NAT validation with the privileged socket_vmnet service is still pending.
+Live shared-mode DHCP against the privileged socket_vmnet service is validated by
+`./tools/test_macos_boot.sh network`.
+
+### Confirming the guest bound the driver
+
+A successful `virtio_net` bind is completely silent: unlike virtio-blk and virtio-gpu, the driver
+logs nothing to the guest console when it probes, and the interface keeps the generic name `eth0`
+because a virtio-mmio device has no bus path for systemd's predictable naming to use. An absent
+`virtio_net` line in the boot log therefore says nothing about whether the device works. Check from
+inside the guest instead:
+
+```sh
+basename "$(readlink -f /sys/class/net/eth0/device/driver)"  # virtio_net
+basename "$(readlink -f /sys/class/net/eth0/device)"         # 10200.virtio_mmio
+ip -4 addr show dev eth0
+```
+
+Passing `ip=dhcp` on the kernel command line does not configure the interface, because the Debian
+arm64 kernel is built without `CONFIG_IP_PNP`; the guest's own userspace performs DHCP instead. On
+the host, `CROSVM_MMIO_TRACE=1` logs every guest access to a virtio-mmio transport register, which
+distinguishes "the guest never probed this device" from "the guest probed it and declined to bind".
 
 ## Host TAP configuration
 
