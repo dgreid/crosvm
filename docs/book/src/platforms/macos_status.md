@@ -27,7 +27,7 @@ audio working, plus experimental socket_vmnet networking support.
 | Virtual Timer      | ✅ Working      | PPI 11 via GIC interrupt delivery                            |
 | Block Devices      | ✅ Working      | virtio-blk via MMIO transport, async I/O                     |
 | Filesystem Sharing | ✅ Working      | virtiofs via --shared-dir, host-guest file sharing           |
-| Network            | ⚠️ Experimental | virtio-net via socket_vmnet; live shared NAT test pending    |
+| Network            | ✅ Working      | virtio-net via socket_vmnet; live shared-mode DHCP verified   |
 | MMIO Bus           | ✅ Working      | Full virtio MMIO v2 device support                           |
 | IRQ Delivery       | ✅ Working      | Edge-triggered SPI injection via IRQ handler thread          |
 | GPU (virtio-gpu)   | ✅ Working      | 2D framebuffer via MMIO, DRM/fb0 device in guest             |
@@ -145,11 +145,17 @@ Then pass its Unix socket to crosvm:
     vmlinuz
 ```
 
-Shared mode supplies DHCP, DNS, NAT, and direct host-to-guest connectivity. The packet protocol and
-guest DHCP exchange have been tested with a local helper; live shared-mode validation with the
-privileged socket_vmnet service is still pending. The macOS backend supports one queue pair per
-interface and does not currently expose checksum or segmentation offloads. Do not run crosvm with
-`sudo`; only the small socket_vmnet service needs vmnet.framework privileges.
+Shared mode supplies DHCP, DNS, NAT, and direct host-to-guest connectivity. Live shared-mode DHCP
+against the privileged socket_vmnet service is validated by `./tools/test_macos_boot.sh network`,
+which boots Debian, confirms `virtio_net` bound to the `virtio_mmio` transport, and pings the vmnet
+gateway from the guest. The macOS backend supports one queue pair per interface and does not
+currently expose checksum or segmentation offloads. Do not run crosvm with `sudo`; only the small
+socket_vmnet service needs vmnet.framework privileges.
+
+A successful `virtio_net` bind produces no guest console output at all, and the interface keeps the
+generic name `eth0` because a virtio-mmio device has no bus path for predictable naming. The absence
+of a `virtio_net` line in the boot log is therefore not evidence of a failure — see
+[Network](../devices/net.md) for how to confirm the bind from inside the guest.
 
 ## Architecture Notes
 
