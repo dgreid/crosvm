@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::poll_fn;
 use std::io;
 use std::io::Write;
 use std::mem::size_of;
@@ -13,6 +14,8 @@ use std::result;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::task::ready;
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -313,26 +316,30 @@ async fn handle_queue(
     loop {
         // Wait for the next signal from `evt` and process `background_tasks` in the meantime.
         //
-        // NOTE: We can't call `evt.next_val()` directly in the `select!` expression. That would
-        // create a new future each time, which, in the completion-based async backends like
-        // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
-        // eventfd).
-        futures::select! {
-            _ = background_tasks.next() => continue,
-            res = evt_future => {
-                evt_future.set(futures::future::Either::Right(evt.next_val()).fuse());
-                if let Err(e) = res {
-                    error!("Failed to read the next queue event: {:#}", e);
-                    continue;
-                }
+        // NOTE: We can't call `evt.next_val()` directly here. That would create a new future each
+        // time, which, in the completion-based async backends like io_uring, means we'd submit a
+        // new syscall each time (i.e. a race condition on the eventfd).
+        let stop = poll_fn(|cx| {
+            while let Poll::Ready(Some(())) = background_tasks.poll_next_unpin(cx) {}
+            if stop_rx.poll_unpin(cx).is_ready() {
+                return Poll::Ready(true);
             }
-            _ = stop_rx => {
-                // Process all the descriptors we've already popped from the queue so that we leave
-                // the queue in a consistent state.
-                background_tasks.collect::<()>().await;
-                return queue.into_inner();
+            let res = ready!(evt_future.poll_unpin(cx));
+            evt_future.set(futures::future::Either::Right(evt.next_val()).fuse());
+            if let Err(e) = res {
+                error!("Failed to read the next queue event: {:#}", e);
             }
-        };
+            Poll::Ready(false)
+        })
+        .await;
+
+        if stop {
+            // Process all the descriptors we've already popped from the queue so that we leave
+            // the queue in a consistent state.
+            background_tasks.collect::<()>().await;
+            return queue.into_inner();
+        }
+
         while let Some(descriptor_chain) = queue.borrow_mut().pop() {
             background_tasks.push(process_one_chain(
                 &queue,
