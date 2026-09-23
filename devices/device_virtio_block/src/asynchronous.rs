@@ -2148,6 +2148,134 @@ mod tests {
         );
     }
 
+    /// Requests on a packed queue complete, including one that wraps around the end of the ring.
+    #[test]
+    fn packed_queue() {
+        // Not exported by `devices`.
+        const VIRTQ_DESC_F_AVAIL: u16 = 1 << 7;
+        const VIRTQ_DESC_F_USED: u16 = 1 << 15;
+        const RING_EVENT_FLAGS_DESC: u16 = 0x2;
+        // A packed queue's device area holds the device event suppression structure.
+        const DEVICE_EVENT: u64 = USED_RING;
+
+        // Four requests of three descriptors each go around an eight entry ring one and a half
+        // times.
+        const QUEUE_SIZE: u16 = 8;
+        const NUM_REQUESTS: u16 = 4;
+        const DATA_LEN: u32 = 512;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+
+        // Adds request `i` starting at descriptor `pos`, counting from the start of the first
+        // lap. The avail and used flags flip each time the ring wraps.
+        let add_request = |i: u16, pos: u16| {
+            let bufs = read_request(&mem, i, DATA_LEN);
+            for (j, (addr, len, flags)) in bufs.into_iter().enumerate() {
+                let n = pos + j as u16;
+                let avail = if n < QUEUE_SIZE {
+                    VIRTQ_DESC_F_AVAIL
+                } else {
+                    VIRTQ_DESC_F_USED
+                };
+                let desc = DESC_TABLE + u64::from(n % QUEUE_SIZE) * 16;
+                mem.write_obj_at_addr(Le64::from(addr), GuestAddress(desc))
+                    .expect("writing descriptor failed");
+                mem.write_obj_at_addr(Le32::from(len), GuestAddress(desc + 8))
+                    .expect("writing descriptor failed");
+                write_u16(&mem, desc + 12, i);
+                write_u16(&mem, desc + 14, flags | avail);
+            }
+        };
+        // Returns the id and length of the used element at descriptor `pos`, or `None` if the
+        // device hasn't written it yet.
+        let used_elem = |pos: u16, first_lap: bool| -> Option<(u16, u32)> {
+            let desc = DESC_TABLE + u64::from(pos) * 16;
+            let used_flags = if first_lap {
+                VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED
+            } else {
+                0
+            };
+            if read_u16(&mem, desc + 14) & (VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED) != used_flags {
+                return None;
+            }
+            let len = mem
+                .read_obj_from_addr::<Le32>(GuestAddress(desc + 8))
+                .unwrap()
+                .to_native();
+            Some((read_u16(&mem, desc + 12), len))
+        };
+
+        add_request(0, 0);
+        add_request(1, 3);
+
+        let kick_evt = Event::new().unwrap();
+        let call_evt = Event::new().unwrap();
+        let notifications = EventAsync::new(
+            call_evt.try_clone().expect("cloning call event failed"),
+            &ex,
+        )
+        .unwrap();
+        let interrupt = Interrupt::new_vhost_user(call_evt, Box::new(|| {}));
+        let features = (1 << VIRTIO_F_RING_PACKED) | (1 << VIRTIO_RING_F_EVENT_IDX);
+        let queue = activate_queue(&mem, QUEUE_SIZE, features, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let mut irq_deadline = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            let driver = async {
+                // The worker checks the queue when it starts. Chains use three descriptors, so the
+                // used elements are written at 0 and 3 in whichever order the requests complete.
+                wait_for(&mut poll_timer, "the first two requests to be used", || {
+                    used_elem(0, true).is_some() && used_elem(3, true).is_some()
+                })
+                .await;
+                let mut ids = [used_elem(0, true).unwrap(), used_elem(3, true).unwrap()];
+                ids.sort();
+                assert_eq!(ids, [(0, DATA_LEN + 1), (1, DATA_LEN + 1)]);
+                // Kick when descriptor 6 of the first lap is made available.
+                assert_eq!(read_u16(&mem, DEVICE_EVENT), 6 | 1 << 15);
+                assert_eq!(read_u16(&mem, DEVICE_EVENT + 2), RING_EVENT_FLAGS_DESC);
+                wait_for_event(&notifications, &mut irq_deadline, "the first interrupt").await;
+
+                // Request 2 wraps around the end of the ring and request 3 is in the second lap.
+                add_request(2, 6);
+                add_request(3, 9);
+                kick_evt.signal().unwrap();
+
+                wait_for(&mut poll_timer, "the last two requests to be used", || {
+                    used_elem(6, true).is_some() && used_elem(1, false).is_some()
+                })
+                .await;
+                let mut ids = [used_elem(6, true).unwrap(), used_elem(1, false).unwrap()];
+                ids.sort();
+                assert_eq!(ids, [(2, DATA_LEN + 1), (3, DATA_LEN + 1)]);
+                // Kick when descriptor 4 of the second lap is made available.
+                assert_eq!(read_u16(&mem, DEVICE_EVENT), 4);
+                assert_eq!(read_u16(&mem, DEVICE_EVENT + 2), RING_EVENT_FLAGS_DESC);
+                wait_for_event(&notifications, &mut irq_deadline, "the last interrupt").await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS * 3 % QUEUE_SIZE);
+        for i in 0..NUM_REQUESTS {
+            assert_eq!(
+                read_status(&mem, i, DATA_LEN),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+    }
+
     #[test]
     fn reset_and_reactivate_single_worker() {
         reset_and_reactivate(false, None);
