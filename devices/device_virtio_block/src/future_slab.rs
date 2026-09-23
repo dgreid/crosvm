@@ -240,20 +240,22 @@ mod tests {
             });
         }
 
-        cros_async::block_on(async {
-            // The future is waiting on `rx`, so it should still be in the set.
-            poll_fn(|cx| {
-                slab.poll(cx);
-                Poll::Ready(())
-            })
-            .await;
-            assert_eq!(slab.len(), 1);
-            assert!(!done.get());
+        let woken = Arc::new(CountingWaker(AtomicU64::new(0)));
+        let waker = Waker::from(woken.clone());
+        let mut cx = Context::from_waker(&waker);
 
-            tx.send(()).unwrap();
-            slab.drain().await;
-        });
+        // The future is waiting on `rx`, so it stays in the set.
+        slab.poll(&mut cx);
+        assert_eq!(slab.len(), 1);
+        assert_eq!(woken.0.load(Ordering::Relaxed), 0);
+
+        // Sending wakes the future, which has to wake the owner so it polls again.
+        tx.send(()).unwrap();
+        assert_eq!(woken.0.load(Ordering::Relaxed), 1);
+
+        slab.poll(&mut cx);
         assert!(done.get());
+        assert!(slab.is_empty());
     }
 
     #[test]
