@@ -100,11 +100,17 @@ pub struct CoreAudioPlaybackStream {
     interval: Duration,
     next_frame: Duration,
     start_time: Option<Instant>,
+    frames_committed: u64,
+    peak_since_log: f32,
+    next_log: Option<Instant>,
 }
 
 // SAFETY: All fields are Send. The raw pointer in _callback_data is used only
 // by the CoreAudio render thread via the ring buffer's atomic operations.
 unsafe impl Send for CoreAudioPlaybackStream {}
+
+/// How often the playback path reports progress once audio is flowing.
+const PLAYBACK_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 impl audio_streams::BufferCommit for CoreAudioPlaybackStream {
     fn commit(&mut self, nframes: usize) {
@@ -126,6 +132,25 @@ impl audio_streams::BufferCommit for CoreAudioPlaybackStream {
                 "CoreAudio ring buffer full, dropped {} bytes of audio",
                 float_bytes.len() - written
             );
+        }
+
+        // Track the loudest sample so the log can distinguish a stream that is
+        // carrying real audio from one that is dutifully moving silence.
+        let peak = float_buf.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        self.peak_since_log = self.peak_since_log.max(peak);
+        self.frames_committed += nframes as u64;
+
+        let now = Instant::now();
+        if self.next_log.is_none_or(|next| now >= next) {
+            self.next_log = Some(now + PLAYBACK_LOG_INTERVAL);
+            base::info!(
+                "CoreAudio playback: {} frames from the guest, {} bytes rendered by CoreAudio, \
+                 peak {:.3}",
+                self.frames_committed,
+                self.ring_buffer.total_read(),
+                self.peak_since_log,
+            );
+            self.peak_since_log = 0.0;
         }
     }
 }
@@ -250,7 +275,18 @@ fn make_stream(
         interval,
         next_frame: interval,
         start_time: None,
+        frames_committed: 0,
+        peak_since_log: 0.0,
+        next_log: None,
     };
+
+    base::info!(
+        "CoreAudio playback stream started: {} ch, {} Hz, {:?}, {} frame period",
+        num_channels,
+        frame_rate,
+        format,
+        buffer_size,
+    );
 
     Ok((CoreAudioStreamControl { audio_unit: au }, stream))
 }

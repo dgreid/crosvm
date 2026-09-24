@@ -40,6 +40,16 @@ impl RingBuffer {
         self.capacity
     }
 
+    /// Total bytes the consumer has taken out of the buffer since it was created.
+    ///
+    /// The read index only ever advances, so this doubles as a running count of
+    /// how much audio the CoreAudio render thread has actually pulled. That is
+    /// the only observable that distinguishes "the guest handed us samples" from
+    /// "CoreAudio played them".
+    pub fn total_read(&self) -> usize {
+        self.read_idx.load(Ordering::Acquire)
+    }
+
     pub fn available_read(&self) -> usize {
         let w = self.write_idx.load(Ordering::Acquire);
         let r = self.read_idx.load(Ordering::Acquire);
