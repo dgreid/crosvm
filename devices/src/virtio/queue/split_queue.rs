@@ -64,6 +64,9 @@ pub struct SplitQueue {
     // Device feature bits accepted by the driver
     features: u64,
     last_used: Wrapping<u16>,
+
+    /// Set by `set_avail_event()` and cleared when `peek()` fences it.
+    avail_event_changed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -140,6 +143,7 @@ impl SplitQueue {
             // snapshot system since it is much simpler to just use the zero
             // value and send a potentially spurious interrupt on restore).
             last_used: Wrapping(0),
+            avail_event_changed: false,
         })
     }
 
@@ -258,6 +262,7 @@ impl SplitQueue {
         self.mem
             .write_obj_at_addr_volatile(avail_index.0, avail_event_addr)
             .unwrap();
+        self.avail_event_changed = true;
     }
 
     // Query the value of a single-bit flag in the available ring.
@@ -312,13 +317,21 @@ impl SplitQueue {
         let avail_index_atomic = unsafe { AtomicU16::from_ptr(avail_index_ptr) };
 
         // Check if the driver has published any new descriptors beyond `self.next_avail`. This uses
-        // a `Relaxed` load because we do not need a memory barrier if there are no new descriptors.
-        // If the ring is not empty, the `fence()` below will provide the necessary ordering,
-        // pairing with the write memory barrier in the driver.
+        // a `Relaxed` load. If the ring is not empty, the `fence()` below will provide the
+        // necessary ordering, pairing with the write memory barrier in the driver.
         let avail_index: u16 = avail_index_atomic.load(Ordering::Relaxed);
         let next_avail = self.next_avail;
         if next_avail.0 == avail_index {
-            return None;
+            if !self.avail_event_changed {
+                return None;
+            }
+            // The driver doesn't kick for chains it adds before it sees the new `avail_event`.
+            // Make sure the store is visible to it and check again before reporting empty.
+            self.avail_event_changed = false;
+            fence(Ordering::SeqCst);
+            if next_avail.0 == avail_index_atomic.load(Ordering::Relaxed) {
+                return None;
+            }
         }
 
         // This fence ensures that subsequent reads from the descriptor do not
@@ -613,6 +626,7 @@ impl SplitQueue {
             next_used: s.next_used,
             features: s.features,
             last_used: s.last_used,
+            avail_event_changed: false,
         };
         Ok(queue)
     }

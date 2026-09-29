@@ -111,6 +111,9 @@ pub struct PackedQueue {
 
     // Read-only by the device, Includes information for reducing the number of driver events
     driver_event_suppression: GuestAddress,
+
+    // Set by `set_avail_event()` and cleared when `peek()` fences it.
+    avail_event_changed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -172,6 +175,7 @@ impl PackedQueue {
             avail_index: PackedQueueIndex::default(),
             use_index: PackedQueueIndex::default(),
             signalled_used_index: PackedQueueIndex::default(),
+            avail_event_changed: false,
         })
     }
 
@@ -242,6 +246,7 @@ impl PackedQueue {
         self.mem
             .write_obj_at_addr_volatile(event, self.device_event_suppression)
             .unwrap();
+        self.avail_event_changed = true;
     }
 
     // Get the driver event suppression.
@@ -265,16 +270,24 @@ impl PackedQueue {
             .checked_add((self.avail_index.index.0 as u64) * 16)
             .expect("peeked address will not overflow");
 
-        let desc = self
-            .mem
-            .read_obj_from_addr::<PackedDesc>(desc_addr)
-            .inspect_err(|_e| {
-                error!("failed to read desc {:#x}", desc_addr.offset());
-            })
-            .ok()?;
-
-        if !desc.is_available(self.avail_index.wrap_counter as u16) {
-            return None;
+        loop {
+            let desc = self
+                .mem
+                .read_obj_from_addr::<PackedDesc>(desc_addr)
+                .inspect_err(|_e| {
+                    error!("failed to read desc {:#x}", desc_addr.offset());
+                })
+                .ok()?;
+            if desc.is_available(self.avail_index.wrap_counter as u16) {
+                break;
+            }
+            if !self.avail_event_changed {
+                return None;
+            }
+            // The driver doesn't kick for descriptors it adds before it sees the new device event.
+            // Make sure the store is visible to it and check again before reporting empty.
+            self.avail_event_changed = false;
+            fence(Ordering::SeqCst);
         }
 
         // This fence ensures that subsequent reads from the descriptor do not
