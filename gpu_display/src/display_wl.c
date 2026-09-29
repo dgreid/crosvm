@@ -360,6 +360,42 @@ static const struct wl_keyboard_listener wl_keyboard_listener = {
 	.repeat_info = wl_keyboard_repeat_info,
 };
 
+/* Wayland pointer events are in surface coordinates. The viewport shows the
+ * scanout at width/scale by height/scale, while the guest touchscreen range
+ * is the full buffer. Multiply through or a click lands at 1/scale.
+ */
+static void pointer_update_position(struct input *input,
+				    struct wl_surface *wl_surface,
+				    wl_fixed_t x, wl_fixed_t y)
+{
+	double scale = 1.0;
+	double lx = wl_fixed_to_double(x);
+	double ly = wl_fixed_to_double(y);
+	struct dwl_surface *surface = NULL;
+	int32_t px;
+	int32_t py;
+
+	if (wl_surface)
+		surface = wl_surface_get_user_data(wl_surface);
+	if (surface && surface->scale > 0.0)
+		scale = surface->scale;
+
+	px = (int32_t)(lx * scale + 0.5);
+	py = (int32_t)(ly * scale + 0.5);
+	if (px < 0)
+		px = 0;
+	if (py < 0)
+		py = 0;
+	if (surface) {
+		if (px >= (int32_t)surface->width)
+			px = (int32_t)surface->width - 1;
+		if (py >= (int32_t)surface->height)
+			py = (int32_t)surface->height - 1;
+	}
+	input->pointer_x = px;
+	input->pointer_y = py;
+}
+
 static void pointer_enter_handler(void *data, struct wl_pointer *wl_pointer,
 				  uint32_t serial, struct wl_surface *surface,
 				  wl_fixed_t x, wl_fixed_t y)
@@ -370,8 +406,7 @@ static void pointer_enter_handler(void *data, struct wl_pointer *wl_pointer,
 	(void)serial;
 
 	input->pointer_input_surface = surface;
-	input->pointer_x = wl_fixed_to_int(x);
-	input->pointer_y = wl_fixed_to_int(y);
+	pointer_update_position(input, surface, x, y);
 }
 
 static void pointer_leave_handler(void *data, struct wl_pointer *wl_pointer,
@@ -395,8 +430,7 @@ static void pointer_motion_handler(void *data, struct wl_pointer *wl_pointer,
 	(void)wl_pointer;
 	(void)time;
 
-	input->pointer_x = wl_fixed_to_int(x);
-	input->pointer_y = wl_fixed_to_int(y);
+	pointer_update_position(input, input->pointer_input_surface, x, y);
 	if (input->pointer_lbutton_state) {
 		event.surface_descriptor = input->pointer_input_surface;
 		event.event_type = DWL_EVENT_TYPE_TOUCH_MOTION;
