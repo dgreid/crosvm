@@ -389,6 +389,12 @@ impl SplitQueue {
                 None => {
                     if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
                         self.set_avail_event(self.next_avail);
+                        // The `peek()` above ran before this store so it didn't fence it. The
+                        // caller waits for a kick after `None`, so peek again to fence the store
+                        // and pick up any chain the driver added without kicking.
+                        if self.peek().is_some() {
+                            continue;
+                        }
                     }
                     // Reverse the effect of pop
                     self.next_avail -= Wrapping(descriptors.len() as u16);
