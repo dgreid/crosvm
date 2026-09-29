@@ -451,3 +451,84 @@ impl PackedQueue {
         bail!("Restore for packed virtqueue not implemented.");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use data_model::Le16;
+    use data_model::Le32;
+    use data_model::Le64;
+    use virtio_sys::virtio_config::VIRTIO_F_RING_PACKED;
+
+    use super::*;
+    use crate::virtio::Queue;
+
+    const GUEST_MEMORY_SIZE: u64 = 0x10000;
+    const DESC_OFFSET: u64 = 0;
+    const DRIVER_EVENT_OFFSET: u64 = 0x200;
+    const DEVICE_EVENT_OFFSET: u64 = 0x400;
+    const QUEUE_SIZE: u16 = 0x10;
+    const BUFFER_OFFSET: u64 = 0x8000;
+    const BUFFER_LEN: u32 = 0x400;
+
+    fn setup_packed_queue(mem: &GuestMemory) -> PackedQueue {
+        let features = (1u64 << VIRTIO_RING_F_EVENT_IDX) | (1u64 << VIRTIO_F_RING_PACKED);
+        let mut config = QueueConfig::new(QUEUE_SIZE, features);
+        config.set_desc_table(GuestAddress(DESC_OFFSET));
+        config.set_avail_ring(GuestAddress(DRIVER_EVENT_OFFSET));
+        config.set_used_ring(GuestAddress(DEVICE_EVENT_OFFSET));
+        config.ack_features(features);
+        config.set_ready(true);
+        match config.activate(mem, Event::new().unwrap(), Interrupt::new_for_test()) {
+            Ok(Queue::PackedVirtQueue(queue)) => queue,
+            _ => panic!("expected a packed queue"),
+        }
+    }
+
+    // Make descriptor `index` a single descriptor chain available in the first lap of the ring,
+    // like the driver would.
+    fn add_avail_desc(mem: &GuestMemory, index: u16) {
+        let desc = PackedDesc {
+            addr: Le64::from(BUFFER_OFFSET + u64::from(index) * u64::from(BUFFER_LEN)),
+            len: Le32::from(BUFFER_LEN),
+            id: Le16::from(index),
+            flags: Le16::from(VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_AVAIL),
+        };
+        let desc_addr =
+            GuestAddress(DESC_OFFSET + u64::from(index) * size_of::<PackedDesc>() as u64);
+        mem.write_obj_at_addr(desc, desc_addr).unwrap();
+    }
+
+    fn device_event(mem: &GuestMemory) -> u16 {
+        let event: PackedDescEvent = mem
+            .read_obj_from_addr(GuestAddress(DEVICE_EVENT_OFFSET))
+            .unwrap();
+        u16::from(event.desc)
+    }
+
+    #[test]
+    fn avail_event_fenced_on_empty_peek() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let mut queue = setup_packed_queue(&mem);
+
+        add_avail_desc(&mem, 0);
+        let chain = queue.peek().unwrap();
+        queue.pop_peeked(&chain);
+        // Next descriptor is 1, wrap counter still set.
+        assert_eq!(device_event(&mem), 1 | 1 << 15);
+        assert!(queue.avail_event_changed);
+
+        // The first peek that finds the queue empty fences the store.
+        assert!(queue.peek().is_none());
+        assert!(!queue.avail_event_changed);
+
+        // Nothing new to fence, so an empty peek doesn't set it again.
+        assert!(queue.peek().is_none());
+        assert!(!queue.avail_event_changed);
+
+        add_avail_desc(&mem, 1);
+        let chain = queue.peek().unwrap();
+        queue.pop_peeked(&chain);
+        assert_eq!(device_event(&mem), 2 | 1 << 15);
+        assert!(queue.avail_event_changed);
+    }
+}

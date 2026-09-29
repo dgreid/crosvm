@@ -657,6 +657,7 @@ mod tests {
 
     use super::*;
     use crate::virtio::create_descriptor_chain;
+    use crate::virtio::descriptor_chain::VIRTQ_DESC_F_WRITE;
     use crate::virtio::Desc;
     use crate::virtio::Interrupt;
     use crate::virtio::Queue;
@@ -749,6 +750,40 @@ mod tests {
         queue
             .activate(mem, Event::new().unwrap(), Interrupt::new_for_test())
             .expect("QueueConfig::activate failed")
+    }
+
+    fn setup_split_queue(mem: &GuestMemory) -> SplitQueue {
+        let mut config =
+            QueueConfig::new(QUEUE_SIZE.try_into().unwrap(), 1 << VIRTIO_RING_F_EVENT_IDX);
+        match setup_vq(&mut config, mem) {
+            Queue::SplitVirtQueue(queue) => queue,
+            _ => panic!("expected a split queue"),
+        }
+    }
+
+    // Publish a chain made of the single writable descriptor `index`, like the driver would.
+    fn add_avail_chain(mem: &GuestMemory, index: u16) {
+        let desc = Desc {
+            addr: Le64::from(BUFFER_OFFSET + u64::from(index) * u64::from(BUFFER_LEN)),
+            len: Le32::from(BUFFER_LEN),
+            flags: Le16::from(VIRTQ_DESC_F_WRITE),
+            next: Le16::from(0u16),
+        };
+        let desc_addr = GuestAddress(DESC_OFFSET + u64::from(index) * size_of::<Desc>() as u64);
+        mem.write_obj_at_addr(desc, desc_addr).unwrap();
+
+        let idx_addr = GuestAddress(AVAIL_OFFSET + offset_of!(Avail, idx) as u64);
+        let idx = u16::from(mem.read_obj_from_addr::<Le16>(idx_addr).unwrap());
+        let ring_offset = offset_of!(Avail, ring) as u64 + 2 * u64::from(idx % QUEUE_SIZE as u16);
+        mem.write_obj_at_addr(Le16::from(index), GuestAddress(AVAIL_OFFSET + ring_offset))
+            .unwrap();
+        mem.write_obj_at_addr(Le16::from(idx.wrapping_add(1)), idx_addr)
+            .unwrap();
+    }
+
+    fn avail_event(mem: &GuestMemory) -> u16 {
+        let addr = GuestAddress(USED_OFFSET + offset_of!(Used, avail_event) as u64);
+        u16::from(mem.read_obj_from_addr::<Le16>(addr).unwrap())
     }
 
     fn fake_desc_chain(mem: &GuestMemory) -> DescriptorChain {
@@ -913,5 +948,68 @@ mod tests {
         // At this moment driver has finished all the previous interrupts, so it
         // should inject interrupt again.
         assert_eq!(queue.trigger_interrupt(), true);
+    }
+
+    #[test]
+    fn avail_event_fenced_on_empty_peek() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let mut queue = setup_split_queue(&mem);
+
+        add_avail_chain(&mem, 0);
+        let chain = queue.peek().unwrap();
+        queue.pop_peeked(&chain);
+        assert_eq!(avail_event(&mem), 1);
+        assert!(queue.avail_event_changed);
+
+        // The first peek that finds the queue empty fences the store.
+        assert!(queue.peek().is_none());
+        assert!(!queue.avail_event_changed);
+
+        // Nothing new to fence, so an empty peek doesn't set it again.
+        assert!(queue.peek().is_none());
+        assert!(!queue.avail_event_changed);
+
+        add_avail_chain(&mem, 1);
+        let chain = queue.peek().unwrap();
+        queue.pop_peeked(&chain);
+        assert_eq!(avail_event(&mem), 2);
+        assert!(queue.avail_event_changed);
+    }
+
+    #[test]
+    fn try_pop_length_fences_avail_event() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let mut queue = setup_split_queue(&mem);
+
+        // One buffer isn't enough, so this runs out of chains.
+        add_avail_chain(&mem, 0);
+        assert!(queue.try_pop_length(2 * BUFFER_LEN as usize).is_none());
+        assert_eq!(queue.next_avail, Wrapping(0));
+        // Ask for a kick when a chain past the one already seen is added, and fence that before
+        // returning because the caller waits for the kick.
+        assert_eq!(avail_event(&mem), 1);
+        assert!(!queue.avail_event_changed);
+
+        add_avail_chain(&mem, 1);
+        let chains = queue.try_pop_length(2 * BUFFER_LEN as usize).unwrap();
+        assert_eq!(chains.len(), 2);
+        assert_eq!(queue.next_avail, Wrapping(2));
+        assert_eq!(avail_event(&mem), 2);
+        assert!(queue.avail_event_changed);
+    }
+
+    #[test]
+    fn restore_fences_avail_event() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let queue = setup_split_queue(&mem);
+
+        let restored = SplitQueue::restore(
+            queue.snapshot().unwrap(),
+            &mem,
+            Event::new().unwrap(),
+            Interrupt::new_for_test(),
+        )
+        .unwrap();
+        assert!(restored.avail_event_changed);
     }
 }
