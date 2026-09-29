@@ -1298,6 +1298,10 @@ mod tests {
     use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
     use virtio_sys::virtio_ring::VRING_DESC_F_NEXT;
     use virtio_sys::virtio_ring::VRING_DESC_F_WRITE;
+    use virtio_sys::virtio_ring::VRING_PACKED_DESC_F_AVAIL;
+    use virtio_sys::virtio_ring::VRING_PACKED_DESC_F_USED;
+    use virtio_sys::virtio_ring::VRING_PACKED_EVENT_FLAG_DESC;
+    use virtio_sys::virtio_ring::VRING_PACKED_EVENT_F_WRAP_CTR;
     use vm_memory::GuestAddress;
 
     use super::*;
@@ -1370,6 +1374,59 @@ mod tests {
             mem.write_obj_at_addr(desc, GuestAddress(DESC_TABLE + u64::from(index) * 16))
                 .expect("writing descriptor failed");
         }
+    }
+
+    /// Writes `bufs` to a packed ring of `size` entries as chain `id`, starting at descriptor
+    /// `pos`, counting from the start of the first lap. The avail and used flags flip each time the
+    /// ring wraps.
+    fn write_packed_chain(
+        mem: &GuestMemory,
+        size: u16,
+        pos: u16,
+        id: u16,
+        bufs: &[(u64, u32, u16)],
+    ) {
+        for (j, &(addr, len, flags)) in bufs.iter().enumerate() {
+            let n = pos + j as u16;
+            let avail = if n < size {
+                1 << VRING_PACKED_DESC_F_AVAIL
+            } else {
+                1 << VRING_PACKED_DESC_F_USED
+            };
+            let desc = DESC_TABLE + u64::from(n % size) * 16;
+            mem.write_obj_at_addr(Le64::from(addr), GuestAddress(desc))
+                .expect("writing descriptor failed");
+            mem.write_obj_at_addr(Le32::from(len), GuestAddress(desc + 8))
+                .expect("writing descriptor failed");
+            mem.write_obj_at_addr(Le16::from(id), GuestAddress(desc + 12))
+                .expect("writing descriptor failed");
+            mem.write_obj_at_addr(Le16::from(flags | avail), GuestAddress(desc + 14))
+                .expect("writing descriptor failed");
+        }
+    }
+
+    /// Returns the id and length of the used element at descriptor `pos` of a packed ring, or
+    /// `None` if the device hasn't written it yet.
+    fn packed_used_elem(mem: &GuestMemory, pos: u16, first_lap: bool) -> Option<(u16, u32)> {
+        let desc = DESC_TABLE + u64::from(pos) * 16;
+        let avail_used = (1 << VRING_PACKED_DESC_F_AVAIL) | (1 << VRING_PACKED_DESC_F_USED);
+        let used_flags = if first_lap { avail_used } else { 0 };
+        let flags = mem
+            .read_obj_from_addr::<Le16>(GuestAddress(desc + 14))
+            .unwrap()
+            .to_native();
+        if flags & avail_used != used_flags {
+            return None;
+        }
+        let len = mem
+            .read_obj_from_addr::<Le32>(GuestAddress(desc + 8))
+            .unwrap()
+            .to_native();
+        let id = mem
+            .read_obj_from_addr::<Le16>(GuestAddress(desc + 12))
+            .unwrap()
+            .to_native();
+        Some((id, len))
     }
 
     /// Returns the address of the avail ring's `used_event` for a queue of `size` entries.
@@ -2007,6 +2064,121 @@ mod tests {
             EventWaitResult::Signaled,
             "no interrupt after the last request"
         );
+    }
+
+    #[test]
+    fn packed_queue() {
+        // A packed queue's device area holds the device event suppression structure.
+        const DEVICE_EVENT: u64 = USED_RING;
+
+        // Four requests of three descriptors each go around an eight entry ring one and a half
+        // times.
+        const QUEUE_SIZE: u16 = 8;
+        const NUM_REQUESTS: u16 = 4;
+        const DATA_LEN: u32 = 512;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+
+        write_packed_chain(&mem, QUEUE_SIZE, 0, 0, &read_request(&mem, 0, DATA_LEN));
+        write_packed_chain(&mem, QUEUE_SIZE, 3, 1, &read_request(&mem, 1, DATA_LEN));
+
+        let kick_evt = Event::new().unwrap();
+        let call_evt = Event::new().unwrap();
+        let interrupt_evt = EventAsync::new(
+            call_evt.try_clone().expect("cloning call event failed"),
+            &ex,
+        )
+        .unwrap();
+        let interrupt = Interrupt::new_vhost_user(call_evt, Box::new(|| {}));
+        let features = (1 << VIRTIO_F_RING_PACKED) | (1 << VIRTIO_RING_F_EVENT_IDX);
+        let queue = activate_queue(&mem, QUEUE_SIZE, features, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut timer = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            // Acts as the guest driver: waits for the first two requests, then adds two that wrap
+            // around the ring and waits for those.
+            let driver = async {
+                // Wait for the first two requests, which the worker pops when it starts. Chains use
+                // three descriptors, so the used elements are written at 0 and 3 in whichever order
+                // the requests complete.
+                wait_for(&mut timer, "the first two requests to be used", || {
+                    packed_used_elem(&mem, 0, true).is_some()
+                        && packed_used_elem(&mem, 3, true).is_some()
+                })
+                .await;
+                let mut ids = [
+                    packed_used_elem(&mem, 0, true).unwrap(),
+                    packed_used_elem(&mem, 3, true).unwrap(),
+                ];
+                ids.sort();
+                assert_eq!(ids, [(0, DATA_LEN + 1), (1, DATA_LEN + 1)]);
+                // Kick when descriptor 6 of the first lap is made available.
+                assert_eq!(
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(DEVICE_EVENT))
+                        .unwrap()
+                        .to_native(),
+                    6 | 1 << VRING_PACKED_EVENT_F_WRAP_CTR
+                );
+                assert_eq!(
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(DEVICE_EVENT + 2))
+                        .unwrap()
+                        .to_native(),
+                    VRING_PACKED_EVENT_FLAG_DESC as u16
+                );
+                wait_for_event(&interrupt_evt, &mut timer, "the first interrupt").await;
+
+                // Request 2 wraps around the end of the ring and request 3 is in the second lap.
+                write_packed_chain(&mem, QUEUE_SIZE, 6, 2, &read_request(&mem, 2, DATA_LEN));
+                write_packed_chain(&mem, QUEUE_SIZE, 9, 3, &read_request(&mem, 3, DATA_LEN));
+                kick_evt.signal().unwrap();
+
+                wait_for(&mut timer, "the last two requests to be used", || {
+                    packed_used_elem(&mem, 6, true).is_some()
+                        && packed_used_elem(&mem, 1, false).is_some()
+                })
+                .await;
+                let mut ids = [
+                    packed_used_elem(&mem, 6, true).unwrap(),
+                    packed_used_elem(&mem, 1, false).unwrap(),
+                ];
+                ids.sort();
+                assert_eq!(ids, [(2, DATA_LEN + 1), (3, DATA_LEN + 1)]);
+                // Kick when descriptor 4 of the second lap is made available.
+                assert_eq!(
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(DEVICE_EVENT))
+                        .unwrap()
+                        .to_native(),
+                    4
+                );
+                assert_eq!(
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(DEVICE_EVENT + 2))
+                        .unwrap()
+                        .to_native(),
+                    VRING_PACKED_EVENT_FLAG_DESC as u16
+                );
+                wait_for_event(&interrupt_evt, &mut timer, "the last interrupt").await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS * 3 % QUEUE_SIZE);
+        for i in 0..NUM_REQUESTS {
+            assert_eq!(
+                mem.read_obj_from_addr::<u8>(GuestAddress(status_addr(i, DATA_LEN)))
+                    .unwrap(),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
     }
 
     #[test]
