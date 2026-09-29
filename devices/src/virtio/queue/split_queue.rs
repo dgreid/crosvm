@@ -255,6 +255,9 @@ impl SplitQueue {
     // (kicking the ring) is not necessary until the driver reaches the `avail_index` descriptor.
     //
     // This value is only used if the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
+    //
+    // The store isn't ordered before later loads here. `peek()` does that before it reports the
+    // queue empty, so a `peek()` must follow this before the device waits for a kick.
     fn set_avail_event(&mut self, avail_index: Wrapping<u16>) {
         fence(Ordering::SeqCst);
 
@@ -326,7 +329,8 @@ impl SplitQueue {
                 return None;
             }
             // The driver doesn't kick for chains it adds before it sees the new `avail_event`.
-            // Make sure the store is visible to it and check again before reporting empty.
+            // Order the `avail_event` store before reading `idx` again. This pairs with the full
+            // barrier the driver has between updating `idx` and reading `avail_event`.
             self.avail_event_changed = false;
             fence(Ordering::SeqCst);
             if next_avail.0 == avail_index_atomic.load(Ordering::Relaxed) {

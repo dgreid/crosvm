@@ -410,6 +410,10 @@ impl Queue {
 
     /// Get the first available descriptor chain without removing it from the queue.
     /// Call `pop()` on the returned [`PeekedDescriptorChain`] to remove it from the queue.
+    ///
+    /// With `VIRTIO_RING_F_EVENT_IDX`, popping a chain tells the driver when to kick next, but that
+    /// isn't fenced until `peek()` finds the queue empty. Don't wait for a kick until `peek()` or
+    /// `pop()` has returned `None`.
     pub fn peek(&mut self) -> Option<PeekedDescriptorChain> {
         let desc_chain = match self {
             Queue::SplitVirtQueue(q) => q.peek(),

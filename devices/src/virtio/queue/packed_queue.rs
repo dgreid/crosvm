@@ -241,6 +241,9 @@ impl PackedQueue {
     ///
     /// This field is used to specify the timing of when the driver notifies the
     /// device that the descriptor table is ready to be processed.
+    ///
+    /// The store isn't ordered before later loads here. `peek()` does that before it reports the
+    /// queue empty, so a `peek()` must follow this before the device waits for a kick.
     fn set_avail_event(&mut self, event: PackedDescEvent) {
         fence(Ordering::SeqCst);
         self.mem
@@ -285,7 +288,9 @@ impl PackedQueue {
                 return None;
             }
             // The driver doesn't kick for descriptors it adds before it sees the new device event.
-            // Make sure the store is visible to it and check again before reporting empty.
+            // Order the device event store before reading the descriptor flags again. This pairs
+            // with the full barrier the driver has between writing the flags and reading the
+            // device event.
             self.avail_event_changed = false;
             fence(Ordering::SeqCst);
         }
