@@ -259,8 +259,6 @@ impl SplitQueue {
     // The store isn't ordered before later loads here. `peek()` does that before it reports the
     // queue empty, so a `peek()` must follow this before the device waits for a kick.
     fn set_avail_event(&mut self, avail_index: Wrapping<u16>) {
-        fence(Ordering::SeqCst);
-
         let avail_event_addr = self.used_ring.unchecked_add(4 + 8 * u64::from(self.size));
         self.mem
             .write_obj_at_addr_volatile(avail_index.0, avail_event_addr)

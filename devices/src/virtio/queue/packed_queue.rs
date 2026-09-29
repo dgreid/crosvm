@@ -245,7 +245,6 @@ impl PackedQueue {
     /// The store isn't ordered before later loads here. `peek()` does that before it reports the
     /// queue empty, so a `peek()` must follow this before the device waits for a kick.
     fn set_avail_event(&mut self, event: PackedDescEvent) {
-        fence(Ordering::SeqCst);
         self.mem
             .write_obj_at_addr_volatile(event, self.device_event_suppression)
             .unwrap();
