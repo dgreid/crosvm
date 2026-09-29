@@ -634,7 +634,9 @@ impl SplitQueue {
             next_used: s.next_used,
             features: s.features,
             last_used: s.last_used,
-            avail_event_changed: false,
+            // `avail_event` in guest memory may not have been fenced before the snapshot. Fence
+            // it on the first empty `peek()`.
+            avail_event_changed: true,
         };
         Ok(queue)
     }
