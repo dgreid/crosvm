@@ -294,10 +294,9 @@ impl PackedQueue {
             fence(Ordering::SeqCst);
         }
 
-        // This fence ensures that subsequent reads from the descriptor do not
-        // get reordered and happen only after verifying the descriptor table is
-        // available.
-        fence(Ordering::SeqCst);
+        // Order the flags load above before `PackedDescriptorChain` reads the descriptors again.
+        // This pairs with the driver's write barrier before it stores the head's flags.
+        fence(Ordering::Acquire);
 
         let chain = PackedDescriptorChain::new(
             &self.mem,
