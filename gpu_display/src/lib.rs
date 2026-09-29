@@ -531,13 +531,45 @@ impl GpuDisplay {
     pub fn dispatch_events(&mut self) -> GpuDisplayResult<()> {
         let wait_events = self.wait_ctx.wait_timeout(Duration::default())?;
 
-        if let Some(wait_event) = wait_events.iter().find(|e| e.is_hungup) {
-            base::error!(
-                "Display signaled with a hungup event for token {:?}",
-                wait_event.token
-            );
+        // The wait set mixes the compositor connection with imported input pipes
+        // (touchscreen, keyboard, mouse). POLLHUP on an input pipe means that pipe
+        // closed. Treating it as `ConnectionBroken` disables the whole display and
+        // leaves the guest running with no host window. Only the compositor fd is fatal.
+        // A hungup fd must also leave the poll set; epoll is level-triggered and would
+        // otherwise return immediately forever.
+        let mut compositor_hungup = false;
+        let mut closed_event_devices = Vec::new();
+        for wait_event in wait_events.iter().filter(|e| e.is_hungup) {
+            match wait_event.token {
+                DisplayEventToken::Display => {
+                    base::error!("connection to compositor has been broken");
+                    compositor_hungup = true;
+                }
+                DisplayEventToken::EventDevice { event_device_id } => {
+                    base::warn!(
+                        "input event device {} closed; keeping the display",
+                        event_device_id
+                    );
+                    closed_event_devices.push(event_device_id);
+                }
+            }
+        }
+
+        if compositor_hungup {
             self.wait_ctx = WaitContext::new().unwrap();
             return GpuDisplayResult::Err(GpuDisplayError::ConnectionBroken);
+        }
+
+        for event_device_id in closed_event_devices {
+            if let Some(event_device) = self.event_devices.remove(&event_device_id) {
+                if let Err(e) = self.wait_ctx.delete(&event_device) {
+                    base::error!(
+                        "failed to drop closed input event device {} from the poll set: {}",
+                        event_device_id,
+                        e
+                    );
+                }
+            }
         }
 
         for wait_event in wait_events.iter().filter(|e| e.is_writable) {
@@ -727,5 +759,37 @@ impl GpuDisplay {
 
         surface.set_position(x, y);
         Ok(())
+    }
+}
+
+#[cfg(all(test, any(target_os = "android", target_os = "linux")))]
+mod tests {
+    use base::BlockingMode;
+    use base::FramingMode;
+    use base::StreamChannel;
+
+    use super::*;
+
+    #[test]
+    fn event_device_hangup_does_not_break_display() {
+        let mut display = GpuDisplay::open_stub().expect("stub display");
+        let (host_side, guest_side) =
+            StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte).expect("stream pair");
+        let event_device_id = display
+            .import_event_device(EventDevice::touchscreen(host_side))
+            .expect("import touchscreen");
+        drop(guest_side);
+
+        display
+            .dispatch_events()
+            .expect("event-device hangup must not report a broken compositor");
+        assert!(
+            !display.event_devices.contains_key(&event_device_id),
+            "closed input pipe should be dropped"
+        );
+        // Level-triggered epoll would spin if the closed pipe were still registered.
+        display
+            .dispatch_events()
+            .expect("display must stay pollable after the input pipe closes");
     }
 }
