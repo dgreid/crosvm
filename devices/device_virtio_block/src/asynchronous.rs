@@ -87,6 +87,7 @@ use vm_control::DiskControlResult;
 use vm_memory::GuestMemory;
 use zerocopy::IntoBytes;
 
+use crate::interrupt_coalescer::InterruptCoalescer;
 use crate::sys::*;
 use crate::DiskOption;
 
@@ -279,6 +280,7 @@ async fn process_one_chain(
     disk_state: &AsyncRwLock<DiskState>,
     flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
+    irq_coalescer: &InterruptCoalescer,
 ) {
     let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
         .await
@@ -292,7 +294,9 @@ async fn process_one_chain(
 
     let mut queue = queue.borrow_mut();
     queue.add_used_with_bytes_written(avail_desc, len as u32);
-    queue.trigger_interrupt();
+    irq_coalescer.trigger_interrupt(|| {
+        queue.trigger_interrupt();
+    });
 }
 
 // There is one async task running `handle_queue` per virtio queue in use.
@@ -307,13 +311,17 @@ async fn handle_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Queue {
     let queue = RefCell::new(queue);
+    let irq_coalescer = InterruptCoalescer::new();
     let mut background_tasks = FuturesUnordered::new();
     let evt_future = futures::future::Either::Left(std::future::ready(Ok(0))).fuse();
     pin_mut!(evt_future);
     loop {
+        let mut irq_pending = irq_coalescer.pending();
+
         // Wait for the next signal from `evt` and process `background_tasks` in the meantime.
-        // Requests that are ready are finished first, then the stop channel is checked before the
-        // queue event, so a guest that keeps kicking can't hold off a stop.
+        // Requests that are ready are finished first and then their batch is ended. The stop
+        // channel is checked before the queue event, so a guest that keeps kicking can't hold off a
+        // stop.
         //
         // NOTE: We can't call `evt.next_val()` directly in the `select_biased!` expression. That
         // would create a new future each time, which, in the completion-based async backends like
@@ -321,10 +329,19 @@ async fn handle_queue(
         // eventfd).
         futures::select_biased! {
             _ = background_tasks.next() => continue,
+            _ = irq_pending => {
+                irq_coalescer.complete(|| {
+                    queue.borrow_mut().trigger_interrupt();
+                });
+                continue;
+            }
             _ = stop_rx => {
                 // Process all the descriptors we've already popped from the queue so that we leave
                 // the queue in a consistent state.
                 background_tasks.collect::<()>().await;
+                irq_coalescer.complete(|| {
+                    queue.borrow_mut().trigger_interrupt();
+                });
                 return queue.into_inner();
             }
             res = evt_future => {
@@ -342,6 +359,7 @@ async fn handle_queue(
                 &disk_state,
                 &flush_timer,
                 &flush_timer_armed,
+                &irq_coalescer,
             ));
         }
     }
