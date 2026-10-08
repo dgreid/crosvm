@@ -147,7 +147,9 @@ impl DescriptorChainRegions {
         other.consume(offset);
         other.bytes_consumed = 0;
 
-        let mut rem = offset;
+        // `offset` is relative to the unconsumed bytes, but `region.len` below counts from the
+        // start of the region, so include the bytes already consumed from the current region.
+        let mut rem = offset.saturating_add(self.current_region_offset);
         let mut end = self.current_region_index;
         for region in &mut self.regions[self.current_region_index..] {
             if rem <= region.len {
@@ -1620,5 +1622,155 @@ mod tests {
 
         assert_eq!(writer.available_bytes(), 128);
         assert_eq!(writer.bytes_written(), 384);
+    }
+
+    fn regions_from_lens(lens: &[usize]) -> DescriptorChainRegions {
+        let mut offset = 0;
+        DescriptorChainRegions::new(
+            lens.iter()
+                .map(|&len| {
+                    let region = MemRegion { offset, len };
+                    offset += 0x1000;
+                    region
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn regions_split_at_after_partial_consume() {
+        let mut regions = regions_from_lens(&[100]);
+        regions.consume(50);
+        assert_eq!(regions.available_bytes(), 50);
+
+        let mut other = regions.split_at(30);
+        assert_eq!(regions.available_bytes(), 30);
+        assert_eq!(other.available_bytes(), 20);
+        assert_eq!(
+            regions.get_remaining_regions().collect::<Vec<_>>(),
+            vec![MemRegion {
+                offset: 50,
+                len: 30
+            }]
+        );
+        assert_eq!(
+            other.get_remaining_regions().collect::<Vec<_>>(),
+            vec![MemRegion {
+                offset: 80,
+                len: 20
+            }]
+        );
+
+        regions.consume(30);
+        other.consume(20);
+        assert_eq!(regions.available_bytes(), 0);
+        assert_eq!(other.available_bytes(), 0);
+    }
+
+    #[test]
+    fn regions_split_at_zero_after_partial_consume() {
+        // Previously the split truncated the current region to before the consumed offset and
+        // the following consume() underflowed `region.len - self.current_region_offset`.
+        let mut regions = regions_from_lens(&[1, 1, 2]);
+        regions.consume(3);
+        assert_eq!(regions.available_bytes(), 1);
+
+        let mut other = regions.split_at(0);
+        assert_eq!(regions.available_bytes(), 0);
+        assert_eq!(other.available_bytes(), 1);
+
+        regions.consume(1);
+        other.consume(1);
+        assert_eq!(regions.available_bytes(), 0);
+        assert_eq!(other.available_bytes(), 0);
+    }
+
+    #[test]
+    fn writer_split_after_partial_write() {
+        use DescriptorType::*;
+
+        let memory_start_addr = GuestAddress(0x0);
+        let memory = GuestMemory::new(&[(memory_start_addr, 0x10000)]).unwrap();
+
+        let mut chain = create_descriptor_chain(
+            &memory,
+            GuestAddress(0x0),
+            GuestAddress(0x100),
+            vec![(Writable, 100)],
+            0,
+        )
+        .expect("create_descriptor_chain failed");
+        let writer = &mut chain.writer;
+
+        writer.write_all(&[0u8; 50]).expect("failed to write");
+        let other = writer.split_at(30);
+        assert_eq!(writer.available_bytes(), 30);
+        assert_eq!(other.available_bytes(), 20);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Builds a two-region chain with small symbolic lengths so the proof stays within a small
+    /// unwinding budget.
+    fn any_regions() -> DescriptorChainRegions {
+        let len0: usize = kani::any();
+        let len1: usize = kani::any();
+        kani::assume(len0 >= 1 && len0 <= 4);
+        kani::assume(len1 >= 1 && len1 <= 4);
+        DescriptorChainRegions::new(SmallVec::from_buf([
+            MemRegion {
+                offset: 0,
+                len: len0,
+            },
+            MemRegion {
+                offset: 0x1000,
+                len: len1,
+            },
+        ]))
+    }
+
+    /// Proves that `consume` never panics and accounts for exactly the bytes it was asked to
+    /// consume, capped at the number of bytes available.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_consume_accounting() {
+        let mut regions = any_regions();
+        let first: usize = kani::any();
+        let second: usize = kani::any();
+
+        regions.consume(first);
+        let avail = regions.available_bytes();
+        let consumed = regions.bytes_consumed();
+        regions.consume(second);
+
+        assert_eq!(regions.bytes_consumed(), consumed + second.min(avail));
+        assert_eq!(regions.available_bytes(), avail - second.min(avail));
+    }
+
+    /// Proves that splitting a partially consumed chain partitions the remaining bytes: `self`
+    /// keeps the first `min(offset, available)` bytes, the returned chain gets the rest, and
+    /// consuming either half afterwards does not panic.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_split_at_partitions_remaining_bytes() {
+        let mut regions = any_regions();
+        let consumed: usize = kani::any();
+        regions.consume(consumed);
+
+        let avail = regions.available_bytes();
+        let offset: usize = kani::any();
+        let mut other = regions.split_at(offset);
+
+        let expected = offset.min(avail);
+        assert_eq!(regions.available_bytes(), expected);
+        assert_eq!(other.available_bytes(), avail - expected);
+        assert_eq!(other.bytes_consumed(), 0);
+
+        let count: usize = kani::any();
+        regions.consume(count);
+        other.consume(count);
     }
 }

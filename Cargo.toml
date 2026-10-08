@@ -119,6 +119,9 @@ exclude = [
     "media/libvda",
 ]
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [workspace.dependencies]
 # Workspace members
 aarch64 = { path = "aarch64" }

@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
+[lints]
+workspace = true
+
 [features]
 android_display = ["gpu_display/android_display"]
 android_display_stub = ["gpu_display/android_display_stub"]
