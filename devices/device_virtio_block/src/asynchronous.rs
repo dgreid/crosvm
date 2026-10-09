@@ -1281,6 +1281,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::time::Instant;
 
+    use base::EventWaitResult;
     use data_model::Le32;
     use data_model::Le64;
     #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -1294,6 +1295,7 @@ mod tests {
     use hypervisor::ProtectionType;
     use tempfile::tempfile;
     use tempfile::TempDir;
+    use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
     use virtio_sys::virtio_ring::VRING_DESC_F_NEXT;
     use virtio_sys::virtio_ring::VRING_DESC_F_WRITE;
     use vm_memory::GuestAddress;
@@ -1368,6 +1370,16 @@ mod tests {
             mem.write_obj_at_addr(desc, GuestAddress(DESC_TABLE + u64::from(index) * 16))
                 .expect("writing descriptor failed");
         }
+    }
+
+    /// Returns the address of the avail ring's `used_event` for a queue of `size` entries.
+    fn used_event(size: u16) -> u64 {
+        AVAIL_RING + 4 + 2 * u64::from(size)
+    }
+
+    /// Returns the address of the used ring's `avail_event` for a queue of `size` entries.
+    fn avail_event(size: u16) -> u64 {
+        USED_RING + 4 + 8 * u64::from(size)
     }
 
     /// Activates a queue of `size` entries at the addresses above, with `features` acked. It's a
@@ -1912,6 +1924,89 @@ mod tests {
     #[test]
     fn single_request_interrupts_once() {
         assert_eq!(interrupts_for_batch(1), 1);
+    }
+
+    #[test]
+    fn stop_finishes_requests_in_flight() {
+        const QUEUE_SIZE: u16 = 16;
+        const NUM_REQUESTS: u16 = 4;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_REQUESTS {
+            write_split_chain(&mem, i, i * 2, &read_request(&mem, i, 0));
+        }
+        mem.write_obj_at_addr(Le16::from(NUM_REQUESTS), GuestAddress(AVAIL_IDX))
+            .unwrap();
+        // Only ask for an interrupt after the last request. The requests complete together, so it
+        // has to come from the end of the batch rather than the first request.
+        mem.write_obj_at_addr(
+            Le16::from(NUM_REQUESTS - 1),
+            GuestAddress(used_event(QUEUE_SIZE)),
+        )
+        .unwrap();
+
+        let kick_evt = Event::new().unwrap();
+        let interrupt = Interrupt::new_for_test();
+        let interrupt_evt = interrupt
+            .get_interrupt_evt()
+            .try_clone()
+            .expect("cloning interrupt event failed");
+        let features = 1 << VIRTIO_RING_F_EVENT_IDX;
+        let queue = activate_queue(&mem, QUEUE_SIZE, features, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut timer = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            // Keeps the requests from completing until the worker has been told to stop.
+            let blocked = disk_state.lock().await;
+
+            // Acts as the guest driver: stops the worker while the requests are still in flight.
+            let driver = async {
+                // Wait for the worker to pop the requests, which it does when it starts. `pop` sets
+                // `avail_event`, which shows how far it has got.
+                wait_for(&mut timer, "the requests to be popped", || {
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(avail_event(QUEUE_SIZE)))
+                        .unwrap()
+                        .to_native()
+                        == NUM_REQUESTS
+                })
+                .await;
+                stop_tx.send(()).unwrap();
+
+                // Let the worker see the stop before the requests can complete.
+                timer.reset_oneshot(Duration::from_millis(1)).unwrap();
+                timer.wait().await.unwrap();
+                drop(blocked);
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+        assert_eq!(
+            mem.read_obj_from_addr::<Le16>(GuestAddress(USED_IDX))
+                .unwrap()
+                .to_native(),
+            NUM_REQUESTS
+        );
+        for i in 0..NUM_REQUESTS {
+            assert_eq!(
+                mem.read_obj_from_addr::<u8>(GuestAddress(status_addr(i, 0)))
+                    .unwrap(),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+        assert_eq!(
+            interrupt_evt.wait_timeout(Duration::ZERO).unwrap(),
+            EventWaitResult::Signaled,
+            "no interrupt after the last request"
+        );
     }
 
     #[test]
