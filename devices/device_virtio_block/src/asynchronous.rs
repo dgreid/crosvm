@@ -2318,6 +2318,89 @@ mod tests {
     }
 
     #[test]
+    fn requests_in_flight_limited_to_queue_size() {
+        const QUEUE_SIZE: u16 = 16;
+        // Two descriptors each, so this many requests fill the descriptor table.
+        const NUM_CHAINS: u16 = QUEUE_SIZE / 2;
+        // Three times what the queue can hold, reusing the chains.
+        const NUM_REQUESTS: u16 = QUEUE_SIZE * 3;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_CHAINS {
+            write_split_chain(&mem, i, i * 2, &read_request(&mem, i, 0));
+        }
+        // The rest of the avail ring points at the same chains again, and `idx` is set as if the
+        // ring had wrapped twice more.
+        for slot in NUM_CHAINS..QUEUE_SIZE {
+            mem.write_obj_at_addr(
+                Le16::from(slot % NUM_CHAINS * 2),
+                GuestAddress(AVAIL_RING + 4 + u64::from(slot) * 2),
+            )
+            .unwrap();
+        }
+        mem.write_obj_at_addr(Le16::from(NUM_REQUESTS), GuestAddress(AVAIL_IDX))
+            .unwrap();
+
+        let kick_evt = Event::new().unwrap();
+        // `avail_event` shows how far the worker has popped.
+        let features = 1 << VIRTIO_RING_F_EVENT_IDX;
+        let queue = activate_queue(
+            &mem,
+            QUEUE_SIZE,
+            features,
+            &kick_evt,
+            Interrupt::new_for_test(),
+        );
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut timer = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            // Keeps the requests in flight until the test has checked how many were popped.
+            let blocked = disk_state.lock().await;
+
+            // Acts as the guest driver: checks how many requests the worker took, then lets them
+            // complete and waits for the rest.
+            let driver = async {
+                // Wait for the worker to pop requests, which it does when it starts.
+                wait_for(&mut timer, "requests to be popped", || {
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(avail_event(QUEUE_SIZE)))
+                        .unwrap()
+                        .to_native()
+                        != 0
+                })
+                .await;
+                assert_eq!(
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(avail_event(QUEUE_SIZE)))
+                        .unwrap()
+                        .to_native(),
+                    QUEUE_SIZE
+                );
+
+                // The rest are popped as the first ones complete.
+                drop(blocked);
+                wait_for(&mut timer, "all requests to be used", || {
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(USED_IDX))
+                        .unwrap()
+                        .to_native()
+                        == NUM_REQUESTS
+                })
+                .await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+    }
+
+    #[test]
     fn reset_and_reactivate_single_worker() {
         reset_and_reactivate(false, None);
     }
