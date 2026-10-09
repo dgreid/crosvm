@@ -196,7 +196,6 @@ impl<F: Future<Output = ()>> FusedStream for FutureSlab<F> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::future::poll_fn;
     use std::rc::Rc;
 
     use futures::channel::oneshot;
@@ -242,20 +241,22 @@ mod tests {
             });
         }
 
-        cros_async::block_on(async {
-            // The future is waiting on `rx`, so it should still be in the set.
-            poll_fn(|cx| {
-                assert!(slab.poll_next_unpin(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            assert_eq!(slab.len(), 1);
-            assert!(!done.get());
+        let woken = Arc::new(CountingWaker(AtomicU64::new(0)));
+        let waker = Waker::from(woken.clone());
+        let mut cx = Context::from_waker(&waker);
 
-            tx.send(()).unwrap();
-            assert_eq!(slab.next().await, Some(1));
-        });
+        // The future is waiting on `rx`, so it stays in the set.
+        assert!(slab.poll_next_unpin(&mut cx).is_pending());
+        assert_eq!(slab.len(), 1);
+        assert_eq!(woken.0.load(Ordering::Relaxed), 0);
+
+        // Sending wakes the future, which has to wake the owner so it polls again.
+        tx.send(()).unwrap();
+        assert_eq!(woken.0.load(Ordering::Relaxed), 1);
+
+        assert_eq!(slab.poll_next_unpin(&mut cx), Poll::Ready(Some(1)));
         assert!(done.get());
+        assert!(slab.is_empty());
     }
 
     #[test]
