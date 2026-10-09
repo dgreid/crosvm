@@ -74,6 +74,7 @@ use disk::AsyncDisk;
 use disk::DiskFile;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
+use futures::future::OptionFuture;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
@@ -106,6 +107,9 @@ const MAX_WRITE_ZEROES_SEG: u32 = 32;
 // Hard-coded to 64 KiB (in 512-byte sectors) for now,
 // but this should probably be based on cluster size for qcow.
 const DISCARD_SECTOR_ALIGNMENT: u32 = 128;
+// `handle_queue` checks for new requests when others complete, but stops after this many checks in
+// a row without a kick so that the other tasks on the worker get to run.
+const MAX_PREPOPS: u32 = 16;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -318,20 +322,32 @@ async fn handle_queue(
     let mut background_tasks = FutureSlab::with_capacity(usize::from(queue.borrow().size()));
     let evt_future = futures::future::Either::Left(std::future::ready(Ok(0))).fuse();
     pin_mut!(evt_future);
+    // Whether requests have completed since the queue was last checked for new ones.
+    let mut completed = false;
+    let mut prepops = 0;
     loop {
         let mut irq_pending = irq_coalescer.pending();
+        // Ready only when there's a prepop to do. Otherwise it's terminated, so `select_biased!`
+        // skips the arm rather than it keeping the loop from waiting.
+        let mut prepop: OptionFuture<_> = (completed && prepops < MAX_PREPOPS)
+            .then(|| futures::future::ready(()))
+            .into();
 
         // Wait for the next signal from `evt` and process `background_tasks` in the meantime.
         // Requests that are ready are finished first and then their batch is ended. The stop
         // channel is checked before the queue event, so a guest that keeps kicking can't hold off a
-        // stop.
+        // stop. Checking for new requests because others completed comes last, so that a pending
+        // kick, which checks for them as well, is taken first.
         //
         // NOTE: We can't call `evt.next_val()` directly in the `select_biased!` expression. That
         // would create a new future each time, which, in the completion-based async backends like
         // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
         // eventfd).
         futures::select_biased! {
-            _ = background_tasks.next() => continue,
+            _ = background_tasks.next() => {
+                completed = true;
+                continue;
+            }
             _ = irq_pending => {
                 irq_coalescer.complete(|| {
                     queue.borrow_mut().trigger_interrupt();
@@ -353,12 +369,15 @@ async fn handle_queue(
             }
             res = evt_future => {
                 evt_future.set(futures::future::Either::Right(evt.next_val()).fuse());
+                prepops = 0;
                 if let Err(e) = res {
                     error!("Failed to read the next queue event: {:#}", e);
                     continue;
                 }
             }
+            _ = prepop => prepops += 1,
         };
+        completed = false;
         // A guest that reuses descriptors can make more requests available than that. The rest
         // wait on the queue until there's room.
         while !background_tasks.is_full() {
