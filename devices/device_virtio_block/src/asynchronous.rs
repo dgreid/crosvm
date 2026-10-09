@@ -87,6 +87,7 @@ use vm_control::DiskControlResult;
 use vm_memory::GuestMemory;
 use zerocopy::IntoBytes;
 
+use crate::future_slab::FutureSlab;
 use crate::interrupt_coalescer::InterruptCoalescer;
 use crate::sys::*;
 use crate::DiskOption;
@@ -312,7 +313,9 @@ async fn handle_queue(
 ) -> Queue {
     let queue = RefCell::new(queue);
     let irq_coalescer = InterruptCoalescer::new();
-    let mut background_tasks = FuturesUnordered::new();
+    // A driver can't have more requests outstanding than the queue has entries, as each one holds
+    // its first descriptor until it's used, so that's all the room `background_tasks` needs.
+    let mut background_tasks = FutureSlab::with_capacity(usize::from(queue.borrow().size()));
     let evt_future = futures::future::Either::Left(std::future::ready(Ok(0))).fuse();
     pin_mut!(evt_future);
     loop {
@@ -338,10 +341,14 @@ async fn handle_queue(
             _ = stop_rx => {
                 // Process all the descriptors we've already popped from the queue so that we leave
                 // the queue in a consistent state.
-                background_tasks.collect::<()>().await;
-                irq_coalescer.complete(|| {
-                    queue.borrow_mut().trigger_interrupt();
-                });
+                while !background_tasks.is_empty() {
+                    background_tasks.next().await;
+                    irq_coalescer.complete(|| {
+                        queue.borrow_mut().trigger_interrupt();
+                    });
+                }
+                // The futures borrow `queue`, so the slab has to go before it can be moved out.
+                drop(background_tasks);
                 return queue.into_inner();
             }
             res = evt_future => {
@@ -352,7 +359,12 @@ async fn handle_queue(
                 }
             }
         };
-        while let Some(descriptor_chain) = queue.borrow_mut().pop() {
+        // A guest that reuses descriptors can make more requests available than that. The rest
+        // wait on the queue until there's room.
+        while !background_tasks.is_full() {
+            let Some(descriptor_chain) = queue.borrow_mut().pop() else {
+                break;
+            };
             background_tasks.push(process_one_chain(
                 &queue,
                 descriptor_chain,
