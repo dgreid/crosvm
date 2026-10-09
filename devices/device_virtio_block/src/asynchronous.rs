@@ -1859,6 +1859,91 @@ mod tests {
         }
     }
 
+    /// Completes `num_requests` requests in one batch and returns how many interrupts were sent.
+    ///
+    /// The requests read zero bytes, so they all complete the first time they're polled. Without
+    /// `VIRTIO_RING_F_EVENT_IDX` every `trigger_interrupt` sends an interrupt, and a vhost-user
+    /// interrupt writes its eventfd every time, so on Linux the eventfd's count is the number of
+    /// interrupts.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn notifications_for_batch(num_requests: u16) -> u64 {
+        const QUEUE_SIZE: u16 = 16;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..num_requests {
+            write_split_chain(&mem, i * 2, &read_request(&mem, i, 0));
+            mem.write_obj_at_addr(
+                Le16::from(i * 2),
+                GuestAddress(AVAIL_RING + 4 + u64::from(i) * 2),
+            )
+            .unwrap();
+        }
+        mem.write_obj_at_addr(Le16::from(num_requests), GuestAddress(AVAIL_IDX))
+            .unwrap();
+
+        let kick_evt = Event::new().unwrap();
+        let call_evt = Event::new().unwrap();
+        let notifications = EventAsync::new(
+            call_evt.try_clone().expect("cloning call event failed"),
+            &ex,
+        )
+        .unwrap();
+        let interrupt = Interrupt::new_vhost_user(call_evt, Box::new(|| {}));
+        let queue = activate_queue(&mem, QUEUE_SIZE, 0, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let mut irq_deadline = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            let driver = async {
+                kick_evt.signal().unwrap();
+                wait_for(&mut poll_timer, "every request to be used", || {
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(USED_IDX))
+                        .unwrap()
+                        .to_native()
+                        == num_requests
+                })
+                .await;
+                stop_tx.send(()).unwrap();
+            };
+            let (queue, ()) = futures::future::join(worker, driver).await;
+
+            // The eventfd adds up the writes, so one read after the worker returns gets the total.
+            let count = wait_for_event(&notifications, &mut irq_deadline, "an interrupt").await;
+            (queue, count)
+        };
+
+        let (queue, count) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), num_requests);
+        for i in 0..num_requests {
+            assert_eq!(
+                mem.read_obj_from_addr::<u8>(GuestAddress(status_addr(i, 0)))
+                    .unwrap(),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+        count
+    }
+
+    /// A batch gets one interrupt for the first request and one for the rest.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn a_batch_notifies_for_its_head_and_once_for_the_rest() {
+        assert_eq!(notifications_for_batch(8), 2);
+    }
+
+    /// A lone request gets exactly one interrupt.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn a_single_request_costs_one_notification() {
+        assert_eq!(notifications_for_batch(1), 1);
+    }
+
     #[test]
     fn reset_and_reactivate_single_worker() {
         reset_and_reactivate(false, None);
