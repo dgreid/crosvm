@@ -1937,6 +1937,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn completion_checks_for_new_requests() {
+        const QUEUE_SIZE: u16 = 16;
+        const NUM_REQUESTS: u16 = 4;
+        const DATA_LEN: u32 = 512;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_REQUESTS {
+            write_split_chain(&mem, i, i * 3, &read_request(&mem, i, DATA_LEN));
+        }
+        // Only the first request is available when the worker starts.
+        mem.write_obj_at_addr(Le16::from(1), GuestAddress(AVAIL_IDX))
+            .unwrap();
+        // Only ask for an interrupt after the last request.
+        mem.write_obj_at_addr(
+            Le16::from(NUM_REQUESTS - 1),
+            GuestAddress(used_event(QUEUE_SIZE)),
+        )
+        .unwrap();
+
+        let kick_evt = Event::new().unwrap();
+        let interrupt = Interrupt::new_for_test();
+        let interrupt_evt = EventAsync::new(
+            interrupt
+                .get_interrupt_evt()
+                .try_clone()
+                .expect("cloning interrupt event failed"),
+            &ex,
+        )
+        .unwrap();
+        // `avail_event` is only written with `VIRTIO_RING_F_EVENT_IDX`.
+        let features = 1 << VIRTIO_RING_F_EVENT_IDX;
+        let queue = activate_queue(&mem, QUEUE_SIZE, features, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut timer = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            // Keeps the first request from completing until the rest have been added. They're
+            // never kicked for, which stands in for a kick that hasn't arrived yet.
+            let blocked = disk_state.lock().await;
+
+            // Acts as the guest driver: adds the rest of the requests while the first is in flight,
+            // then waits for all of them to be used.
+            let driver = async {
+                // Wait for the worker to pop the first request, which it does when it starts. `pop`
+                // sets `avail_event`, which shows how far it has got.
+                wait_for(&mut timer, "the first request to be popped", || {
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(avail_event(QUEUE_SIZE)))
+                        .unwrap()
+                        .to_native()
+                        == 1
+                })
+                .await;
+
+                // Add the rest without kicking and let the first request complete.
+                mem.write_obj_at_addr(Le16::from(NUM_REQUESTS), GuestAddress(AVAIL_IDX))
+                    .unwrap();
+                drop(blocked);
+
+                wait_for(&mut timer, "all requests to be used", || {
+                    mem.read_obj_from_addr::<Le16>(GuestAddress(USED_IDX))
+                        .unwrap()
+                        .to_native()
+                        == NUM_REQUESTS
+                })
+                .await;
+                wait_for_event(&interrupt_evt, &mut timer, "the last interrupt").await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+        for i in 0..NUM_REQUESTS {
+            let elem = USED_RING + 4 + u64::from(i) * 8;
+            let id = mem
+                .read_obj_from_addr::<Le32>(GuestAddress(elem))
+                .unwrap()
+                .to_native();
+            let len = mem
+                .read_obj_from_addr::<Le32>(GuestAddress(elem + 4))
+                .unwrap()
+                .to_native();
+            assert_eq!(
+                (id, len),
+                (u32::from(i * 3), DATA_LEN + 1),
+                "used ring entry {i} is wrong"
+            );
+            assert_eq!(
+                mem.read_obj_from_addr::<u8>(GuestAddress(status_addr(i, DATA_LEN)))
+                    .unwrap(),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+    }
+
     /// Completes `num_requests` requests in one batch and returns how many interrupts were sent.
     ///
     /// The requests read zero bytes, so they all complete the first time they're polled. Without
