@@ -1894,6 +1894,89 @@ mod tests {
         }
     }
 
+    /// A completed request makes the worker check for new requests without waiting for a kick.
+    ///
+    /// The test holds the disk lock so the first request can't complete until the rest have been
+    /// added, and never kicks for them. That stands in for a kick that hasn't arrived yet.
+    #[test]
+    fn completion_checks_for_new_requests() {
+        const QUEUE_SIZE: u16 = 16;
+        const NUM_REQUESTS: u16 = 4;
+        const DATA_LEN: u32 = 512;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_REQUESTS {
+            write_split_chain(&mem, i * 3, &read_request(&mem, i, DATA_LEN));
+            write_avail_entry(&mem, i, i * 3);
+        }
+        // Only the first request is available when the worker starts.
+        write_u16(&mem, AVAIL_IDX, 1);
+        // Only ask for an interrupt after the last request.
+        write_u16(&mem, used_event(QUEUE_SIZE), NUM_REQUESTS - 1);
+
+        let kick_evt = Event::new().unwrap();
+        let interrupt = Interrupt::new_for_test();
+        let interrupt_evt = EventAsync::new(
+            interrupt
+                .get_interrupt_evt()
+                .try_clone()
+                .expect("cloning interrupt event failed"),
+            &ex,
+        )
+        .unwrap();
+        // `avail_event` is only written with `VIRTIO_RING_F_EVENT_IDX`.
+        let features = 1 << VIRTIO_RING_F_EVENT_IDX;
+        let queue = activate_queue(&mem, QUEUE_SIZE, features, &kick_evt, interrupt);
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let mut irq_deadline = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            let blocked = disk_state.lock().await;
+
+            let driver = async {
+                // The worker checks the queue when it starts, and `pop` sets `avail_event`.
+                wait_for(&mut poll_timer, "the first request to be popped", || {
+                    read_u16(&mem, avail_event(QUEUE_SIZE)) == 1
+                })
+                .await;
+
+                // Add the rest without kicking and let the first request complete.
+                write_u16(&mem, AVAIL_IDX, NUM_REQUESTS);
+                drop(blocked);
+
+                wait_for(&mut poll_timer, "all requests to be used", || {
+                    read_u16(&mem, USED_IDX) == NUM_REQUESTS
+                })
+                .await;
+                wait_for_event(&interrupt_evt, &mut irq_deadline, "the last interrupt").await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+        for i in 0..NUM_REQUESTS {
+            assert_eq!(
+                read_used_elem(&mem, i),
+                (u32::from(i * 3), DATA_LEN + 1),
+                "used ring entry {i} is wrong"
+            );
+            assert_eq!(
+                read_status(&mem, i, DATA_LEN),
+                VIRTIO_BLK_S_OK,
+                "request {i} failed"
+            );
+        }
+    }
+
     /// Completes `num_requests` requests in one batch and returns how many interrupts were sent.
     ///
     /// The requests read zero bytes, so they all complete the first time they're polled. Without
