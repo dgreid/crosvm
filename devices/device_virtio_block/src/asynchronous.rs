@@ -2258,6 +2258,73 @@ mod tests {
         }
     }
 
+    /// The worker doesn't have more requests in flight than the queue has entries, even if the
+    /// driver makes more available by reusing descriptors.
+    #[test]
+    fn requests_in_flight_limited_to_queue_size() {
+        const QUEUE_SIZE: u16 = 16;
+        // Two descriptors each, so this many requests fill the descriptor table.
+        const NUM_CHAINS: u16 = QUEUE_SIZE / 2;
+        // Three times what the queue can hold, reusing the chains.
+        const NUM_REQUESTS: u16 = QUEUE_SIZE * 3;
+
+        let ex = Executor::new().expect("creating an executor failed");
+        let mem = GuestMemory::new(&[(GuestAddress(0), 4 * 1024 * 1024)])
+            .expect("Creating guest memory failed.");
+        for i in 0..NUM_CHAINS {
+            write_split_chain(&mem, i * 2, &read_request(&mem, i, 0));
+        }
+        // Every entry of the avail ring points at one of the chains, and `idx` is set as if the
+        // ring had wrapped twice more.
+        for slot in 0..QUEUE_SIZE {
+            write_avail_entry(&mem, slot, slot % NUM_CHAINS * 2);
+        }
+        write_u16(&mem, AVAIL_IDX, NUM_REQUESTS);
+
+        let kick_evt = Event::new().unwrap();
+        // `avail_event` shows how far the worker has popped.
+        let features = 1 << VIRTIO_RING_F_EVENT_IDX;
+        let queue = activate_queue(
+            &mem,
+            QUEUE_SIZE,
+            features,
+            &kick_evt,
+            Interrupt::new_for_test(),
+        );
+        let disk_state = Rc::new(AsyncRwLock::new(test_disk(&ex, 0x10000)));
+        let mut poll_timer = test_timer(&ex);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let worker = start_worker(&ex, &disk_state, queue, &kick_evt, stop_rx);
+
+        let test = async {
+            // Keeps the requests in flight until the test has checked how many were popped.
+            let blocked = disk_state.lock().await;
+
+            let driver = async {
+                // The worker checks the queue when it starts.
+                wait_for(&mut poll_timer, "requests to be popped", || {
+                    read_u16(&mem, avail_event(QUEUE_SIZE)) != 0
+                })
+                .await;
+                assert_eq!(read_u16(&mem, avail_event(QUEUE_SIZE)), QUEUE_SIZE);
+
+                // The rest are popped as the first ones complete.
+                drop(blocked);
+                wait_for(&mut poll_timer, "all requests to be used", || {
+                    read_u16(&mem, USED_IDX) == NUM_REQUESTS
+                })
+                .await;
+
+                stop_tx.send(()).unwrap();
+            };
+
+            futures::future::join(worker, driver).await
+        };
+
+        let (queue, ()) = ex.run_until(test).expect("running executor failed");
+        assert_eq!(queue.next_avail_to_process(), NUM_REQUESTS);
+    }
+
     #[test]
     fn reset_and_reactivate_single_worker() {
         reset_and_reactivate(false, None);
