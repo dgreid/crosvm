@@ -16,12 +16,9 @@ use thiserror::Error as ThisError;
 cfg_if::cfg_if! {
     if #[cfg(all(feature = "log_format", target_os = "linux"))] {
         mod formatter;
-        // Syslog starts calling Formatter in the following commit.
-        #[allow(unused_imports)]
         pub(in crate::syslog) use formatter::Formatter;
     } else if #[cfg(not(feature = "log_format"))] {
         mod stub;
-        #[allow(unused_imports)]
         pub(in crate::syslog) use stub::Formatter;
     } else {
         compile_error!("The \"log_format\" feature is only supported on Linux.");

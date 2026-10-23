@@ -42,11 +42,9 @@
 
 use std::fmt::Display;
 use std::io;
-use std::io::Write;
 use std::sync::LazyLock;
 use std::sync::MutexGuard;
 
-use chrono::Utc;
 pub use env_logger::fmt;
 pub use env_logger::{self};
 pub use log::*;
@@ -60,7 +58,6 @@ use crate::descriptor::AsRawDescriptor;
 use crate::platform::syslog::PlatformSyslog;
 use crate::platform::RawDescriptor;
 
-#[allow(dead_code)]
 mod log_format;
 pub use log_format::Error as FormatError;
 
@@ -222,6 +219,12 @@ pub struct LogArgs {
     ///
     /// Example: `off`, `trace`, `trace,crosvm=error,base::syslog=debug`
     pub filter: String,
+    /// Optional format for stderr and pipe output. Platform syslog output has a fixed format.
+    ///
+    /// `None` keeps the default UTC line. A string is parsed only when the `log_format` feature
+    /// is enabled; otherwise initialization returns an error.
+    #[serde(default)]
+    pub log_format: Option<String>,
     /// If set to true will duplicate output to stderr
     pub stderr: bool,
     /// TAG to use for syslog output
@@ -236,6 +239,7 @@ impl Default for LogArgs {
     fn default() -> Self {
         Self {
             filter: String::from("info"),
+            log_format: None,
             stderr: true,
             proc_name: String::from("crosvm"),
             syslog: true,
@@ -266,21 +270,11 @@ impl State {
         let mut builder = env_filter::Builder::new();
         builder.parse(&cfg.log_args.filter);
         let filter = builder.build();
+        let formatter = log_format::Formatter::new(cfg.log_args.log_format.as_deref())?;
 
         let create_formatted_builder = || {
             let mut builder = env_logger::Builder::new();
-
-            // Output log lines w/ local ISO 8601 timestamps.
-            builder.format(|buf, record| {
-                writeln!(
-                    buf,
-                    "[{} {:5} {}] {}",
-                    Utc::now().format("%Y-%m-%dT%H:%M:%S%.9f%:z"),
-                    record.level(),
-                    record.module_path().unwrap_or("<missing module path>"),
-                    record.args()
-                )
-            });
+            formatter.install(&mut builder);
             builder
         };
 
