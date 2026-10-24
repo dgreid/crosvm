@@ -60,6 +60,10 @@ use crate::descriptor::AsRawDescriptor;
 use crate::platform::syslog::PlatformSyslog;
 use crate::platform::RawDescriptor;
 
+#[allow(dead_code)]
+mod log_format;
+pub use log_format::Error as FormatError;
+
 /// The priority (i.e. severity) of a syslog message.
 ///
 /// See syslog man pages for information on their semantics.
@@ -154,6 +158,9 @@ pub enum Error {
     /// Error while attempting to connect socket.
     #[error("failed to connect socket: {0}")]
     Connect(io::Error),
+    /// The log format string could not be applied.
+    #[error(transparent)]
+    Format(#[from] FormatError),
     /// There was an error using `open` to get the lowest file descriptor.
     #[error("failed to get lowest file descriptor: {0}")]
     GetLowestFd(io::Error),
