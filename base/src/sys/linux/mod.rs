@@ -23,6 +23,8 @@ mod descriptor;
 mod event;
 mod file;
 mod file_traits;
+#[cfg(feature = "log_format")]
+pub mod log_format;
 mod mmap;
 mod net;
 mod notifiers;

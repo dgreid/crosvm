@@ -9,6 +9,7 @@ license = "BSD-3-Clause"
 workspace = true
 
 [features]
+log_format = []
 proto_tube = ["protobuf"]
 seccomp_trace = []
 
