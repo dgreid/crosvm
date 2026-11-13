@@ -1,0 +1,179 @@
+diff --git i/lib/python/villain/vmm.py w/lib/python/villain/vmm.py
+index 63b2fcdd..2b8a6d5a 100644
+--- i/lib/python/villain/vmm.py
++++ w/lib/python/villain/vmm.py
+@@ -685,7 +685,140 @@ class OpenVmm(VmmBackend):
+         return cmd
+ 
+ 
+-_VMM_BACKENDS = [CloudHypervisor, Qemu, QemuMicrovm, OpenVmm]
++class Crosvm(VmmBackend):
++    """crosvm, booted via Linux direct boot with virtio PCI devices.
++
++    Runner output rides on the legacy 8250 UART at ttyS0 so the
++    virtio-console device stays free for the console tests. Every device
++    runs in the main process (--disable-sandbox), so a device worker
++    panic takes down the VMM and surfaces as a FAIL rather than being
++    hidden inside a jailed child process.
++
++    virtio-fs and virtio-9p use crosvm's built-in --shared-dir devices
++    rather than an external vhost-user daemon. Networking needs
++    persistent, user owned TAP interfaces; list them comma separated in
++    VV_CROSVM_TAPS (create them with `ip tuntap add NAME mode tap
++    multi_queue user $USER`). Without taps the net device is omitted and
++    net tests SKIP. crosvm has no virtio-mem, virtio-watchdog, virtio-rtc
++    or standalone virtio-iommu device.
++    """
++    name = "crosvm"
++    console_device = "ttyAMA0" if platform.machine() == "aarch64" else "ttyS0"
++    mmio_transport = False
++    _cid_lock = threading.Lock()
++    _cid_counter = 100000 + (os.getpid() % 100000) * 16
++    _tap_lock = threading.Lock()
++    _tap_owner = {}
++
++    @classmethod
++    def _next_cid(cls):
++        with cls._cid_lock:
++            cls._cid_counter += 1
++            return cls._cid_counter
++
++    @classmethod
++    def _tap_for_thread(cls):
++        """Hand each runner thread its own persistent tap from the pool."""
++        taps = [t for t in os.environ.get("VV_CROSVM_TAPS", "").split(",") if t]
++        if not taps:
++            return None
++        ident = threading.get_ident()
++        with cls._tap_lock:
++            if ident in cls._tap_owner:
++                return cls._tap_owner[ident]
++            used = set(cls._tap_owner.values())
++            for tap in taps:
++                if tap not in used:
++                    cls._tap_owner[ident] = tap
++                    return tap
++        return None
++
++    def build_launch_cmd(self, config: LaunchConfig) -> list[str]:
++        command = [self.binary, "run"]
++        if not os.environ.get("VV_CROSVM_SANDBOX"):
++            command.append("--disable-sandbox")
++        if config.initramfs is not None:
++            command.extend(("--initrd", str(config.initramfs)))
++        if config.cmdline is not None:
++            command.extend(("--params", config.cmdline))
++        command.extend(("--cpus", f"num-cores={config.cpus}",
++                        "--mem", f"size={_mem_mib(config.memory)}"))
++        command.extend(("--serial",
++                        "type=stdout,hardware=serial,num=1,console=true"))
++        command.append(str(config.kernel))
++        return command
++
++    def build_cmd(self, kernel, initramfs, disk_path, cmdline, opts=None):
++        opts = opts or {}
++        cpus = max(opts.get("cpus", 4), 1)
++        mem = opts.get("memory", "512M")
++        net_queues = opts.get("net_queues", 4)
++        packed = opts.get("packed", True)
++        pmem_path = opts.get("pmem_path")
++        fs_socket = opts.get("fs_socket")
++        p9_sharedir = opts.get("p9_sharedir")
++        only = opts.get("fuzz_device")
++
++        def want(dev):
++            return only is None or only == dev
++
++        cmd = self.build_launch_cmd(LaunchConfig(
++            cpus=cpus, memory=mem, kernel=kernel, initramfs=initramfs,
++            cmdline=cmdline))
++        kernel_arg = cmd.pop()
++        if want("blk"):
++            parts = [f"path={disk_path}", "lock=false",
++                     f"packed-queue={'true' if packed else 'false'}"]
++            if opts.get("blk_read_only"):
++                parts.append("ro=true")
++            if opts.get("direct"):
++                parts.append("direct=true")
++            engine = opts.get("io_engine", "default")
++            if engine == "io_uring":
++                parts.append("async-executor=uring")
++            elif engine in ("aio", "sync"):
++                parts.append("async-executor=epoll")
++            cmd += ["--block", ",".join(parts)]
++        if want("net"):
++            tap = self._tap_for_thread()
++            if tap:
++                arg = f"tap-name={tap}"
++                if net_queues > 1:
++                    arg += f",vq-pairs={net_queues}"
++                cmd += ["--net", arg]
++        if want("console"):
++            cmd += ["--serial", "type=sink,hardware=virtio-console,num=1"]
++        if want("vsock") and opts.get("vsock_enabled", True):
++            cmd += ["--vsock", f"cid={self._next_cid()}"]
++        if not want("balloon"):
++            cmd += ["--no-balloon"]
++        if not want("rng"):
++            cmd += ["--no-rng"]
++        if want("pmem") and pmem_path:
++            cmd += ["--pmem", f"path={pmem_path}"]
++        if want("sound"):
++            cmd += ["--virtio-snd", "backend=null"]
++        if want("fs") and fs_socket:
++            # The runner spawned virtiofsd for us; prefer it when present.
++            cmd += ["--vhost-user", f"type=fs,socket={fs_socket}"]
++        elif want("fs") and opts.get("fs_sharedir"):
++            cmd += ["--shared-dir",
++                    f"{opts['fs_sharedir']}:vvfs:type=fs:cache=never"]
++        if want("p9") and p9_sharedir:
++            cmd += ["--shared-dir", f"{p9_sharedir}:vv9p:type=p9"]
++        cmd.append(kernel_arg)
++        return cmd
++
++
++def _mem_mib(mem_str):
++    m = re.fullmatch(r"(\d+)\s*([KMGkmg])?", mem_str.strip())
++    if not m:
++        raise ValueError(f"Cannot parse memory size {mem_str!r}")
++    val, suffix = int(m.group(1)), (m.group(2) or "M").upper()
++    return {"K": val // 1024, "M": val, "G": val * 1024}[suffix]
++
++
++_VMM_BACKENDS = [CloudHypervisor, Qemu, QemuMicrovm, OpenVmm, Crosvm]
+ 
+ 
+ def detect_vmm(vmm_path):
+@@ -697,6 +830,8 @@ def detect_vmm(vmm_path):
+         return Qemu(vmm_path)
+     if "openvmm" in base:
+         return OpenVmm(vmm_path)
++    if "crosvm" in base:
++        return Crosvm(vmm_path)
+     names = ", ".join(cls.name for cls in _VMM_BACKENDS)
+     sys.exit(f"Cannot detect VMM type from '{base}'. "
+              f"Supported: {names}")
+diff --git i/run w/run
+index b40f6d30..d56b720b 100755
+--- i/run
++++ w/run
+@@ -654,6 +654,10 @@ def run_test(backend, kernel, test_name, timeout, verbose=0, console=False,
+                     break
+                 time.sleep(0.02)
+             opts["fs_socket"] = fs_socket
++        elif backend.name == "crosvm":
++            # crosvm has a built-in virtio-fs device; hand it a share.
++            fs_sharedir = tempfile.mkdtemp(prefix="vvfs.")
++            opts["fs_sharedir"] = fs_sharedir
+     p9_sharedir = None
+     if test_names[0].upper().startswith("PLAN9"):
+         p9_sharedir = tempfile.mkdtemp(prefix="vvp9.")
+@@ -1605,7 +1609,7 @@ def main():
+     vm_opts = {
+         "initramfs": args.initramfs,
+         "cpus": args.cpus if args.cpus else (
+-            4 if backend.name in ("ch", "openvmm") else 1),
++            4 if backend.name in ("ch", "openvmm", "crosvm") else 1),
+         "memory": args.memory,
+         "blk_queues": args.blk_queues,
+         "net_queues": args.net_queues,
