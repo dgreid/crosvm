@@ -143,7 +143,7 @@ impl VirtioMmioDevice {
         self.interrupt = Some(interrupt.clone());
 
         // Use ready queues and their events.
-        let queues = self
+        let queues = match self
             .queues
             .iter_mut()
             .zip(self.queue_evts.iter())
@@ -158,11 +158,21 @@ impl VirtioMmioDevice {
                         .context("failed to activate queue")?,
                 ))
             })
-            .collect::<anyhow::Result<BTreeMap<usize, Queue>>>()?;
+            .collect::<anyhow::Result<BTreeMap<usize, Queue>>>()
+        {
+            Ok(queues) => queues,
+            Err(e) => {
+                error!("{} failed to activate queues: {:#}", self.debug_label(), e);
+                self.driver_status |= VIRTIO_CONFIG_S_NEEDS_RESET as u8;
+                interrupt.signal_config_changed();
+                return Ok(());
+            }
+        };
 
-        if let Err(e) = self.device.activate(mem, interrupt, queues) {
+        if let Err(e) = self.device.activate(mem, interrupt.clone(), queues) {
             error!("{} activate failed: {:#}", self.debug_label(), e);
             self.driver_status |= VIRTIO_CONFIG_S_NEEDS_RESET as u8;
+            interrupt.signal_config_changed();
         } else {
             self.device_activated = true;
         }

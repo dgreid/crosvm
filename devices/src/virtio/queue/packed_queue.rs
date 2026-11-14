@@ -140,7 +140,7 @@ impl PackedQueue {
         let driver_area = config.avail_ring();
         let device_area = config.used_ring();
 
-        // Validate addresses and queue size to ensure that address calculation won't overflow.
+        // Validate addresses and queue size don't overflow and are within guest memory.
         let ring_sizes = Self::area_sizes(size, desc_table, driver_area, device_area);
         let rings = ring_sizes.iter().zip(vec![
             "descriptor table",
@@ -152,6 +152,15 @@ impl PackedQueue {
             if addr.checked_add(*size as u64).is_none() {
                 bail!(
                     "virtio queue {} goes out of bounds: start:0x{:08x} size:0x{:08x}",
+                    name,
+                    addr.offset(),
+                    size,
+                );
+            }
+            // Zero length is safe as there is nothing to map.
+            if *size > 0 && !mem.is_valid_range(*addr, *size as u64) {
+                bail!(
+                    "virtio queue {} is not in guest memory: start:0x{:08x} size:0x{:08x}",
                     name,
                     addr.offset(),
                     size,
@@ -239,6 +248,7 @@ impl PackedQueue {
     /// device that the descriptor table is ready to be processed.
     fn set_avail_event(&mut self, event: PackedDescEvent) {
         fence(Ordering::SeqCst);
+        // This unwrap cannot fail since `new` checked this area is in `self.mem`.
         self.mem
             .write_obj_at_addr_volatile(event, self.device_event_suppression)
             .unwrap();
@@ -250,6 +260,7 @@ impl PackedQueue {
     fn get_driver_event(&self) -> PackedDescEvent {
         fence(Ordering::SeqCst);
 
+        // This unwrap cannot fail since `new` checked this area is in `self.mem`.
         let desc: PackedDescEvent = self
             .mem
             .read_obj_from_addr_volatile(self.driver_event_suppression)
@@ -318,6 +329,11 @@ impl PackedQueue {
         // Get a `VolatileSlice` covering the descriptor table. This ensures that the raw pointers
         // generated below point into valid `GuestMemory` regions.
         let desc_table_size = size_of::<PackedDesc>() * usize::from(self.size);
+        // A zero-size queue has nothing to map. `new` does not check that case.
+        if desc_table_size == 0 {
+            return;
+        }
+        // This unwrap cannot fail since `new` checked this table is in `self.mem`.
         let desc_table_vslice = self
             .mem
             .get_slice_at_addr(self.desc_table, desc_table_size)
@@ -518,5 +534,49 @@ mod tests {
         let chain = queue.peek().unwrap();
         assert_eq!(chain.count, 2);
         assert_eq!(chain.id, Some(1));
+    }
+
+    fn activate_packed(
+        mem: &GuestMemory,
+        config: &mut QueueConfig,
+        features: u64,
+    ) -> anyhow::Result<Queue> {
+        config.ack_features(features);
+        config.set_ready(true);
+        config.activate(mem, Event::new().unwrap(), Interrupt::new_for_test())
+    }
+
+    #[test]
+    fn rejects_ring_areas_outside_guest_memory() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let features = (1u64 << VIRTIO_RING_F_EVENT_IDX) | (1u64 << VIRTIO_F_RING_PACKED);
+        let mut config = QueueConfig::new(QUEUE_SIZE, features);
+        // The table starts in RAM but does not fit, and neither event area is in RAM.
+        config.set_desc_table(GuestAddress(
+            GUEST_MEMORY_SIZE - size_of::<PackedDesc>() as u64,
+        ));
+        config.set_avail_ring(GuestAddress(GUEST_MEMORY_SIZE));
+        config.set_used_ring(GuestAddress(GUEST_MEMORY_SIZE));
+
+        let err = activate_packed(&mem, &mut config, features).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("descriptor table is not in guest memory"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_ring_area_overflow() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), GUEST_MEMORY_SIZE)]).unwrap();
+        let features = 1u64 << VIRTIO_F_RING_PACKED;
+        let mut config = QueueConfig::new(QUEUE_SIZE, features);
+        config.set_desc_table(GuestAddress(u64::MAX - 8));
+        config.set_avail_ring(GuestAddress(DRIVER_EVENT_OFFSET));
+        config.set_used_ring(GuestAddress(DEVICE_EVENT_OFFSET));
+
+        let err = activate_packed(&mem, &mut config, features).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("descriptor table goes out of bounds"), "{msg}");
     }
 }
