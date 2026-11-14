@@ -21,7 +21,20 @@ against `origin/main` `57b80f313`.
 
 ## crosvm
 
-### 1. [HIGH] Packed virtqueue: a guest can panic the device with a chain that ends early
+### 1. [HIGH] [DONE] Packed virtqueue: a guest can panic the device with a chain that ends early
+
+Done. crosvm branch `villain-packed-chain-id` (worktree
+`~/src/crosvm-packed-chain`, on `master` 6ef7f7bac):
+
+- 55456dfd4 "devices: virtio: reject truncated packed chains": the fix.
+- b6a6d0379 "devices: virtio: handle packed rings outside RAM": step 2.3,
+  the event suppression and descriptor table `unwrap()`s.
+
+Reproducers in `~/src/crosvm-guest-repros`: `01-packed-chain-no-id`
+(P0021, P0048) and `01-packed-ring-outside-ram` (step 2.3). Step 2.2 was
+left out on review: the `add_used` id `expect()` stays, since the
+iterator fix means a guest can't reach it. A full run has P0004, P0021 and
+P0048 fixed and no other P or B group changes.
 
 ```
 In the crosvm repository, fix a guest-triggerable panic in the packed
