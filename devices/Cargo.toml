@@ -8,6 +8,9 @@ license = "BSD-3-Clause"
 [lints]
 workspace = true
 
+[lints]
+workspace = true
+
 [features]
 android_display = ["gpu_display/android_display"]
 android_display_stub = ["gpu_display/android_display_stub"]
